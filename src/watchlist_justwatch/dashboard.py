@@ -10,6 +10,7 @@ from .state import StateDoc
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
 FREE_TIER_COUNTRIES = {"AU", "GB", "US"}
 ALWAYS_MAIN_BRANDS = {"Netflix", "HBO Max"}
+TOP_COUNTRIES_LIMIT = 10
 
 
 def _classify(brand: str, country: str, monetization_types: set[str], config: dict[str, CountryConfig],
@@ -47,6 +48,26 @@ def _select_main_brands(
     return sorted(main, key=lambda b: (priority.get(b, 1), b))
 
 
+def _top_have_countries(
+    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], limit: int = TOP_COUNTRIES_LIMIT
+) -> list[dict]:
+    """Countries ranked by how many watchlist films have a "have" offer
+    there — quick-filter shortcuts for the films tab."""
+    counts: dict[str, int] = defaultdict(int)
+    for film in state.films.values():
+        countries_with_have = {
+            country
+            for brand, by_country in group_offers_by_brand_and_country(film.offers).items()
+            for country, _monetization_types in by_country.items()
+            if is_have_anywhere(brand, country, config, global_subscriptions)
+        }
+        for country in countries_with_have:
+            counts[country] += 1
+
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return [{"code": code, "name": country_name(code), "count": count} for code, count in ranked]
+
+
 def _film_row(
     film, main_brands: set[str], config: dict[str, CountryConfig], global_subscriptions: list[str],
     revisitable: set[str]
@@ -54,7 +75,7 @@ def _film_row(
     by_brand_country = group_offers_by_brand_and_country(film.offers)
 
     main_availability: dict[str, list[dict]] = {}
-    other_services: list[str] = []
+    other_services: list[dict] = []
     any_have = False
     all_countries: set[str] = set()
 
@@ -68,21 +89,25 @@ def _film_row(
             if brand in main_brands:
                 entries.append({"country": country, "classification": classification})
             else:
-                other_services.append(f"{brand} ({country})")
+                other_services.append({"brand": brand, "country": country})
         if entries:
             entries.sort(key=lambda e: (e["classification"] != "have", e["country"]))
             main_availability[brand] = entries
+
+    other_services.sort(key=lambda o: (o["brand"], o["country"]))
 
     return {
         "title": film.title,
         "year": film.year,
         "slug": film.slug,
         "rating": film.rating,
+        "poster_url": film.poster_url,
+        "director": ", ".join(film.director) if film.director else None,
         "any_service": bool(by_brand_country),
         "have_service": any_have,
         "coverage_countries": len(all_countries),
         "main": main_availability,
-        "other_services": sorted(other_services),
+        "other_services": other_services,
     }
 
 
@@ -137,6 +162,8 @@ def _country_rows(
             services.sort(key=lambda s: (s["classification"] != "have", s["brand"]))
             by_country[country].append({
                 "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
+                "poster_url": film.poster_url,
+                "director": ", ".join(film.director) if film.director else None,
                 "services": services,
                 "has_have": any(s["classification"] == "have" for s in services),
             })
@@ -173,6 +200,7 @@ def build_dashboard_data(
     return {
         "last_run_at": state.last_run_at,
         "main_brands": main_brands,
+        "top_countries": _top_have_countries(state, config, global_subscriptions),
         "films": rows,
         "services": _service_rows(state, config, global_subscriptions, film_has_have),
         "countries": _country_rows(state, config, global_subscriptions, revisitable),
@@ -190,41 +218,104 @@ _TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Watchlist streaming dashboard</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px;
-         background: #fafaf8; color: #111; }
-  h1 { font-size: 20px; font-weight: 500; margin: 0 0 4px; }
-  .meta { color: #666; font-size: 13px; margin-bottom: 16px; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
-  .tab-btn { padding: 6px 14px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;
-             font-size: 13px; }
-  .tab-btn.active { background: #222; color: #fff; border-color: #222; }
-  .controls { display: flex; gap: 14px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; font-size: 13px; }
-  input[type=text] { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; width: 220px; }
-  label { color: #333; display: flex; align-items: center; gap: 6px; cursor: pointer; }
-  .legend { color: #666; }
-  .table-wrap { overflow: auto; max-height: 78vh; border: 1px solid #ddd; border-radius: 8px; background: #fff; }
-  table { border-collapse: collapse; font-size: 13px; table-layout: fixed; }
-  th, td { padding: 6px 8px; border-bottom: 1px solid #eee; border-right: 1px solid #f2f2f2; text-align: left;
-           vertical-align: top; overflow: hidden; }
-  th { position: sticky; top: 0; background: #f4f4f2; cursor: pointer; user-select: none; z-index: 2; }
-  th.sticky-col, td.sticky-col { position: sticky; left: 0; background: #fff; z-index: 1; }
-  th.sticky-col { z-index: 3; background: #f4f4f2; }
-  td.yes { color: #0a7a2f; font-weight: 500; }
-  td.no { color: #b3352a; }
-  .cell-scroll { max-height: 2.6em; overflow-y: auto; overflow-wrap: break-word; }
-  a.film-link { color: inherit; text-decoration: none; border-bottom: 1px dotted #999; }
-  a.film-link:hover { border-bottom-style: solid; }
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa;
+    --surface: #ffffff;
+    --text: #14171a;
+    --text-muted: #6b7280;
+    --text-faint: #9aa1a9;
+    --hairline: rgba(20, 23, 26, 0.08);
+    --hairline-strong: rgba(20, 23, 26, 0.14);
+    --accent: #1f5f5b;
+    --accent-soft: #e7f1f0;
+    --shadow: 0 1px 2px rgba(20, 23, 26, 0.04), 0 8px 24px rgba(20, 23, 26, 0.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    margin: 0; padding: 32px 36px 60px;
+    background: var(--bg); color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 21px; font-weight: 600; margin: 0 0 3px; letter-spacing: -0.01em; }
+  .meta { color: var(--text-muted); font-size: 13px; margin-bottom: 20px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 18px; }
+  .tab-btn {
+    padding: 7px 16px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
+    cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.15s, color 0.15s;
+  }
+  .tab-btn:hover { background: var(--hairline); }
+  .tab-btn.active { background: var(--text); color: var(--surface); }
+  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; font-size: 13px; }
+  .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .quick-filters .hint { color: var(--text-faint); font-size: 12px; margin-right: 2px; }
+  input[type=text] {
+    padding: 9px 13px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 13px; width: 210px;
+    background: var(--surface); color: var(--text); outline: none; transition: border-color 0.15s;
+  }
+  input[type=text]:focus { border-color: var(--accent); }
+  label { color: var(--text-muted); display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
+  .table-wrap {
+    overflow: auto; max-height: 76vh; border-radius: 14px; background: var(--surface);
+    box-shadow: var(--shadow); border: 1px solid var(--hairline);
+  }
+  table { border-collapse: collapse; font-size: 13px; table-layout: fixed; width: 100%; }
+  th, td {
+    padding: 10px 14px; border-bottom: 1px solid var(--hairline); text-align: left;
+    vertical-align: middle; overflow: hidden;
+  }
+  th {
+    position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; z-index: 2;
+    font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
+    border-bottom: 1px solid var(--hairline-strong);
+  }
+  th:hover { color: var(--text); }
+  tbody tr { transition: background 0.1s; }
+  tbody tr:hover td { background: rgba(20, 23, 26, 0.02); }
+  th.sticky-col, td.sticky-col { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+  th.sticky-col { z-index: 3; }
+  tbody tr:hover td.sticky-col { background: #f7f8f7; }
+  td.yes { color: #0f7a4a; font-weight: 600; }
+  td.no { color: var(--text-faint); }
+  .cell-scroll { max-height: 3.2em; overflow-y: auto; overflow-wrap: break-word; }
+  a.film-link { color: inherit; text-decoration: none; }
+  a.film-link:hover { color: var(--accent); }
   section.view { display: none; }
   section.view.active { display: block; }
-  select { padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
-  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; margin: 1px 4px 1px 0; }
-  .badge-have { background: #e2f4e6; color: #0a7a2f; }
-  .badge-could_get_again { background: #f0e6fb; color: #6a3fa0; }
-  .badge-free { background: #e5f0fb; color: #1a5fa8; }
-  .badge-subscription { background: #f3f3f0; color: #555; }
-  .filter-toggle { padding: 3px 10px; border-radius: 10px; font-size: 12px; cursor: pointer; border: 1px solid transparent; }
-  .filter-toggle.off { opacity: 0.35; }
+  select {
+    padding: 8px 12px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 13px;
+    background: var(--surface); color: var(--text);
+  }
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 500;
+    margin: 1px 4px 1px 0; white-space: nowrap;
+  }
+  .badge-have { background: #e4f3ea; color: #0f7a4a; }
+  .badge-could_get_again { background: #efe7fa; color: #6d3fb8; }
+  .badge-free { background: #e6f1fb; color: #1c68b0; }
+  .badge-subscription { background: #f0f0ee; color: #6b6b68; }
+  .filter-toggle { cursor: pointer; border: 1.5px solid transparent; transition: opacity 0.15s; }
+  .filter-toggle.off { opacity: 0.3; }
+  .quick-country {
+    padding: 5px 13px; border-radius: 999px; font-size: 12.5px; font-weight: 500; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text-muted);
+    transition: all 0.15s;
+  }
+  .quick-country:hover { border-color: var(--accent); color: var(--accent); }
+  .quick-country.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .quick-country .count { color: inherit; opacity: 0.6; margin-left: 4px; }
+  .film-cell { display: flex; align-items: center; gap: 11px; }
+  .poster-thumb {
+    width: 38px; height: 56px; object-fit: cover; border-radius: 5px; flex-shrink: 0;
+    background: var(--hairline); box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }
+  .poster-placeholder {
+    width: 38px; height: 56px; border-radius: 5px; flex-shrink: 0; background: var(--hairline);
+  }
+  .film-meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .film-title { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .film-sub { font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -241,6 +332,7 @@ _TEMPLATE = """<!DOCTYPE html>
     <input type="text" id="search" placeholder="Search films...">
     <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
   </div>
+  <div class="quick-filters" id="quickCountryFilters"></div>
   <div class="table-wrap"><table id="filmsGrid"><thead></thead><tbody></tbody></table></div>
 </section>
 
@@ -279,6 +371,17 @@ function switchTab(name) {
   });
 }
 
+function filmCellHtml(row) {
+  const year = row.year ? ' (' + row.year + ')' : '';
+  const poster = row.poster_url
+    ? '<img class="poster-thumb" loading="lazy" src="' + row.poster_url + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
+    : '<div class="poster-placeholder"></div>';
+  const sub = row.director ? '<span class="film-sub">' + row.director.replace(/</g, '&lt;') + '</span>' : '';
+  return '<div class="film-cell">' + poster +
+    '<div class="film-meta"><a class="film-link film-title" target="_blank" href="https://letterboxd.com/film/' +
+    row.slug + '/">' + row.title.replace(/</g, '&lt;') + year + '</a>' + sub + '</div></div>';
+}
+
 function badgeHtml(entries, brandLabel) {
   return entries.map(e => {
     const label = brandLabel ? brandLabel : e.country;
@@ -289,7 +392,7 @@ function badgeHtml(entries, brandLabel) {
 // ---------- Films table ----------
 
 const filmCols = [
-  { key: 'title', label: 'Film', width: 260, sort: r => r.title.toLowerCase(), dir: 1 },
+  { key: 'title', label: 'Film', width: 300, sort: r => r.title.toLowerCase(), dir: 1 },
   { key: 'year', label: 'Year', width: 60, sort: r => r.year || 0, dir: -1 },
   { key: 'rating', label: 'Rating', width: 60, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
   { key: 'any_service', label: 'Any service?', width: 90, sort: r => r.any_service ? 1 : 0, dir: -1 },
@@ -298,6 +401,28 @@ const filmCols = [
 ];
 
 let filmSortKey = 'title', filmSortDir = 1;
+let quickCountry = null;
+
+function renderQuickCountryFilters() {
+  const container = document.getElementById('quickCountryFilters');
+  container.innerHTML = '';
+  const hint = document.createElement('span');
+  hint.className = 'hint';
+  hint.textContent = 'Focus on:';
+  container.appendChild(hint);
+  DATA.top_countries.forEach(c => {
+    const span = document.createElement('span');
+    span.className = 'quick-country';
+    span.innerHTML = c.name + '<span class="count">' + c.count + '</span>';
+    span.addEventListener('click', () => {
+      quickCountry = (quickCountry === c.code) ? null : c.code;
+      renderQuickCountryFilters();
+      renderFilmsRows();
+    });
+    if (quickCountry === c.code) span.classList.add('active');
+    container.appendChild(span);
+  });
+}
 
 function renderFilmsHead() {
   const thead = document.querySelector('#filmsGrid thead');
@@ -348,14 +473,31 @@ function renderFilmsRows() {
   rows.forEach(row => {
     if (q && !row.title.toLowerCase().includes(q)) return;
     if (notHaveOnly && row.have_service) return;
+
+    const visibleMain = {};
+    let anyVisible = false;
+    DATA.main_brands.forEach(brand => {
+      const entries = row.main[brand];
+      if (!entries) return;
+      const filtered = quickCountry ? entries.filter(e => e.country === quickCountry) : entries;
+      if (filtered.length) {
+        visibleMain[brand] = filtered;
+        anyVisible = true;
+      }
+    });
+    const visibleOther = quickCountry
+      ? row.other_services.filter(o => o.country === quickCountry)
+      : row.other_services;
+    if (visibleOther.length) anyVisible = true;
+
+    if (quickCountry && !anyVisible) return;
+
     const tr = document.createElement('tr');
 
     filmCols.forEach((col, i) => {
       const td = document.createElement('td');
       if (col.key === 'title') {
-        const year = row.year ? ' (' + row.year + ')' : '';
-        td.innerHTML = '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' +
-          row.slug + '/">' + row.title.replace(/</g, '&lt;') + year + '</a>';
+        td.innerHTML = filmCellHtml(row);
       } else if (col.key === 'rating') {
         td.textContent = row.rating == null ? '' : row.rating.toFixed(2);
       } else if (col.key === 'any_service' || col.key === 'have_service') {
@@ -371,7 +513,7 @@ function renderFilmsRows() {
 
     DATA.main_brands.forEach(brand => {
       const td = document.createElement('td');
-      const entries = row.main[brand];
+      const entries = visibleMain[brand];
       if (entries) {
         const inner = document.createElement('div');
         inner.classList.add('cell-scroll');
@@ -384,7 +526,7 @@ function renderFilmsRows() {
     const otherTd = document.createElement('td');
     const otherInner = document.createElement('div');
     otherInner.classList.add('cell-scroll');
-    otherInner.textContent = row.other_services.join(', ');
+    otherInner.textContent = visibleOther.map(o => o.brand + ' (' + o.country + ')').join(', ');
     otherTd.appendChild(otherInner);
     tr.appendChild(otherTd);
 
@@ -396,6 +538,7 @@ function renderFilmsRows() {
 document.getElementById('search').addEventListener('input', renderFilmsRows);
 document.getElementById('notHaveOnly').addEventListener('change', renderFilmsRows);
 
+renderQuickCountryFilters();
 renderFilmsHead();
 renderFilmsRows();
 
@@ -493,7 +636,7 @@ renderServicesRows();
 // ---------- By VPN country ----------
 
 const countryCols = [
-  { key: 'title', label: 'Film', width: 280, sort: r => r.title.toLowerCase(), dir: 1 },
+  { key: 'title', label: 'Film', width: 300, sort: r => r.title.toLowerCase(), dir: 1 },
   { key: 'year', label: 'Year', width: 70, sort: r => r.year || 0, dir: -1 },
   { key: 'rating', label: 'Rating', width: 70, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
   { key: 'services', label: 'Services', width: 480 },
@@ -585,9 +728,7 @@ function renderCountryRows() {
     countryCols.forEach((col, i) => {
       const td = document.createElement('td');
       if (col.key === 'title') {
-        const year = row.year ? ' (' + row.year + ')' : '';
-        td.innerHTML = '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' +
-          row.slug + '/">' + row.title.replace(/</g, '&lt;') + year + '</a>';
+        td.innerHTML = filmCellHtml(row);
       } else if (col.key === 'rating') {
         td.textContent = row.rating == null ? '' : row.rating.toFixed(2);
       } else if (col.key === 'services') {

@@ -42,7 +42,14 @@ jobs:
           git diff --cached --quiet || git commit -m "Update watchlist state [skip ci]"
           git push
 
+      # The watchlist check, email, and state commit above are the parts that
+      # matter — they've already succeeded by this point. Pages deployment is
+      # a nice-to-have mirror of the dashboard; GitHub's Pages deploy step
+      # occasionally has transient hiccups (e.g. right after first enabling
+      # Pages), and those shouldn't mark the whole daily run as failed or
+      # send an alarming failure email when the actual functionality worked.
       - name: Prepare Pages site
+        continue-on-error: true
         run: |
           mkdir -p _site
           cp dashboard.html _site/index.html
@@ -50,10 +57,16 @@ jobs:
           cp -r icons _site/icons
 
       - name: Upload Pages artifact
+        continue-on-error: true
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment
+        continue-on-error: true
         uses: actions/deploy-pages@v4
+
+      - name: Note Pages deployment status
+        if: steps.deployment.outcome == 'failure'
+        run: echo "::warning::GitHub Pages deployment failed (transient hiccups are common) — the site will just show yesterday's build until the next successful run. Watchlist check, email, and state commit above are unaffected."

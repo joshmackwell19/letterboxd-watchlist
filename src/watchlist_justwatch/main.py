@@ -15,7 +15,7 @@ from .analysis import (
     render_favorite_recommendations,
     render_ranking,
 )
-from .config import load_config, load_favorites, load_revisitable_services
+from .config import load_config, load_favorites, load_global_subscriptions, load_revisitable_services
 from .dashboard import build_dashboard_data, render_dashboard_html
 from .diff import build_report
 from .html_email import render_film_audit_html, render_film_audit_text, render_report_html
@@ -35,6 +35,7 @@ DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
 def run(username: str, config_path: Path, state_path: Path, *, progress: bool = True) -> int:
     config = load_config(config_path)
+    global_subscriptions = load_global_subscriptions(config_path)
     favorites = load_favorites(DEFAULT_FAVORITES_PATH)
     revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
     previous_state = load_state(state_path)
@@ -68,11 +69,11 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         current_state.films[film.slug] = film_state
 
     report = build_report(previous_state, current_state, config)
-    text = render_report(report, favorites, revisitable)
+    text = render_report(report, config, global_subscriptions, revisitable)
 
     if text:
         print(text)
-        html_body = render_report_html(report, favorites, revisitable)
+        html_body = render_report_html(report, config, global_subscriptions, revisitable)
         send_if_configured("Letterboxd Watchlist — new availability", text, html_body=html_body)
     else:
         print("No new availability changes.")
@@ -125,13 +126,14 @@ def main() -> None:
         sys.exit(0)
 
     if args.email_audit:
-        favorites = load_favorites(args.favorites)
+        config = load_config(args.config)
+        global_subscriptions = load_global_subscriptions(args.config)
         revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
         state = load_state(args.state)
-        films = films_not_on_favorite(state, favorites)
+        films = films_not_on_favorite(state, config, global_subscriptions)
         text = render_film_audit_text(films)
-        html_body = render_film_audit_html(films, favorites, revisitable)
-        sent = send_if_configured(f"Letterboxd Watchlist — {len(films)} films not on a favourited service",
+        html_body = render_film_audit_html(films, config, global_subscriptions, revisitable)
+        sent = send_if_configured(f"Letterboxd Watchlist — {len(films)} films not on a service you have",
                                    text, html_body=html_body)
         print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
         sys.exit(0)

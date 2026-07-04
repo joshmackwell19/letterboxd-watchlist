@@ -1,6 +1,7 @@
 from datetime import date
 
 from .availability import bucket_offers
+from .config import CountryConfig
 from .countries import country_name
 from .diff import Report, ReportEntry
 
@@ -46,12 +47,13 @@ def _service_country_lines(entries: list[tuple[str, str]]) -> list[str]:
     ]
 
 
-def _new_film_lines(film, favorites: set[tuple[str, str]], revisitable: set[str]) -> list[str]:
+def _new_film_lines(film, config: dict[str, CountryConfig], global_subscriptions: list[str],
+                     revisitable: set[str]) -> list[str]:
     year = f" ({film.year})" if film.year else ""
     rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
     lines = [f"  {film.title}{year}{rating}", f"    https://letterboxd.com/film/{film.slug}/"]
 
-    buckets = bucket_offers(film.offers, favorites, revisitable)
+    buckets = bucket_offers(film.offers, config, global_subscriptions, revisitable)
     if not any(buckets.values()):
         lines.append("    Not currently streaming (subscription/free) in any tracked country.")
         return lines
@@ -72,7 +74,8 @@ def _new_film_lines(film, favorites: set[tuple[str, str]], revisitable: set[str]
     return lines
 
 
-def render_report(report: Report, favorites: set[tuple[str, str]], revisitable: set[str]) -> str | None:
+def render_report(report: Report, config: dict[str, CountryConfig], global_subscriptions: list[str],
+                   revisitable: set[str]) -> str | None:
     if report.is_empty():
         return None
 
@@ -81,7 +84,7 @@ def render_report(report: Report, favorites: set[tuple[str, str]], revisitable: 
     if report.new_films:
         lines.append("\U0001F3AC New to your watchlist — full availability, all countries")
         for film in report.new_films:
-            lines.extend(_new_film_lines(film, favorites, revisitable))
+            lines.extend(_new_film_lines(film, config, global_subscriptions, revisitable))
             lines.append("")
 
     if report.new_have:

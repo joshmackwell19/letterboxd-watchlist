@@ -2,6 +2,7 @@ import html as html_lib
 from datetime import date
 
 from .availability import bucket_offers
+from .config import CountryConfig
 from .countries import country_name
 from .diff import Report, ReportEntry
 
@@ -36,7 +37,8 @@ def _bucket_lines_html(entries: list[tuple[str, str]]) -> str:
     )
 
 
-def render_film_card_html(film, favorites: set[tuple[str, str]], revisitable: set[str]) -> str:
+def render_film_card_html(film, config: dict[str, CountryConfig], global_subscriptions: list[str],
+                           revisitable: set[str]) -> str:
     year = f" ({film.year})" if film.year else ""
     rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
     poster = (
@@ -47,7 +49,7 @@ def render_film_card_html(film, favorites: set[tuple[str, str]], revisitable: se
     starring = f'<p style="{_STYLE_META}">Starring {_esc(", ".join(film.starring))}</p>' if film.starring else ""
     synopsis = f'<p style="{_STYLE_SYNOPSIS}">{_esc(film.synopsis)}</p>' if film.synopsis else ""
 
-    buckets = bucket_offers(film.offers, favorites, revisitable)
+    buckets = bucket_offers(film.offers, config, global_subscriptions, revisitable)
     buckets_html = ""
     if any(buckets.values()):
         for key, label in _BUCKET_LABELS:
@@ -82,7 +84,8 @@ def _wrap_document(body: str) -> str:
     )
 
 
-def render_report_html(report: Report, favorites: set[tuple[str, str]], revisitable: set[str]) -> str | None:
+def render_report_html(report: Report, config: dict[str, CountryConfig], global_subscriptions: list[str],
+                        revisitable: set[str]) -> str | None:
     if report.is_empty():
         return None
 
@@ -91,7 +94,7 @@ def render_report_html(report: Report, favorites: set[tuple[str, str]], revisita
     if report.new_films:
         body += '<h3 style="font-size:15px;">\U0001F3AC New to your watchlist</h3>'
         for film in report.new_films:
-            body += render_film_card_html(film, favorites, revisitable)
+            body += render_film_card_html(film, config, global_subscriptions, revisitable)
 
     if report.new_have or report.new_free_tier or report.new_possible:
         body += _render_classified_section("✅ Available on a service you have", report.new_have)
@@ -140,21 +143,22 @@ def _render_classified_section(heading: str, entries: list[ReportEntry]) -> str:
     return f'<h3 style="font-size:15px;">{heading}</h3>{lines}'
 
 
-def render_film_audit_html(films: list, favorites: set[tuple[str, str]], revisitable: set[str]) -> str:
+def render_film_audit_html(films: list, config: dict[str, CountryConfig], global_subscriptions: list[str],
+                            revisitable: set[str]) -> str:
     body = (
-        f'<h2 style="font-size:18px; font-weight:500;">Watchlist films not on a favourited service '
+        f'<h2 style="font-size:18px; font-weight:500;">Watchlist films not on a service you have '
         f'({date.today().isoformat()})</h2>'
         f'<p style="font-size:13px; color:#555; margin:0 0 20px;">{len(films)} films from your watchlist '
-        f"aren't currently available on any service you've favourited.</p>"
+        f"aren't currently available on any of your current subscriptions.</p>"
     )
     for film in films:
-        body += render_film_card_html(film, favorites, revisitable)
+        body += render_film_card_html(film, config, global_subscriptions, revisitable)
     return _wrap_document(body)
 
 
 def render_film_audit_text(films: list) -> str:
-    lines = [f"Watchlist films not on a favourited service ({date.today().isoformat()})",
-             f"{len(films)} films aren't currently available on any service you've favourited.", ""]
+    lines = [f"Watchlist films not on a service you have ({date.today().isoformat()})",
+             f"{len(films)} films aren't currently available on any of your current subscriptions.", ""]
     for film in films:
         year = f" ({film.year})" if film.year else ""
         rating = f" — {film.rating:.2f}★" if film.rating is not None else ""

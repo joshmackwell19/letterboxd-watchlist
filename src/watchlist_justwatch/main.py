@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from .analysis import rank_missing_services, render_ranking
 from .config import load_config
+from .dashboard import build_dashboard_data, render_dashboard_html
 from .diff import build_report
 from .justwatch_client import resolve_and_fetch
 from .letterboxd import LetterboxdFetchError, fetch_watchlist
@@ -19,6 +20,7 @@ from .state import StateDoc, get_cached_entry_id, load_state, save_state
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
 DEFAULT_STATE_PATH = Path("data/state.json")
+DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
 
 def run(username: str, config_path: Path, state_path: Path, *, progress: bool = True) -> int:
@@ -48,6 +50,7 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         print("No new availability changes.")
 
     save_state(state_path, current_state)
+    DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(build_dashboard_data(current_state, config)))
     return 0
 
 
@@ -67,12 +70,23 @@ def main() -> None:
                               "live JustWatch availability, then exit")
     parser.add_argument("--year", type=int, help="Disambiguate --similar-to by release year")
     parser.add_argument("--count", type=int, default=8, help="Number of similar films to show")
+    parser.add_argument("--dashboard", action="store_true",
+                         help="Regenerate dashboard.html from already-fetched state (no network calls), then exit")
+    parser.add_argument("--dashboard-path", type=Path, default=DEFAULT_DASHBOARD_PATH)
     args = parser.parse_args()
 
     if args.rank_services:
         config = load_config(args.config)
         state = load_state(args.state)
         print(render_ranking(rank_missing_services(state, config)))
+        sys.exit(0)
+
+    if args.dashboard:
+        config = load_config(args.config)
+        state = load_state(args.state)
+        data = build_dashboard_data(state, config)
+        args.dashboard_path.write_text(render_dashboard_html(data))
+        print(f"Wrote {args.dashboard_path}")
         sys.exit(0)
 
     if args.similar_to:

@@ -216,7 +216,14 @@ _TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Watchlist streaming dashboard</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#1f5f5b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Watchlist">
 <style>
   :root {
     color-scheme: light dark;
@@ -316,6 +323,28 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .film-title { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .film-sub { font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bottom-nav { display: none; }
+  @media (max-width: 700px) {
+    body { padding: 16px 12px 88px; }
+    h1 { font-size: 18px; }
+    .tabs { display: none; }
+    .controls { gap: 8px; }
+    .controls input[type=text] { width: auto; flex: 1 1 130px; }
+    .table-wrap { max-height: none; border-radius: 10px; }
+    .bottom-nav {
+      display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+      background: var(--surface); border-top: 1px solid var(--hairline-strong);
+      padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+      box-shadow: 0 -2px 16px rgba(20, 23, 26, 0.07);
+    }
+    .bottom-nav-btn {
+      flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+      padding: 6px 2px; background: none; border: none; color: var(--text-faint);
+      font-size: 10.5px; font-weight: 500; cursor: pointer;
+    }
+    .bottom-nav-btn.active { color: var(--accent); }
+    .bottom-nav-btn svg { width: 22px; height: 22px; stroke: currentColor; }
+  }
 </style>
 </head>
 <body>
@@ -355,6 +384,33 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="table-wrap"><table id="servicesGrid"><thead></thead><tbody></tbody></table></div>
 </section>
 
+<nav class="bottom-nav">
+  <button class="bottom-nav-btn active" id="nav-films">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+      <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+      <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+      <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+    </svg>
+    Films
+  </button>
+  <button class="bottom-nav-btn" id="nav-services">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
+      <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"></path>
+      <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path>
+    </svg>
+    Services
+  </button>
+  <button class="bottom-nav-btn" id="nav-country">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
+    </svg>
+    Country
+  </button>
+</nav>
+
 <script>
 const DATA = __DATA__;
 
@@ -364,9 +420,13 @@ document.getElementById('meta').textContent =
 document.getElementById('tab-films').addEventListener('click', () => switchTab('films'));
 document.getElementById('tab-services').addEventListener('click', () => switchTab('services'));
 document.getElementById('tab-country').addEventListener('click', () => switchTab('country'));
+document.getElementById('nav-films').addEventListener('click', () => switchTab('films'));
+document.getElementById('nav-services').addEventListener('click', () => switchTab('services'));
+document.getElementById('nav-country').addEventListener('click', () => switchTab('country'));
 function switchTab(name) {
   ['films', 'services', 'country'].forEach(n => {
     document.getElementById('tab-' + n).classList.toggle('active', n === name);
+    document.getElementById('nav-' + n).classList.toggle('active', n === name);
     document.getElementById('view-' + n).classList.toggle('active', n === name);
   });
 }

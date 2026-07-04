@@ -38,9 +38,15 @@ def build_report(previous_state: StateDoc, current_state: StateDoc, config: dict
 
     for slug, current_film in current_state.films.items():
         previous_film = previous_state.films.get(slug)
+        is_new_addition = previous_film is None and not is_first_run
 
-        if previous_film is None and not is_first_run:
+        if is_new_addition:
             report.new_films.append(current_film)
+            # Its dedicated section above already gives the full breakdown —
+            # don't also repeat it piecemeal in the classified sections below.
+            if current_film.confidence in ("unmatched", "low_confidence"):
+                report.unmatched.append(current_film)
+            continue
 
         new_offers = diff_film_offers(previous_film, current_film)
         for offer in new_offers:

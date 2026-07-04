@@ -19,6 +19,41 @@ ALL_JUSTWATCH_COUNTRIES: frozenset[str] = frozenset({
 
 QUALIFYING_MONETIZATION_TYPES: frozenset[str] = frozenset({"FLATRATE", "ADS", "FREE"})
 
+COUNTRY_NAMES: dict[str, str] = {
+    "AD": "Andorra", "AE": "United Arab Emirates", "AG": "Antigua and Barbuda", "AL": "Albania",
+    "AR": "Argentina", "AT": "Austria", "AU": "Australia", "AZ": "Azerbaijan",
+    "BA": "Bosnia and Herzegovina", "BB": "Barbados", "BE": "Belgium", "BG": "Bulgaria",
+    "BH": "Bahrain", "BM": "Bermuda", "BO": "Bolivia", "BR": "Brazil", "BS": "Bahamas",
+    "BY": "Belarus", "BZ": "Belize", "CA": "Canada", "CH": "Switzerland", "CL": "Chile",
+    "CO": "Colombia", "CR": "Costa Rica", "CY": "Cyprus", "CZ": "Czech Republic",
+    "DE": "Germany", "DK": "Denmark", "DO": "Dominican Republic", "DZ": "Algeria",
+    "EC": "Ecuador", "EE": "Estonia", "EG": "Egypt", "ES": "Spain", "FI": "Finland",
+    "FJ": "Fiji", "FR": "France", "GB": "United Kingdom", "GF": "French Guiana",
+    "GG": "Guernsey", "GI": "Gibraltar", "GR": "Greece", "GT": "Guatemala", "HK": "Hong Kong",
+    "HN": "Honduras", "HR": "Croatia", "HU": "Hungary", "ID": "Indonesia", "IE": "Ireland",
+    "IL": "Israel", "IM": "Isle of Man", "IN": "India", "IQ": "Iraq", "IS": "Iceland",
+    "IT": "Italy", "JE": "Jersey", "JM": "Jamaica", "JO": "Jordan", "JP": "Japan",
+    "KE": "Kenya", "KR": "South Korea", "KW": "Kuwait", "LB": "Lebanon", "LC": "Saint Lucia",
+    "LI": "Liechtenstein", "LT": "Lithuania", "LU": "Luxembourg", "LV": "Latvia", "LY": "Libya",
+    "MA": "Morocco", "MC": "Monaco", "MD": "Moldova", "ME": "Montenegro",
+    "MK": "North Macedonia", "MT": "Malta", "MU": "Mauritius", "MX": "Mexico",
+    "MY": "Malaysia", "MZ": "Mozambique", "NI": "Nicaragua", "NL": "Netherlands",
+    "NO": "Norway", "NZ": "New Zealand", "OM": "Oman", "PA": "Panama", "PE": "Peru",
+    "PF": "French Polynesia", "PG": "Papua New Guinea", "PH": "Philippines", "PK": "Pakistan",
+    "PL": "Poland", "PS": "Palestine", "PT": "Portugal", "PY": "Paraguay", "QA": "Qatar",
+    "RO": "Romania", "RS": "Serbia", "RU": "Russia", "SA": "Saudi Arabia", "SE": "Sweden",
+    "SG": "Singapore", "SI": "Slovenia", "SK": "Slovakia", "SM": "San Marino",
+    "SN": "Senegal", "SV": "El Salvador", "TC": "Turks and Caicos Islands", "TD": "Chad",
+    "TH": "Thailand", "TR": "Turkey", "TT": "Trinidad and Tobago", "TW": "Taiwan",
+    "TZ": "Tanzania", "UA": "Ukraine", "UG": "Uganda", "US": "United States", "UY": "Uruguay",
+    "VA": "Vatican City", "VE": "Venezuela", "VG": "British Virgin Islands", "YE": "Yemen",
+    "ZA": "South Africa", "ZM": "Zambia", "ZW": "Zimbabwe",
+}
+
+
+def country_name(code: str) -> str:
+    return COUNTRY_NAMES.get(code, code)
+
 
 def validate_country_code(code: str) -> str:
     normalized = code.strip().upper()

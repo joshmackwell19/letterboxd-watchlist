@@ -1,6 +1,7 @@
 from datetime import date
 
-from .brands import group_offers_by_brand
+from .brands import group_offers_by_brand_and_country
+from .countries import country_name
 from .diff import Report, ReportEntry
 
 # JustWatch often lists multiple near-duplicate packages for the same real
@@ -32,29 +33,56 @@ def _line(entry: ReportEntry) -> str:
     return f"  • {entry.film.title}{year} — {entry.offer.package_clear_name} ({entry.offer.country})"
 
 
-def _new_film_lines(film) -> list[str]:
+def _country_service_lines(entries: list[tuple[str, str]]) -> list[str]:
+    """entries: list of (brand, country) -> lines grouped by country, full
+    country names, sorted alphabetically by country."""
+    by_country: dict[str, list[str]] = {}
+    for brand, country in entries:
+        by_country.setdefault(country_name(country), []).append(brand)
+
+    return [
+        f"      {country}: {', '.join(sorted(services))}"
+        for country, services in sorted(by_country.items())
+    ]
+
+
+def _new_film_lines(film, favorites: set[tuple[str, str]]) -> list[str]:
     year = f" ({film.year})" if film.year else ""
     rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
     lines = [f"  {film.title}{year}{rating}", f"    https://letterboxd.com/film/{film.slug}/"]
 
-    by_brand = group_offers_by_brand(film.offers)
-    if not by_brand:
+    by_brand_country = group_offers_by_brand_and_country(film.offers)
+    if not by_brand_country:
         lines.append("    Not currently streaming (subscription/free) in any tracked country.")
         return lines
 
-    by_country: dict[str, list[str]] = {}
-    for brand, countries in by_brand.items():
-        for country in countries:
-            by_country.setdefault(country, []).append(brand)
+    already_have: list[tuple[str, str]] = []
+    free_no_sub: list[tuple[str, str]] = []
+    needs_subscription: list[tuple[str, str]] = []
 
-    for country in sorted(by_country):
-        services = ", ".join(sorted(by_country[country]))
-        lines.append(f"    {country}: {services}")
+    for brand, by_country in by_brand_country.items():
+        for country, monetization_types in by_country.items():
+            if (brand, country) in favorites:
+                already_have.append((brand, country))
+            elif "FLATRATE" in monetization_types:
+                needs_subscription.append((brand, country))
+            else:
+                free_no_sub.append((brand, country))
+
+    if already_have:
+        lines.append("    ✅ Already available on a service you have:")
+        lines.extend(_country_service_lines(already_have))
+    if free_no_sub:
+        lines.append("    \U0001F193 Available without a subscription (free/ad-supported):")
+        lines.extend(_country_service_lines(free_no_sub))
+    if needs_subscription:
+        lines.append("    \U0001F4B3 Available on other subscription services:")
+        lines.extend(_country_service_lines(needs_subscription))
 
     return lines
 
 
-def render_report(report: Report) -> str | None:
+def render_report(report: Report, favorites: set[tuple[str, str]]) -> str | None:
     if report.is_empty():
         return None
 
@@ -63,7 +91,7 @@ def render_report(report: Report) -> str | None:
     if report.new_films:
         lines.append("\U0001F3AC New to your watchlist — full availability, all countries")
         for film in report.new_films:
-            lines.extend(_new_film_lines(film))
+            lines.extend(_new_film_lines(film, favorites))
             lines.append("")
 
     if report.new_have:

@@ -8,7 +8,7 @@ from collections import defaultdict
 _SUFFIXES = [
     r" Standard with Ads$", r" Basic with Ads$", r" Free with Ads$", r" with Ads$",
     r" Amazon Channel$", r" Apple TV Channel$", r" Roku Premium Channel$", r" Roku Channel$",
-    r" Premium$", r" Essential$", r" Free$",
+    r" Premium Plus$", r" Premium$", r" Essential$", r" Free$",
 ]
 
 _ALIASES = {

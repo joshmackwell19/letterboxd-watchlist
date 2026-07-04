@@ -86,3 +86,10 @@ def load_favorites(path: Path) -> set[tuple[str, str]]:
         (canonical_brand_name(entry["service"]), validate_country_code(entry["country"]))
         for entry in raw.get("favorites", [])
     }
+
+
+def load_revisitable_services(path: Path) -> set[str]:
+    """Services you've had before and could plausibly get again (friends,
+    family, resubscribing) — config/revisitable_services.yaml."""
+    raw = yaml.safe_load(path.read_text())
+    return {canonical_brand_name(name) for name in raw.get("services", [])}

@@ -14,7 +14,7 @@ from .analysis import (
     render_favorite_recommendations,
     render_ranking,
 )
-from .config import load_config, load_favorites
+from .config import load_config, load_favorites, load_revisitable_services
 from .dashboard import build_dashboard_data, render_dashboard_html
 from .diff import build_report
 from .justwatch_client import resolve_and_fetch
@@ -26,6 +26,7 @@ from .state import StateDoc, get_cached_entry_id, load_state, save_state
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
 DEFAULT_FAVORITES_PATH = Path("config/favorites.yaml")
+DEFAULT_REVISITABLE_PATH = Path("config/revisitable_services.yaml")
 DEFAULT_STATE_PATH = Path("data/state.json")
 DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
@@ -33,6 +34,7 @@ DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 def run(username: str, config_path: Path, state_path: Path, *, progress: bool = True) -> int:
     config = load_config(config_path)
     favorites = load_favorites(DEFAULT_FAVORITES_PATH)
+    revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
     previous_state = load_state(state_path)
 
     films = fetch_watchlist(username)
@@ -55,7 +57,7 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         current_state.films[film.slug] = film_state
 
     report = build_report(previous_state, current_state, config)
-    text = render_report(report, favorites)
+    text = render_report(report, favorites, revisitable)
 
     if text:
         print(text)

@@ -33,20 +33,20 @@ def _line(entry: ReportEntry) -> str:
     return f"  • {entry.film.title}{year} — {entry.offer.package_clear_name} ({entry.offer.country})"
 
 
-def _country_service_lines(entries: list[tuple[str, str]]) -> list[str]:
-    """entries: list of (brand, country) -> lines grouped by country, full
-    country names, sorted alphabetically by country."""
-    by_country: dict[str, list[str]] = {}
+def _service_country_lines(entries: list[tuple[str, str]]) -> list[str]:
+    """entries: list of (brand, country) -> lines grouped by service, full
+    country names, sorted alphabetically by service."""
+    by_brand: dict[str, list[str]] = {}
     for brand, country in entries:
-        by_country.setdefault(country_name(country), []).append(brand)
+        by_brand.setdefault(brand, []).append(country_name(country))
 
     return [
-        f"      {country}: {', '.join(sorted(services))}"
-        for country, services in sorted(by_country.items())
+        f"      {brand}: {', '.join(sorted(countries))}"
+        for brand, countries in sorted(by_brand.items())
     ]
 
 
-def _new_film_lines(film, favorites: set[tuple[str, str]]) -> list[str]:
+def _new_film_lines(film, favorites: set[tuple[str, str]], revisitable: set[str]) -> list[str]:
     year = f" ({film.year})" if film.year else ""
     rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
     lines = [f"  {film.title}{year}{rating}", f"    https://letterboxd.com/film/{film.slug}/"]
@@ -57,6 +57,7 @@ def _new_film_lines(film, favorites: set[tuple[str, str]]) -> list[str]:
         return lines
 
     already_have: list[tuple[str, str]] = []
+    could_get_again: list[tuple[str, str]] = []
     free_no_sub: list[tuple[str, str]] = []
     needs_subscription: list[tuple[str, str]] = []
 
@@ -64,6 +65,8 @@ def _new_film_lines(film, favorites: set[tuple[str, str]]) -> list[str]:
         for country, monetization_types in by_country.items():
             if (brand, country) in favorites:
                 already_have.append((brand, country))
+            elif brand in revisitable:
+                could_get_again.append((brand, country))
             elif "FLATRATE" in monetization_types:
                 needs_subscription.append((brand, country))
             else:
@@ -71,18 +74,21 @@ def _new_film_lines(film, favorites: set[tuple[str, str]]) -> list[str]:
 
     if already_have:
         lines.append("    ✅ Already available on a service you have:")
-        lines.extend(_country_service_lines(already_have))
+        lines.extend(_service_country_lines(already_have))
+    if could_get_again:
+        lines.append("    \U0001F91D Could get again (friends/family, previous subscription):")
+        lines.extend(_service_country_lines(could_get_again))
     if free_no_sub:
         lines.append("    \U0001F193 Available without a subscription (free/ad-supported):")
-        lines.extend(_country_service_lines(free_no_sub))
+        lines.extend(_service_country_lines(free_no_sub))
     if needs_subscription:
         lines.append("    \U0001F4B3 Available on other subscription services:")
-        lines.extend(_country_service_lines(needs_subscription))
+        lines.extend(_service_country_lines(needs_subscription))
 
     return lines
 
 
-def render_report(report: Report, favorites: set[tuple[str, str]]) -> str | None:
+def render_report(report: Report, favorites: set[tuple[str, str]], revisitable: set[str]) -> str | None:
     if report.is_empty():
         return None
 
@@ -91,7 +97,7 @@ def render_report(report: Report, favorites: set[tuple[str, str]]) -> str | None
     if report.new_films:
         lines.append("\U0001F3AC New to your watchlist — full availability, all countries")
         for film in report.new_films:
-            lines.extend(_new_film_lines(film, favorites))
+            lines.extend(_new_film_lines(film, favorites, revisitable))
             lines.append("")
 
     if report.new_have:

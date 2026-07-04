@@ -74,6 +74,32 @@ def get_rating_by_tmdb_id(
     return float(match.group(1)) if match else None
 
 
+def get_rating_by_slug(
+    slug: str,
+    *,
+    session=None,
+    impersonate: str = "chrome124",
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+    request_timeout_seconds: float = 15.0,
+) -> float | None:
+    """Fetch a film's Letterboxd average rating directly via its own slug —
+    used for watchlist films where we already have the slug from the
+    watchlist page, so no TMDB lookup is needed."""
+    own_session = session is None
+    if own_session:
+        session = curl_requests.Session()
+    try:
+        response = _fetch_url(session, f"https://letterboxd.com/film/{slug}/", max_retries=max_retries,
+                               backoff_base_seconds=backoff_base_seconds,
+                               request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
+    except LetterboxdFetchError:
+        return None
+
+    match = RATING_RE.search(response.text)
+    return float(match.group(1)) if match else None
+
+
 def _parse_watchlist_page(html: str) -> tuple[list[WatchlistFilm], int | None]:
     count_match = WATCHLIST_COUNT_RE.search(html)
     total_count = int(count_match.group(1).replace(",", "")) if count_match else None

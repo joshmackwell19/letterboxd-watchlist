@@ -79,7 +79,8 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         print("No new availability changes.")
 
     save_state(state_path, current_state)
-    DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(build_dashboard_data(current_state, favorites)))
+    dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable)
+    DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
     return 0
 
 
@@ -119,8 +120,11 @@ def main() -> None:
 
     if args.dashboard:
         favorites = load_favorites(args.favorites)
+        config = load_config(args.config)
+        global_subscriptions = load_global_subscriptions(args.config)
+        revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
         state = load_state(args.state)
-        data = build_dashboard_data(state, favorites)
+        data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable)
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
         sys.exit(0)

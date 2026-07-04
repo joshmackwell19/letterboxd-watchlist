@@ -72,3 +72,16 @@ def group_offers_by_brand(offers) -> dict[str, set[str]]:
             continue
         by_brand[brand].add(offer.country)
     return by_brand
+
+
+def group_offers_by_brand_and_country(offers) -> dict[str, dict[str, set[str]]]:
+    """Canonical brand -> country -> set of monetization types seen there,
+    with junk brands dropped. Lets callers tell "needs a subscription"
+    (FLATRATE present) apart from "free to watch" (only ADS/FREE)."""
+    by_brand: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for offer in offers:
+        brand = canonical_brand_name(offer.package_clear_name)
+        if is_junk_brand(brand):
+            continue
+        by_brand[brand][offer.country].add(offer.monetization_type)
+    return by_brand

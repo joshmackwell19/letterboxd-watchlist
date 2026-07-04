@@ -55,7 +55,7 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         current_state.films[film.slug] = film_state
 
     report = build_report(previous_state, current_state, config)
-    text = render_report(report)
+    text = render_report(report, favorites)
 
     if text:
         print(text)

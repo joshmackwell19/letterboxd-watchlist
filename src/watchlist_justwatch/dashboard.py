@@ -2,26 +2,16 @@ import html
 import json
 from collections import defaultdict
 
-from .brands import canonical_brand_name, is_junk_brand, is_major_brand
+from .brands import group_offers_by_brand, is_major_brand
 from .state import StateDoc
 
 MIN_COUNTRIES_FOR_MAIN_BRAND = 5
 
 
-def _brand_groups(film) -> dict[str, set[str]]:
-    by_brand: dict[str, set[str]] = defaultdict(set)
-    for offer in film.offers:
-        brand = canonical_brand_name(offer.package_clear_name)
-        if is_junk_brand(brand):
-            continue
-        by_brand[brand].add(offer.country)
-    return by_brand
-
-
 def _global_brand_countries(state: StateDoc) -> dict[str, set[str]]:
     brand_countries: dict[str, set[str]] = defaultdict(set)
     for film in state.films.values():
-        for brand, countries in _brand_groups(film).items():
+        for brand, countries in group_offers_by_brand(film.offers).items():
             brand_countries[brand] |= countries
     return brand_countries
 
@@ -36,7 +26,7 @@ def _main_brands(brand_countries: dict[str, set[str]], favorites: set[tuple[str,
 
 
 def _film_row(film, main_brands: set[str], favorites: set[tuple[str, str]]) -> dict:
-    by_brand = _brand_groups(film)
+    by_brand = group_offers_by_brand(film.offers)
 
     main_availability: dict[str, dict[str, list[str]]] = {}
     for brand in main_brands:
@@ -74,7 +64,7 @@ def _film_row(film, main_brands: set[str], favorites: set[tuple[str, str]]) -> d
 def _service_rows(state: StateDoc, favorites: set[tuple[str, str]]) -> list[dict]:
     by_brand_country: dict[tuple[str, str], list[str]] = defaultdict(list)
     for film in state.films.values():
-        for brand, countries in _brand_groups(film).items():
+        for brand, countries in group_offers_by_brand(film.offers).items():
             for country in countries:
                 by_brand_country[(brand, country)].append(film.title)
 

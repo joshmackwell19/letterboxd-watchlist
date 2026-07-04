@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import time
@@ -11,6 +12,8 @@ ITEM_NAME_RE = re.compile(r'data-item-name="([^"]+)"')
 ITEM_SLUG_RE = re.compile(r'data-item-slug="([^"]+)"')
 TITLE_YEAR_RE = re.compile(r"^(?P<title>.+) \((?P<year>\d{4})\)$")
 RATING_RE = re.compile(r'name="twitter:data2" content="([\d.]+) out of 5"')
+JSON_LD_RE = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.DOTALL)
+MAX_STARRING = 5
 
 
 class LetterboxdFetchError(Exception):
@@ -74,7 +77,18 @@ def get_rating_by_tmdb_id(
     return float(match.group(1)) if match else None
 
 
-def get_rating_by_slug(
+def _parse_film_json_ld(html: str) -> dict | None:
+    match = JSON_LD_RE.search(html)
+    if not match:
+        return None
+    raw = match.group(1).replace("/* <![CDATA[ */", "").replace("/* ]]> */", "").strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def get_film_details_by_slug(
     slug: str,
     *,
     session=None,
@@ -82,10 +96,17 @@ def get_rating_by_slug(
     max_retries: int = 3,
     backoff_base_seconds: float = 2.0,
     request_timeout_seconds: float = 15.0,
-) -> float | None:
-    """Fetch a film's Letterboxd average rating directly via its own slug —
-    used for watchlist films where we already have the slug from the
-    watchlist page, so no TMDB lookup is needed."""
+) -> dict:
+    """Fetch a film's rating, poster, director, top cast, and synopsis in one
+    request via the JSON-LD schema.org block Letterboxd embeds on every film
+    page — used for watchlist films where we already have the slug from the
+    watchlist page, so no TMDB lookup is needed.
+
+    Always returns a dict (possibly all-None/empty) rather than raising or
+    returning None, so callers can merge it in unconditionally.
+    """
+    empty = {"rating": None, "poster_url": None, "director": [], "starring": [], "synopsis": None}
+
     own_session = session is None
     if own_session:
         session = curl_requests.Session()
@@ -94,10 +115,20 @@ def get_rating_by_slug(
                                backoff_base_seconds=backoff_base_seconds,
                                request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
     except LetterboxdFetchError:
-        return None
+        return empty
 
-    match = RATING_RE.search(response.text)
-    return float(match.group(1)) if match else None
+    data = _parse_film_json_ld(response.text)
+    if data is None:
+        return empty
+
+    rating = data.get("aggregateRating", {}).get("ratingValue")
+    return {
+        "rating": float(rating) if rating is not None else None,
+        "poster_url": data.get("image"),
+        "director": [p["name"] for p in data.get("director", []) if p.get("name")],
+        "starring": [p["name"] for p in data.get("actor", [])[:MAX_STARRING] if p.get("name")],
+        "synopsis": data.get("description"),
+    }
 
 
 def _parse_watchlist_page(html: str) -> tuple[list[WatchlistFilm], int | None]:

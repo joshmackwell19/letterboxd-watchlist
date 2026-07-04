@@ -40,3 +40,7 @@ class FilmState:
     last_checked: str
     offers: list[OfferRecord] = field(default_factory=list)
     rating: float | None = None
+    poster_url: str | None = None
+    director: list[str] = field(default_factory=list)
+    starring: list[str] = field(default_factory=list)
+    synopsis: str | None = None

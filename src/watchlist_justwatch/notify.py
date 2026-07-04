@@ -24,7 +24,8 @@ def is_configured() -> bool:
     return bool(os.getenv("RESEND_API_KEY") and os.getenv("NOTIFY_EMAIL"))
 
 
-def send_email(subject: str, text_body: str, *, retries: int = 2) -> None:
+def send_email(subject: str, text_body: str, *, html_body: str | None = None, retries: int = 2,
+               attachments: list[dict] | None = None) -> None:
     load_dotenv()
     api_key = os.environ["RESEND_API_KEY"]
     to_address = os.environ["NOTIFY_EMAIL"]
@@ -35,12 +36,16 @@ def send_email(subject: str, text_body: str, *, retries: int = 2) -> None:
         "subject": subject,
         "text": text_body,
     }
+    if html_body is not None:
+        payload["html"] = html_body
+    if attachments:
+        payload["attachments"] = attachments
     headers = {"Authorization": f"Bearer {api_key}"}
 
     last_error = None
     for attempt in range(retries + 1):
         try:
-            response = requests.post(RESEND_API_URL, json=payload, headers=headers, timeout=15)
+            response = requests.post(RESEND_API_URL, json=payload, headers=headers, timeout=30)
             if response.ok:
                 return
             last_error = response.text
@@ -52,8 +57,8 @@ def send_email(subject: str, text_body: str, *, retries: int = 2) -> None:
     raise EmailError(f"Email send failed after {retries + 1} attempt(s): {last_error}")
 
 
-def send_if_configured(subject: str, text_body: str) -> bool:
+def send_if_configured(subject: str, text_body: str, *, html_body: str | None = None) -> bool:
     if not is_configured():
         return False
-    send_email(subject, text_body)
+    send_email(subject, text_body, html_body=html_body)
     return True

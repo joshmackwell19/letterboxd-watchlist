@@ -1,6 +1,6 @@
 from datetime import date
 
-from .brands import group_offers_by_brand_and_country
+from .availability import bucket_offers
 from .countries import country_name
 from .diff import Report, ReportEntry
 
@@ -51,39 +51,23 @@ def _new_film_lines(film, favorites: set[tuple[str, str]], revisitable: set[str]
     rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
     lines = [f"  {film.title}{year}{rating}", f"    https://letterboxd.com/film/{film.slug}/"]
 
-    by_brand_country = group_offers_by_brand_and_country(film.offers)
-    if not by_brand_country:
+    buckets = bucket_offers(film.offers, favorites, revisitable)
+    if not any(buckets.values()):
         lines.append("    Not currently streaming (subscription/free) in any tracked country.")
         return lines
 
-    already_have: list[tuple[str, str]] = []
-    could_get_again: list[tuple[str, str]] = []
-    free_no_sub: list[tuple[str, str]] = []
-    needs_subscription: list[tuple[str, str]] = []
-
-    for brand, by_country in by_brand_country.items():
-        for country, monetization_types in by_country.items():
-            if (brand, country) in favorites:
-                already_have.append((brand, country))
-            elif brand in revisitable:
-                could_get_again.append((brand, country))
-            elif "FLATRATE" in monetization_types:
-                needs_subscription.append((brand, country))
-            else:
-                free_no_sub.append((brand, country))
-
-    if already_have:
+    if buckets["have"]:
         lines.append("    ✅ Already available on a service you have:")
-        lines.extend(_service_country_lines(already_have))
-    if could_get_again:
+        lines.extend(_service_country_lines(buckets["have"]))
+    if buckets["could_get_again"]:
         lines.append("    \U0001F91D Could get again (friends/family, previous subscription):")
-        lines.extend(_service_country_lines(could_get_again))
-    if free_no_sub:
+        lines.extend(_service_country_lines(buckets["could_get_again"]))
+    if buckets["free"]:
         lines.append("    \U0001F193 Available without a subscription (free/ad-supported):")
-        lines.extend(_service_country_lines(free_no_sub))
-    if needs_subscription:
+        lines.extend(_service_country_lines(buckets["free"]))
+    if buckets["subscription"]:
         lines.append("    \U0001F4B3 Available on other subscription services:")
-        lines.extend(_service_country_lines(needs_subscription))
+        lines.extend(_service_country_lines(buckets["subscription"]))
 
     return lines
 

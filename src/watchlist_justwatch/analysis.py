@@ -1,7 +1,8 @@
 from collections import defaultdict
 
-from .brands import canonical_brand_name, is_junk_brand
+from .brands import canonical_brand_name, group_offers_by_brand, is_junk_brand
 from .config import CountryConfig, classify_offer, normalize_service_name
+from .models import FilmState
 from .state import StateDoc
 
 
@@ -152,3 +153,19 @@ def render_favorite_recommendations(recommendations: list[dict], *, max_titles: 
         lines.append(f"  {len(titles):>3}  {rec['brand']} — available in: {country_str}")
         lines.append(f"       unlocks: {title_str}")
     return "\n".join(lines)
+
+
+def films_not_on_favorite(state: StateDoc, favorites: set[tuple[str, str]]) -> list[FilmState]:
+    """Every watchlist film with no qualifying offer on a service you
+    currently favourite, in any country — sorted alphabetically."""
+    favorited_brands = {brand for brand, _country in favorites}
+
+    def has_favorite(film: FilmState) -> bool:
+        for brand, countries in group_offers_by_brand(film.offers).items():
+            if brand in favorited_brands and any((brand, c) in favorites for c in countries):
+                return True
+        return False
+
+    films = [film for film in state.films.values() if not has_favorite(film)]
+    films.sort(key=lambda f: f.title.lower())
+    return films

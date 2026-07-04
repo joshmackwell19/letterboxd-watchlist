@@ -47,6 +47,10 @@ def _film_to_dict(film: FilmState) -> dict:
         "last_checked": film.last_checked,
         "offers": [_offer_to_dict(o) for o in film.offers],
         "rating": film.rating,
+        "poster_url": film.poster_url,
+        "director": film.director,
+        "starring": film.starring,
+        "synopsis": film.synopsis,
     }
 
 
@@ -60,6 +64,10 @@ def _film_from_dict(slug: str, data: dict) -> FilmState:
         last_checked=data["last_checked"],
         offers=[_offer_from_dict(o) for o in data.get("offers", [])],
         rating=data.get("rating"),
+        poster_url=data.get("poster_url"),
+        director=data.get("director", []),
+        starring=data.get("starring", []),
+        synopsis=data.get("synopsis"),
     )
 
 

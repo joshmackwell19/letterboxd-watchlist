@@ -1,5 +1,6 @@
 from datetime import date
 
+from .brands import group_offers_by_brand
 from .diff import Report, ReportEntry
 
 # JustWatch often lists multiple near-duplicate packages for the same real
@@ -31,11 +32,39 @@ def _line(entry: ReportEntry) -> str:
     return f"  • {entry.film.title}{year} — {entry.offer.package_clear_name} ({entry.offer.country})"
 
 
+def _new_film_lines(film) -> list[str]:
+    year = f" ({film.year})" if film.year else ""
+    rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
+    lines = [f"  {film.title}{year}{rating}", f"    https://letterboxd.com/film/{film.slug}/"]
+
+    by_brand = group_offers_by_brand(film.offers)
+    if not by_brand:
+        lines.append("    Not currently streaming (subscription/free) in any tracked country.")
+        return lines
+
+    by_country: dict[str, list[str]] = {}
+    for brand, countries in by_brand.items():
+        for country in countries:
+            by_country.setdefault(country, []).append(brand)
+
+    for country in sorted(by_country):
+        services = ", ".join(sorted(by_country[country]))
+        lines.append(f"    {country}: {services}")
+
+    return lines
+
+
 def render_report(report: Report) -> str | None:
     if report.is_empty():
         return None
 
     lines = [f"Letterboxd Watchlist — JustWatch Update ({date.today().isoformat()})", ""]
+
+    if report.new_films:
+        lines.append("\U0001F3AC New to your watchlist — full availability, all countries")
+        for film in report.new_films:
+            lines.extend(_new_film_lines(film))
+            lines.append("")
 
     if report.new_have:
         lines.append("✅ Available on a service you have")

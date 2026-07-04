@@ -1,4 +1,5 @@
 import re
+from collections import defaultdict
 
 # Order matters: multi-word qualifiers before their shorter substrings
 # (e.g. "Standard with Ads" before the generic "with Ads"), so we don't leave
@@ -60,3 +61,14 @@ def canonical_brand_name(clear_name: str) -> str:
         name = name[:-1].strip() + " Plus"
 
     return _ALIASES.get(name.lower(), name)
+
+
+def group_offers_by_brand(offers) -> dict[str, set[str]]:
+    """Canonical brand -> set of countries, with junk brands dropped."""
+    by_brand: dict[str, set[str]] = defaultdict(set)
+    for offer in offers:
+        brand = canonical_brand_name(offer.package_clear_name)
+        if is_junk_brand(brand):
+            continue
+        by_brand[brand].add(offer.country)
+    return by_brand

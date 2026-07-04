@@ -1,0 +1,38 @@
+name: Daily watchlist check
+
+on:
+  schedule:
+    # ~08:00 UK time (no DST awareness in GH Actions cron; drifts an hour in BST)
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Run watchlist check
+        env:
+          LETTERBOXD_USERNAME: ${{ secrets.LETTERBOXD_USERNAME }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        run: python -m watchlist_justwatch.main
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/state.json
+          git diff --cached --quiet || git commit -m "Update watchlist state [skip ci]"
+          git push

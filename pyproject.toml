@@ -1,0 +1,22 @@
+[project]
+name = "watchlist-justwatch"
+version = "0.1.0"
+description = "Cross-check a Letterboxd watchlist against JustWatch streaming availability"
+requires-python = ">=3.13"
+dependencies = [
+    "simple-justwatch-python-api>=1.3.1",
+    "curl_cffi>=0.15.0",
+    "python-dotenv>=1.2.2",
+    "PyYAML>=6.0.3",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+watchlist-justwatch = "watchlist_justwatch.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,34 @@
+# Subscriptions Josh has, by country. Edit freely as subscriptions change.
+# Keys are ISO 3166-1 alpha-2 country codes (JustWatch uses these, not "uk").
+#
+# "subscriptions" = services you pay for (or already have access to) -> ✅
+# "free_tier"     = free ad-supported apps you'd watch on if something's there,
+#                    but don't consider a "subscription" -> 🆓
+# Anything else JustWatch finds is flagged as 🆕 (might sign up).
+countries:
+  gb:
+    subscriptions:
+      - "Netflix"
+      - "Amazon Prime"
+      - "MUBI"
+      - "Disney+"
+      - "BBC iPlayer"
+    free_tier: []
+  au:
+    subscriptions:
+      - "Netflix"
+      - "Amazon Prime"
+      - "Stan"
+      - "MUBI"
+      - "Disney+"
+      - "SBS On Demand"
+    free_tier: []
+  us:
+    subscriptions:
+      - "Netflix"
+      - "Amazon Prime"
+      - "MUBI"
+      - "Disney+"
+    free_tier:
+      - "Pluto TV"
+      - "Tubi"

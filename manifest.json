@@ -1,7 +1,7 @@
 {
   "name": "Letterboxd Watchlist Dashboard",
   "short_name": "Watchlist",
-  "start_url": "./dashboard.html",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#fbfbfa",

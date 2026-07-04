@@ -2,7 +2,9 @@ import html
 import json
 from collections import defaultdict
 
-from .brands import group_offers_by_brand, is_major_brand
+from .brands import group_offers_by_brand, group_offers_by_brand_and_country, is_major_brand
+from .config import CountryConfig, is_have_anywhere
+from .countries import country_name
 from .state import StateDoc
 
 MIN_COUNTRIES_FOR_MAIN_BRAND = 5
@@ -82,7 +84,54 @@ def _service_rows(state: StateDoc, favorites: set[tuple[str, str]]) -> list[dict
     return rows
 
 
-def build_dashboard_data(state: StateDoc, favorites: set[tuple[str, str]]) -> dict:
+def _classify(brand: str, country: str, monetization_types: set[str], config: dict[str, CountryConfig],
+              global_subscriptions: list[str], revisitable: set[str]) -> str:
+    if is_have_anywhere(brand, country, config, global_subscriptions):
+        return "have"
+    if brand in revisitable:
+        return "could_get_again"
+    if "FLATRATE" in monetization_types:
+        return "subscription"
+    return "free"
+
+
+def _country_rows(
+    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
+) -> list[dict]:
+    by_country: dict[str, list[dict]] = defaultdict(list)
+
+    for film in state.films.values():
+        by_brand_country = group_offers_by_brand_and_country(film.offers)
+        country_services: dict[str, list[dict]] = defaultdict(list)
+        for brand, by_c in by_brand_country.items():
+            for country, monetization_types in by_c.items():
+                classification = _classify(brand, country, monetization_types, config, global_subscriptions,
+                                            revisitable)
+                country_services[country].append({"brand": brand, "classification": classification})
+
+        for country, services in country_services.items():
+            services.sort(key=lambda s: (s["classification"] != "have", s["brand"]))
+            by_country[country].append({
+                "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
+                "services": services,
+                "has_have": any(s["classification"] == "have" for s in services),
+            })
+
+    countries = []
+    for code, films in by_country.items():
+        films.sort(key=lambda f: f["title"].lower())
+        countries.append({"code": code, "name": country_name(code), "films": films})
+    countries.sort(key=lambda c: c["name"])
+    return countries
+
+
+def build_dashboard_data(
+    state: StateDoc,
+    favorites: set[tuple[str, str]],
+    config: dict[str, CountryConfig],
+    global_subscriptions: list[str],
+    revisitable: set[str],
+) -> dict:
     brand_countries = _global_brand_countries(state)
     main_brands = _main_brands(brand_countries, favorites)
     main_brand_set = set(main_brands)
@@ -95,6 +144,7 @@ def build_dashboard_data(state: StateDoc, favorites: set[tuple[str, str]]) -> di
         "main_brands": main_brands,
         "films": rows,
         "services": _service_rows(state, favorites),
+        "countries": _country_rows(state, config, global_subscriptions, revisitable),
     }
 
 
@@ -139,6 +189,12 @@ _TEMPLATE = """<!DOCTYPE html>
   .sort-arrow { font-size: 10px; opacity: 0.6; }
   section.view { display: none; }
   section.view.active { display: block; }
+  select { padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; margin: 1px 4px 1px 0; }
+  .badge-have { background: #e2f4e6; color: #0a7a2f; }
+  .badge-could_get_again { background: #f0e6fb; color: #6a3fa0; }
+  .badge-free { background: #e5f0fb; color: #1a5fa8; }
+  .badge-subscription { background: #f3f3f0; color: #555; }
 </style>
 </head>
 <body>
@@ -147,6 +203,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <div class="tabs">
   <button class="tab-btn active" id="tab-films">By film</button>
   <button class="tab-btn" id="tab-services">By service</button>
+  <button class="tab-btn" id="tab-country">By VPN country</button>
 </div>
 
 <section class="view active" id="view-films">
@@ -156,6 +213,21 @@ _TEMPLATE = """<!DOCTYPE html>
     <span class="legend"><span class="fav">green</span> = favourited country &nbsp; <span class="avail">blue</span> = available, not favourited</span>
   </div>
   <div class="table-wrap"><table id="filmsGrid"><thead></thead><tbody></tbody></table></div>
+</section>
+
+<section class="view" id="view-country">
+  <div class="controls">
+    <select id="countrySelect"></select>
+    <input type="text" id="countryFilmSearch" placeholder="Search films...">
+    <label><input type="checkbox" id="haveOnlyCountry"> Only films on a service I have</label>
+    <span class="legend">
+      <span class="badge badge-have">have</span>
+      <span class="badge badge-could_get_again">could get again</span>
+      <span class="badge badge-free">free</span>
+      <span class="badge badge-subscription">subscription needed</span>
+    </span>
+  </div>
+  <div class="table-wrap"><table id="countryGrid"><thead></thead><tbody></tbody></table></div>
 </section>
 
 <section class="view" id="view-services">
@@ -174,11 +246,12 @@ document.getElementById('meta').textContent =
 
 document.getElementById('tab-films').addEventListener('click', () => switchTab('films'));
 document.getElementById('tab-services').addEventListener('click', () => switchTab('services'));
+document.getElementById('tab-country').addEventListener('click', () => switchTab('country'));
 function switchTab(name) {
-  document.getElementById('tab-films').classList.toggle('active', name === 'films');
-  document.getElementById('tab-services').classList.toggle('active', name === 'services');
-  document.getElementById('view-films').classList.toggle('active', name === 'films');
-  document.getElementById('view-services').classList.toggle('active', name === 'services');
+  ['films', 'services', 'country'].forEach(n => {
+    document.getElementById('tab-' + n).classList.toggle('active', n === name);
+    document.getElementById('view-' + n).classList.toggle('active', n === name);
+  });
 }
 
 // ---------- Films table ----------
@@ -378,6 +451,112 @@ document.getElementById('favOnlyServices').addEventListener('change', renderServ
 
 renderServicesHead();
 renderServicesRows();
+
+// ---------- By VPN country ----------
+
+const countryCols = [
+  { key: 'title', label: 'Film', width: 280, sort: r => r.title.toLowerCase(), dir: 1 },
+  { key: 'year', label: 'Year', width: 70, sort: r => r.year || 0, dir: -1 },
+  { key: 'rating', label: 'Rating', width: 70, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
+  { key: 'services', label: 'Services', width: 480 },
+];
+
+let countrySortKey = 'rating', countrySortDir = -1;
+
+function populateCountrySelect() {
+  const select = document.getElementById('countrySelect');
+  DATA.countries.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.code;
+    opt.textContent = c.name + ' (' + c.films.length + ' films)';
+    select.appendChild(opt);
+  });
+  if (DATA.countries.length) select.value = DATA.countries[0].code;
+}
+
+function currentCountry() {
+  const code = document.getElementById('countrySelect').value;
+  return DATA.countries.find(c => c.code === code);
+}
+
+function renderCountryHead() {
+  const thead = document.querySelector('#countryGrid thead');
+  thead.innerHTML = '';
+  const headRow = document.createElement('tr');
+  countryCols.forEach((col, i) => {
+    const th = document.createElement('th');
+    th.style.width = col.width + 'px';
+    th.textContent = col.label;
+    if (i === 0) th.classList.add('sticky-col');
+    if (col.sort) {
+      th.addEventListener('click', () => {
+        countrySortDir = (countrySortKey === col.key) ? -countrySortDir : col.dir;
+        countrySortKey = col.key;
+        renderCountryRows();
+      });
+    }
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+}
+
+function renderCountryRows() {
+  const tbody = document.querySelector('#countryGrid tbody');
+  tbody.innerHTML = '';
+  const country = currentCountry();
+  if (!country) return;
+
+  const q = document.getElementById('countryFilmSearch').value.trim().toLowerCase();
+  const haveOnly = document.getElementById('haveOnlyCountry').checked;
+
+  let rows = country.films.slice();
+  const col = countryCols.find(c => c.key === countrySortKey);
+  if (col && col.sort) {
+    rows.sort((a, b) => {
+      const av = col.sort(a), bv = col.sort(b);
+      return av < bv ? -countrySortDir : av > bv ? countrySortDir : 0;
+    });
+  }
+
+  const frag = document.createDocumentFragment();
+  rows.forEach(row => {
+    if (q && !row.title.toLowerCase().includes(q)) return;
+    if (haveOnly && !row.has_have) return;
+    const tr = document.createElement('tr');
+
+    countryCols.forEach((col, i) => {
+      const td = document.createElement('td');
+      if (col.key === 'title') {
+        const year = row.year ? ' (' + row.year + ')' : '';
+        td.innerHTML = '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' +
+          row.slug + '/">' + row.title.replace(/</g, '&lt;') + year + '</a>';
+      } else if (col.key === 'rating') {
+        td.textContent = row.rating == null ? '' : row.rating.toFixed(2);
+      } else if (col.key === 'services') {
+        const inner = document.createElement('div');
+        inner.classList.add('cell-scroll');
+        inner.innerHTML = row.services.map(s =>
+          '<span class="badge badge-' + s.classification + '">' + s.brand + '</span>').join(' ');
+        td.appendChild(inner);
+      } else {
+        td.textContent = row[col.key];
+      }
+      if (i === 0) td.classList.add('sticky-col');
+      tr.appendChild(td);
+    });
+
+    frag.appendChild(tr);
+  });
+  tbody.appendChild(frag);
+}
+
+document.getElementById('countrySelect').addEventListener('change', renderCountryRows);
+document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
+document.getElementById('haveOnlyCountry').addEventListener('change', renderCountryRows);
+
+populateCountrySelect();
+renderCountryHead();
+renderCountryRows();
 </script>
 </body>
 </html>

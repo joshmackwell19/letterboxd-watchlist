@@ -1,7 +1,9 @@
 from collections import defaultdict
 
+from .availability import bucket_offers
 from .brands import canonical_brand_name, is_junk_brand
 from .config import CountryConfig, classify_offer, is_have_anywhere, normalize_service_name
+from .countries import country_name
 from .models import FilmState
 from .state import StateDoc
 
@@ -171,3 +173,37 @@ def films_not_on_favorite(
     films = [film for film in state.films.values() if not has_a_service(film)]
     films.sort(key=lambda f: f.title.lower())
     return films
+
+
+def films_not_on_favorite_by_country(
+    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
+) -> list[dict]:
+    """The same film set as films_not_on_favorite, but organized by which
+    country each film is available in (on some non-"have" service) — one
+    section per country, films sorted by rating within each. A film with
+    offers in several countries appears in each of those countries' sections.
+    """
+    films = films_not_on_favorite(state, config, global_subscriptions)
+
+    by_country: dict[str, list[dict]] = defaultdict(list)
+    for film in films:
+        buckets = bucket_offers(film.offers, config, global_subscriptions, revisitable)
+        # "have" is always empty here by construction of films_not_on_favorite.
+        by_country_services: dict[str, list[dict]] = defaultdict(list)
+        for classification in ("could_get_again", "free", "subscription"):
+            for brand, country in buckets[classification]:
+                by_country_services[country].append({"brand": brand, "classification": classification})
+
+        for country, services in by_country_services.items():
+            services.sort(key=lambda s: s["brand"])
+            by_country[country].append({
+                "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
+                "services": services,
+            })
+
+    countries = []
+    for code, country_films in by_country.items():
+        country_films.sort(key=lambda f: (-(f["rating"] or 0), f["title"].lower()))
+        countries.append({"code": code, "name": country_name(code), "films": country_films})
+    countries.sort(key=lambda c: c["name"])
+    return countries

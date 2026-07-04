@@ -164,3 +164,65 @@ def render_film_audit_text(films: list) -> str:
         rating = f" — {film.rating:.2f}★" if film.rating is not None else ""
         lines.append(f"  {film.title}{year}{rating}")
     return "\n".join(lines)
+
+
+_COUNTRY_BUCKET_LABELS = [
+    ("could_get_again", "\U0001F91D"),
+    ("free", "\U0001F193"),
+    ("subscription", "\U0001F4B3"),
+]
+
+
+def _film_service_summary_text(services: list[dict]) -> str:
+    by_bucket: dict[str, list[str]] = {}
+    for s in services:
+        by_bucket.setdefault(s["classification"], []).append(s["brand"])
+    parts = [f"{emoji} {', '.join(sorted(by_bucket[key]))}" for key, emoji in _COUNTRY_BUCKET_LABELS if key in by_bucket]
+    return "; ".join(parts)
+
+
+def render_country_audit_text(countries: list[dict]) -> str:
+    total_films = sum(len(c["films"]) for c in countries)
+    lines = [f"Watchlist films not on a service you have, by VPN country ({date.today().isoformat()})",
+             f"{total_films} film/country combinations across {len(countries)} countries.", ""]
+    for country in countries:
+        lines.append(f"{country['name']} ({len(country['films'])} films)")
+        for film in country["films"]:
+            year = f" ({film['year']})" if film["year"] else ""
+            rating = f" — {film['rating']:.2f}★" if film["rating"] is not None else ""
+            lines.append(f"  {film['title']}{year}{rating} — {_film_service_summary_text(film['services'])}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _film_service_summary_html(services: list[dict]) -> str:
+    by_bucket: dict[str, list[str]] = {}
+    for s in services:
+        by_bucket.setdefault(s["classification"], []).append(s["brand"])
+    parts = [
+        f'<span style="color:#333;">{emoji} {_esc(", ".join(sorted(by_bucket[key])))}</span>'
+        for key, emoji in _COUNTRY_BUCKET_LABELS if key in by_bucket
+    ]
+    return "&nbsp;&nbsp;".join(parts)
+
+
+def render_country_audit_html(countries: list[dict]) -> str:
+    total_films = sum(len(c["films"]) for c in countries)
+    body = (
+        f'<h2 style="font-size:18px; font-weight:500;">Watchlist films not on a service you have, '
+        f'by VPN country ({date.today().isoformat()})</h2>'
+        f'<p style="font-size:13px; color:#555; margin:0 0 20px;">{total_films} film/country combinations '
+        f"across {len(countries)} countries.</p>"
+    )
+    for country in countries:
+        body += (f'<h3 style="font-size:15px; margin:20px 0 6px; border-bottom:1px solid #eee; padding-bottom:4px;">'
+                 f'{_esc(country["name"])} ({len(country["films"])} films)</h3>')
+        for film in country["films"]:
+            year = f" ({film['year']})" if film["year"] else ""
+            rating = f" — {film['rating']:.2f}★" if film["rating"] is not None else ""
+            body += (
+                f'<p style="{_STYLE_BUCKET_LINE}">'
+                f'<a href="https://letterboxd.com/film/{film["slug"]}/" style="color:#111;">{_esc(film["title"])}</a>'
+                f'{year}{rating} — {_film_service_summary_html(film["services"])}</p>'
+            )
+    return _wrap_document(body)

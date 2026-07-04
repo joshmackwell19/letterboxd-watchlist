@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from .analysis import (
     films_not_on_favorite,
+    films_not_on_favorite_by_country,
     rank_missing_services,
     recommend_extra_countries,
     recommend_new_favorites,
@@ -18,7 +19,13 @@ from .analysis import (
 from .config import load_config, load_favorites, load_global_subscriptions, load_revisitable_services
 from .dashboard import build_dashboard_data, render_dashboard_html
 from .diff import build_report
-from .html_email import render_film_audit_html, render_film_audit_text, render_report_html
+from .html_email import (
+    render_country_audit_html,
+    render_country_audit_text,
+    render_film_audit_html,
+    render_film_audit_text,
+    render_report_html,
+)
 from .justwatch_client import resolve_and_fetch
 from .letterboxd import LetterboxdFetchError, fetch_watchlist, get_film_details_by_slug
 from .notify import send_if_configured
@@ -110,6 +117,9 @@ def main() -> None:
     parser.add_argument("--email-audit", action="store_true",
                          help="Send a one-off email listing every watchlist film not on a favourited "
                               "service, using already-fetched state (no network calls), then exit")
+    parser.add_argument("--email-audit-by-country", action="store_true",
+                         help="Same as --email-audit but organized into sections by VPN country, using "
+                              "already-fetched state (no network calls), then exit")
     args = parser.parse_args()
 
     if args.rank_services:
@@ -138,6 +148,20 @@ def main() -> None:
         text = render_film_audit_text(films)
         html_body = render_film_audit_html(films, config, global_subscriptions, revisitable)
         sent = send_if_configured(f"Letterboxd Watchlist — {len(films)} films not on a service you have",
+                                   text, html_body=html_body)
+        print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
+        sys.exit(0)
+
+    if args.email_audit_by_country:
+        config = load_config(args.config)
+        global_subscriptions = load_global_subscriptions(args.config)
+        revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
+        state = load_state(args.state)
+        countries = films_not_on_favorite_by_country(state, config, global_subscriptions, revisitable)
+        text = render_country_audit_text(countries)
+        html_body = render_country_audit_html(countries)
+        total_films = sum(len(c["films"]) for c in countries)
+        sent = send_if_configured(f"Letterboxd Watchlist — {total_films} films not on a service you have, by country",
                                    text, html_body=html_body)
         print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
         sys.exit(0)

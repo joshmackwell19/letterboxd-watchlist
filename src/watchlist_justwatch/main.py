@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .analysis import (
+    films_not_on_favorite,
     rank_missing_services,
     recommend_extra_countries,
     recommend_new_favorites,
@@ -17,8 +18,9 @@ from .analysis import (
 from .config import load_config, load_favorites, load_revisitable_services
 from .dashboard import build_dashboard_data, render_dashboard_html
 from .diff import build_report
+from .html_email import render_film_audit_html, render_film_audit_text, render_report_html
 from .justwatch_client import resolve_and_fetch
-from .letterboxd import LetterboxdFetchError, fetch_watchlist, get_rating_by_slug
+from .letterboxd import LetterboxdFetchError, fetch_watchlist, get_film_details_by_slug
 from .notify import send_if_configured
 from .report import render_report
 from .similar import find_similar, render_similar
@@ -49,10 +51,19 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         film_state = resolve_and_fetch(film, cached_entry_id, cached_confidence, now_iso=now_iso)
 
         previous_film = previous_state.films.get(film.slug)
-        if previous_film is not None and previous_film.rating is not None:
+        if previous_film is not None and previous_film.poster_url is not None:
             film_state.rating = previous_film.rating
+            film_state.poster_url = previous_film.poster_url
+            film_state.director = previous_film.director
+            film_state.starring = previous_film.starring
+            film_state.synopsis = previous_film.synopsis
         else:
-            film_state.rating = get_rating_by_slug(film.slug)
+            details = get_film_details_by_slug(film.slug)
+            film_state.rating = details["rating"]
+            film_state.poster_url = details["poster_url"]
+            film_state.director = details["director"]
+            film_state.starring = details["starring"]
+            film_state.synopsis = details["synopsis"]
 
         current_state.films[film.slug] = film_state
 
@@ -61,7 +72,8 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
 
     if text:
         print(text)
-        send_if_configured("Letterboxd Watchlist — new availability", text)
+        html_body = render_report_html(report, favorites, revisitable)
+        send_if_configured("Letterboxd Watchlist — new availability", text, html_body=html_body)
     else:
         print("No new availability changes.")
 
@@ -93,6 +105,9 @@ def main() -> None:
                          help="Print services not in your favorites that would unlock films no current "
                               "favorite covers, using already-fetched state (no network calls), then exit")
     parser.add_argument("--favorites", type=Path, default=DEFAULT_FAVORITES_PATH)
+    parser.add_argument("--email-audit", action="store_true",
+                         help="Send a one-off email listing every watchlist film not on a favourited "
+                              "service, using already-fetched state (no network calls), then exit")
     args = parser.parse_args()
 
     if args.rank_services:
@@ -107,6 +122,18 @@ def main() -> None:
         data = build_dashboard_data(state, favorites)
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
+        sys.exit(0)
+
+    if args.email_audit:
+        favorites = load_favorites(args.favorites)
+        revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
+        state = load_state(args.state)
+        films = films_not_on_favorite(state, favorites)
+        text = render_film_audit_text(films)
+        html_body = render_film_audit_html(films, favorites, revisitable)
+        sent = send_if_configured(f"Letterboxd Watchlist — {len(films)} films not on a favourited service",
+                                   text, html_body=html_body)
+        print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
         sys.exit(0)
 
     if args.recommend_favorites:

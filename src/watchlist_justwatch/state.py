@@ -46,6 +46,7 @@ def _film_to_dict(film: FilmState) -> dict:
         "confidence": film.confidence,
         "last_checked": film.last_checked,
         "offers": [_offer_to_dict(o) for o in film.offers],
+        "rating": film.rating,
     }
 
 
@@ -58,6 +59,7 @@ def _film_from_dict(slug: str, data: dict) -> FilmState:
         confidence=data["confidence"],
         last_checked=data["last_checked"],
         offers=[_offer_from_dict(o) for o in data.get("offers", [])],
+        rating=data.get("rating"),
     )
 
 

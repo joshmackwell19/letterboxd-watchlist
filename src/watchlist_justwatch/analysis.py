@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from .brands import canonical_brand_name
+from .brands import canonical_brand_name, is_junk_brand
 from .config import CountryConfig, classify_offer, normalize_service_name
 from .state import StateDoc
 
@@ -61,7 +61,10 @@ def recommend_new_favorites(state: StateDoc, favorites: set[tuple[str, str]], *,
     for slug, film in state.films.items():
         brands_here: dict[str, set[str]] = defaultdict(set)
         for offer in film.offers:
-            brands_here[canonical_brand_name(offer.package_clear_name)].add(offer.country)
+            brand = canonical_brand_name(offer.package_clear_name)
+            if is_junk_brand(brand):
+                continue
+            brands_here[brand].add(offer.country)
 
         if any((brand, country) in favorites for brand, countries in brands_here.items() for country in countries):
             covered_by_favorites.add(slug)
@@ -100,7 +103,10 @@ def recommend_extra_countries(state: StateDoc, favorites: set[tuple[str, str]], 
     for slug, film in state.films.items():
         brands_here: dict[str, set[str]] = defaultdict(set)
         for offer in film.offers:
-            brands_here[canonical_brand_name(offer.package_clear_name)].add(offer.country)
+            brand = canonical_brand_name(offer.package_clear_name)
+            if is_junk_brand(brand):
+                continue
+            brands_here[brand].add(offer.country)
 
         if any((brand, country) in favorites for brand, countries in brands_here.items() for country in countries):
             covered_by_favorites.add(slug)

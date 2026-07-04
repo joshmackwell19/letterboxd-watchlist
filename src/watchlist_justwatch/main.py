@@ -18,7 +18,7 @@ from .config import load_config, load_favorites
 from .dashboard import build_dashboard_data, render_dashboard_html
 from .diff import build_report
 from .justwatch_client import resolve_and_fetch
-from .letterboxd import LetterboxdFetchError, fetch_watchlist
+from .letterboxd import LetterboxdFetchError, fetch_watchlist, get_rating_by_slug
 from .notify import send_if_configured
 from .report import render_report
 from .similar import find_similar, render_similar
@@ -44,9 +44,15 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
             print(f"...processed {i}/{len(films)} films", file=sys.stderr)
 
         cached_entry_id, cached_confidence = get_cached_entry_id(previous_state, film.slug)
-        current_state.films[film.slug] = resolve_and_fetch(
-            film, cached_entry_id, cached_confidence, now_iso=now_iso
-        )
+        film_state = resolve_and_fetch(film, cached_entry_id, cached_confidence, now_iso=now_iso)
+
+        previous_film = previous_state.films.get(film.slug)
+        if previous_film is not None and previous_film.rating is not None:
+            film_state.rating = previous_film.rating
+        else:
+            film_state.rating = get_rating_by_slug(film.slug)
+
+        current_state.films[film.slug] = film_state
 
     report = build_report(previous_state, current_state, config)
     text = render_report(report)

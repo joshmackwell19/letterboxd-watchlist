@@ -39,3 +39,4 @@ class FilmState:
     confidence: str
     last_checked: str
     offers: list[OfferRecord] = field(default_factory=list)
+    rating: float | None = None

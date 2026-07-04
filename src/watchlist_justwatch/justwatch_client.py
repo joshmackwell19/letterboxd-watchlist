@@ -1,5 +1,6 @@
 import time
 
+from simplejustwatchapi.exceptions import JustWatchHttpError
 from simplejustwatchapi.justwatch import offers_for_countries, search
 
 from .countries import ALL_JUSTWATCH_COUNTRIES, QUALIFYING_MONETIZATION_TYPES
@@ -8,8 +9,18 @@ from .models import FilmState, MatchResult, OfferRecord, WatchlistFilm
 CACHEABLE_CONFIDENCE = {"exact", "year_tolerant"}
 
 
+def _with_retry(fn, *, max_retries: int = 5, backoff_base_seconds: float = 2.0):
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except JustWatchHttpError as exc:
+            if "429" not in str(exc) or attempt == max_retries:
+                raise
+            time.sleep(backoff_base_seconds * (2 ** attempt))
+
+
 def search_film(title: str, year: int | None, *, country: str = "US", count: int = 5) -> MatchResult:
-    results = search(title, country=country, language="en", count=count)
+    results = _with_retry(lambda: search(title, country=country, language="en", count=count))
 
     if not results:
         return MatchResult(slug="", entry_id=None, matched_title=None, matched_year=None, confidence="unmatched")
@@ -30,7 +41,7 @@ def search_film(title: str, year: int | None, *, country: str = "US", count: int
 
 
 def fetch_offers(entry_id: str, *, countries: frozenset[str] = ALL_JUSTWATCH_COUNTRIES) -> list[OfferRecord]:
-    offers_by_country = offers_for_countries(entry_id, set(countries), language="en")
+    offers_by_country = _with_retry(lambda: offers_for_countries(entry_id, set(countries), language="en"))
 
     seen: set[tuple[str, str, str]] = set()
     records: list[OfferRecord] = []
@@ -69,7 +80,7 @@ def resolve_and_fetch(
     cached_confidence: str | None,
     *,
     now_iso: str,
-    request_delay_seconds: float = 0.3,
+    request_delay_seconds: float = 0.6,
 ) -> FilmState:
     match = resolve_film(film, cached_entry_id, cached_confidence)
 

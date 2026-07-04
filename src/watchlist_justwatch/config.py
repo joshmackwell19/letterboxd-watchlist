@@ -5,6 +5,7 @@ from typing import Literal
 
 import yaml
 
+from .brands import canonical_brand_name
 from .countries import validate_country_code
 from .models import OfferRecord
 
@@ -75,3 +76,13 @@ def canonical_display_name(offer: OfferRecord, country_config: CountryConfig) ->
         if service_matches(name, offer.package_clear_name):
             return name
     return offer.package_clear_name
+
+
+def load_favorites(path: Path) -> set[tuple[str, str]]:
+    """Your real Letterboxd favourite-services list (config/favorites.yaml),
+    as (canonical brand, country) pairs."""
+    raw = yaml.safe_load(path.read_text())
+    return {
+        (canonical_brand_name(entry["service"]), validate_country_code(entry["country"]))
+        for entry in raw.get("favorites", [])
+    }

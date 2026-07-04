@@ -7,8 +7,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .analysis import rank_missing_services, render_ranking
-from .config import load_config
+from .analysis import (
+    rank_missing_services,
+    recommend_extra_countries,
+    recommend_new_favorites,
+    render_favorite_recommendations,
+    render_ranking,
+)
+from .config import load_config, load_favorites
 from .dashboard import build_dashboard_data, render_dashboard_html
 from .diff import build_report
 from .justwatch_client import resolve_and_fetch
@@ -19,12 +25,14 @@ from .similar import find_similar, render_similar
 from .state import StateDoc, get_cached_entry_id, load_state, save_state
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
+DEFAULT_FAVORITES_PATH = Path("config/favorites.yaml")
 DEFAULT_STATE_PATH = Path("data/state.json")
 DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
 
 def run(username: str, config_path: Path, state_path: Path, *, progress: bool = True) -> int:
     config = load_config(config_path)
+    favorites = load_favorites(DEFAULT_FAVORITES_PATH)
     previous_state = load_state(state_path)
 
     films = fetch_watchlist(username)
@@ -50,7 +58,7 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         print("No new availability changes.")
 
     save_state(state_path, current_state)
-    DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(build_dashboard_data(current_state, config)))
+    DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(build_dashboard_data(current_state, favorites)))
     return 0
 
 
@@ -73,6 +81,10 @@ def main() -> None:
     parser.add_argument("--dashboard", action="store_true",
                          help="Regenerate dashboard.html from already-fetched state (no network calls), then exit")
     parser.add_argument("--dashboard-path", type=Path, default=DEFAULT_DASHBOARD_PATH)
+    parser.add_argument("--recommend-favorites", action="store_true",
+                         help="Print services not in your favorites that would unlock films no current "
+                              "favorite covers, using already-fetched state (no network calls), then exit")
+    parser.add_argument("--favorites", type=Path, default=DEFAULT_FAVORITES_PATH)
     args = parser.parse_args()
 
     if args.rank_services:
@@ -82,11 +94,20 @@ def main() -> None:
         sys.exit(0)
 
     if args.dashboard:
-        config = load_config(args.config)
+        favorites = load_favorites(args.favorites)
         state = load_state(args.state)
-        data = build_dashboard_data(state, config)
+        data = build_dashboard_data(state, favorites)
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
+        sys.exit(0)
+
+    if args.recommend_favorites:
+        favorites = load_favorites(args.favorites)
+        state = load_state(args.state)
+        print("New services worth adding as favourites (you don't have these anywhere yet):\n")
+        print(render_favorite_recommendations(recommend_new_favorites(state, favorites)))
+        print("\nServices you already favourite, but not in these countries (lower priority):\n")
+        print(render_favorite_recommendations(recommend_extra_countries(state, favorites)))
         sys.exit(0)
 
     if args.similar_to:

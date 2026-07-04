@@ -1,76 +1,78 @@
 import html
 import json
-from pathlib import Path
+from collections import defaultdict
 
-from .config import CountryConfig, canonical_display_name, classify_offer
+from .brands import canonical_brand_name
 from .state import StateDoc
 
-_STATUS_PRIORITY = ["have", "free_tier", "new_possible", "none"]
+MIN_COUNTRIES_FOR_MAIN_BRAND = 5
 
 
-def _film_row(film, config: dict[str, CountryConfig]) -> dict:
-    row = {
+def _global_brand_countries(state: StateDoc) -> dict[str, set[str]]:
+    brand_countries: dict[str, set[str]] = defaultdict(set)
+    for film in state.films.values():
+        for offer in film.offers:
+            brand_countries[canonical_brand_name(offer.package_clear_name)].add(offer.country)
+    return brand_countries
+
+
+def _main_brands(brand_countries: dict[str, set[str]], favorites: set[tuple[str, str]]) -> list[str]:
+    favorited_brands = {brand for brand, _country in favorites}
+    main = {
+        brand for brand, countries in brand_countries.items()
+        if len(countries) >= MIN_COUNTRIES_FOR_MAIN_BRAND or brand in favorited_brands
+    }
+    return sorted(main, key=lambda b: (-len(brand_countries.get(b, ())), b))
+
+
+def _film_row(film, main_brands: set[str], favorites: set[tuple[str, str]]) -> dict:
+    by_brand: dict[str, set[str]] = defaultdict(set)
+    for offer in film.offers:
+        by_brand[canonical_brand_name(offer.package_clear_name)].add(offer.country)
+
+    main_availability: dict[str, dict[str, list[str]]] = {}
+    for brand in main_brands:
+        countries = sorted(by_brand.get(brand, ()))
+        if not countries:
+            continue
+        favorited = [c for c in countries if (brand, c) in favorites]
+        other = [c for c in countries if (brand, c) not in favorites]
+        main_availability[brand] = {"favorited": favorited, "other": other}
+
+    other_services = sorted(
+        f"{brand} ({country})"
+        for brand, countries in by_brand.items()
+        if brand not in main_brands
+        for country in countries
+    )
+
+    any_service = bool(by_brand)
+    subscribed_service = any((brand, c) in favorites for brand, countries in by_brand.items() for c in countries)
+    coverage_countries = len({c for countries in by_brand.values() for c in countries})
+
+    return {
         "title": film.title,
         "year": film.year,
-        "confidence": film.confidence,
-        "any_service": False,
-        "subscribed_service": False,
-        "countries": {},
-        "matrix": {},
+        "slug": film.slug,
+        "any_service": any_service,
+        "subscribed_service": subscribed_service,
+        "coverage_countries": coverage_countries,
+        "main": main_availability,
+        "other_services": other_services,
     }
 
-    for country, country_config in config.items():
-        offers_here = [o for o in film.offers if o.country == country]
-        by_name: dict[str, str] = {}
-        for offer in offers_here:
-            name = canonical_display_name(offer, country_config)
-            classification = classify_offer(offer, country_config)
-            existing = by_name.get(name)
-            if existing is None or _STATUS_PRIORITY.index(classification) < _STATUS_PRIORITY.index(existing):
-                by_name[name] = classification
 
-        have = sorted(n for n, c in by_name.items() if c == "have")
-        free = sorted(n for n, c in by_name.items() if c == "free_tier")
-        other = sorted(n for n, c in by_name.items() if c == "new_possible")
+def build_dashboard_data(state: StateDoc, favorites: set[tuple[str, str]]) -> dict:
+    brand_countries = _global_brand_countries(state)
+    main_brands = _main_brands(brand_countries, favorites)
+    main_brand_set = set(main_brands)
 
-        if have:
-            status = "have"
-        elif free:
-            status = "free_tier"
-        elif other:
-            status = "new_possible"
-        else:
-            status = "none"
-
-        row["countries"][country] = {"status": status, "have": have, "free": free, "other": other}
-        for name in have + free + other:
-            row["matrix"][f"{country}: {name}"] = True
-
-        if status != "none":
-            row["any_service"] = True
-        if status == "have":
-            row["subscribed_service"] = True
-
-    return row
-
-
-def build_dashboard_data(state: StateDoc, config: dict[str, CountryConfig]) -> dict:
-    rows = [_film_row(film, config) for film in state.films.values()]
+    rows = [_film_row(film, main_brand_set, favorites) for film in state.films.values()]
     rows.sort(key=lambda r: r["title"].lower())
-
-    matrix_columns: list[str] = []
-    seen = set()
-    for country in config:
-        names = sorted({name for row in rows for name in row["matrix"] if name.startswith(f"{country}: ")})
-        for name in names:
-            if name not in seen:
-                seen.add(name)
-                matrix_columns.append(name)
 
     return {
         "last_run_at": state.last_run_at,
-        "countries": list(config.keys()),
-        "matrix_columns": matrix_columns,
+        "main_brands": main_brands,
         "films": rows,
     }
 
@@ -94,20 +96,21 @@ _TEMPLATE = """<!DOCTYPE html>
   .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
   input[type=text] { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; width: 260px; }
   label { font-size: 13px; color: #333; display: flex; align-items: center; gap: 6px; cursor: pointer; }
-  .table-wrap { overflow: auto; max-height: 80vh; border: 1px solid #ddd; border-radius: 8px; background: #fff; }
+  .table-wrap { overflow: auto; max-height: 82vh; border: 1px solid #ddd; border-radius: 8px; background: #fff; }
   table { border-collapse: collapse; font-size: 13px; white-space: nowrap; }
-  th, td { padding: 6px 10px; border-bottom: 1px solid #eee; border-right: 1px solid #f2f2f2; text-align: left; }
+  th, td { padding: 6px 10px; border-bottom: 1px solid #eee; border-right: 1px solid #f2f2f2; text-align: left;
+           vertical-align: top; }
   th { position: sticky; top: 0; background: #f4f4f2; cursor: pointer; user-select: none; z-index: 2; }
   th.sticky-col, td.sticky-col { position: sticky; left: 0; background: #fff; z-index: 1; }
   th.sticky-col { z-index: 3; background: #f4f4f2; }
   td.yes { color: #0a7a2f; font-weight: 500; }
   td.no { color: #b3352a; }
-  .matrix-col { display: none; text-align: center; }
-  .matrix-col.show { display: table-cell; }
-  .status-have { color: #0a7a2f; }
-  .status-free_tier { color: #b8860b; }
-  .status-new_possible { color: #2a6fc9; }
-  .status-none { color: #999; }
+  .fav { color: #0a7a2f; font-weight: 500; }
+  .avail { color: #2a6fc9; }
+  .other-cell { white-space: normal; max-width: 320px; color: #555; }
+  .cell-scroll { max-height: 2.4em; overflow-y: auto; }
+  a.film-link { color: inherit; text-decoration: none; border-bottom: 1px dotted #999; }
+  a.film-link:hover { border-bottom-style: solid; }
   tr.hidden { display: none; }
 </style>
 </head>
@@ -116,7 +119,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <div class="meta" id="meta"></div>
 <div class="controls">
   <input type="text" id="search" placeholder="Search films...">
-  <label><input type="checkbox" id="matrixToggle"> Show full service matrix (every service as its own column)</label>
+  <label><span class="fav">green</span> = favourited country &nbsp; <span class="avail">blue</span> = available but not favourited</label>
 </div>
 <div class="table-wrap"><table id="grid"><thead></thead><tbody></tbody></table></div>
 
@@ -124,67 +127,51 @@ _TEMPLATE = """<!DOCTYPE html>
 const DATA = __DATA__;
 
 document.getElementById('meta').textContent =
-  DATA.films.length + ' films, last checked ' + (DATA.last_run_at || 'never');
+  DATA.films.length + ' films, ' + DATA.main_brands.length + ' main services, last checked ' + (DATA.last_run_at || 'never');
 
 const compactCols = [
   { key: 'title', label: 'Film', sort: r => r.title.toLowerCase() },
   { key: 'year', label: 'Year', sort: r => r.year || 0 },
   { key: 'any_service', label: 'Any service?', sort: r => r.any_service ? 1 : 0 },
-  { key: 'subscribed_service', label: 'Subscribed?', sort: r => r.subscribed_service ? 1 : 0 },
+  { key: 'subscribed_service', label: 'Favourited service?', sort: r => r.subscribed_service ? 1 : 0 },
+  { key: 'coverage_countries', label: '# countries', sort: r => r.coverage_countries },
 ];
-for (const country of DATA.countries) {
-  compactCols.push({ key: 'status_' + country, label: country + ' status', sort: r => r.countries[country].status });
-  compactCols.push({ key: 'have_' + country, label: country + ' have' });
-  compactCols.push({ key: 'other_' + country, label: country + ' elsewhere' });
-}
 
-let sortKey = null, sortDir = 1;
+let sortKey = 'title', sortDir = 1;
 
-function cellValue(row, col) {
-  if (col.key === 'title') return row.title + (row.year ? ' (' + row.year + ')' : '');
-  if (col.key === 'year') return row.year || '';
-  if (col.key === 'any_service') return row.any_service ? 'Y' : 'N';
-  if (col.key === 'subscribed_service') return row.subscribed_service ? 'Y' : 'N';
-  if (col.key.startsWith('status_')) {
-    const c = col.key.slice(7);
-    return row.countries[c].status;
-  }
-  if (col.key.startsWith('have_')) {
-    const c = col.key.slice(5);
-    return row.countries[c].have.concat(row.countries[c].free).join(', ');
-  }
-  if (col.key.startsWith('other_')) {
-    const c = col.key.slice(6);
-    return row.countries[c].other.join(', ');
-  }
-  return '';
+function brandCellHtml(row, brand) {
+  const info = row.main[brand];
+  if (!info) return '';
+  const parts = [];
+  if (info.favorited.length) parts.push('<span class="fav">' + info.favorited.join(', ') + '</span>');
+  if (info.other.length) parts.push('<span class="avail">' + info.other.join(', ') + '</span>');
+  return parts.join(' ');
 }
 
 function render() {
   const thead = document.querySelector('#grid thead');
-  const tbody = document.querySelector('#grid tbody');
   thead.innerHTML = '';
-  tbody.innerHTML = '';
 
   const headRow = document.createElement('tr');
   compactCols.forEach((col, i) => {
     const th = document.createElement('th');
     th.textContent = col.label;
-    if (i < 2) th.classList.add('sticky-col');
+    if (i === 0) th.classList.add('sticky-col');
     th.addEventListener('click', () => {
-      if (!col.sort) return;
       sortDir = (sortKey === col.key) ? -sortDir : 1;
       sortKey = col.key;
       renderRows();
     });
     headRow.appendChild(th);
   });
-  DATA.matrix_columns.forEach(name => {
+  DATA.main_brands.forEach(brand => {
     const th = document.createElement('th');
-    th.textContent = name;
-    th.classList.add('matrix-col');
+    th.textContent = brand;
     headRow.appendChild(th);
   });
+  const otherTh = document.createElement('th');
+  otherTh.textContent = 'Other services (not main)';
+  headRow.appendChild(otherTh);
   thead.appendChild(headRow);
 
   renderRows();
@@ -196,42 +183,56 @@ function renderRows() {
   const q = document.getElementById('search').value.trim().toLowerCase();
 
   let rows = DATA.films.slice();
-  if (sortKey) {
-    const col = compactCols.find(c => c.key === sortKey);
+  const col = compactCols.find(c => c.key === sortKey);
+  if (col) {
     rows.sort((a, b) => {
       const av = col.sort(a), bv = col.sort(b);
       return av < bv ? -sortDir : av > bv ? sortDir : 0;
     });
   }
 
+  const frag = document.createDocumentFragment();
   rows.forEach(row => {
     if (q && !row.title.toLowerCase().includes(q)) return;
     const tr = document.createElement('tr');
+
     compactCols.forEach((col, i) => {
       const td = document.createElement('td');
-      const val = cellValue(row, col);
-      td.textContent = val;
-      if (i < 2) td.classList.add('sticky-col');
-      if (col.key === 'any_service' || col.key === 'subscribed_service') {
-        td.classList.add(val === 'Y' ? 'yes' : 'no');
+      if (col.key === 'title') {
+        const year = row.year ? ' (' + row.year + ')' : '';
+        td.innerHTML = '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' +
+          row.slug + '/">' + row.title.replace(/</g, '&lt;') + year + '</a>';
+      } else if (col.key === 'any_service' || col.key === 'subscribed_service') {
+        const val = row[col.key];
+        td.textContent = val ? 'Y' : 'N';
+        td.classList.add(val ? 'yes' : 'no');
+      } else {
+        td.textContent = row[col.key];
       }
-      if (col.key.startsWith('status_')) td.classList.add('status-' + val);
+      if (i === 0) td.classList.add('sticky-col');
       tr.appendChild(td);
     });
-    DATA.matrix_columns.forEach(name => {
+
+    DATA.main_brands.forEach(brand => {
       const td = document.createElement('td');
-      td.textContent = row.matrix[name] ? '✓' : '';
-      td.classList.add('matrix-col');
+      td.innerHTML = brandCellHtml(row, brand);
       tr.appendChild(td);
     });
-    tbody.appendChild(tr);
+
+    const otherTd = document.createElement('td');
+    otherTd.classList.add('other-cell');
+    const otherInner = document.createElement('div');
+    otherInner.classList.add('cell-scroll');
+    otherInner.textContent = row.other_services.join(', ');
+    otherTd.appendChild(otherInner);
+    tr.appendChild(otherTd);
+
+    frag.appendChild(tr);
   });
+  tbody.appendChild(frag);
 }
 
 document.getElementById('search').addEventListener('input', renderRows);
-document.getElementById('matrixToggle').addEventListener('change', e => {
-  document.querySelectorAll('.matrix-col').forEach(el => el.classList.toggle('show', e.target.checked));
-});
 
 render();
 </script>

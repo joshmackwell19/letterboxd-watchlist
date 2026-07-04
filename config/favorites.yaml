@@ -1,0 +1,82 @@
+# Your actual Letterboxd "favourite services" list, per your settings page.
+# Used for the dashboard's per-country availability view and the
+# --recommend-favorites analysis. Edit freely as your favourites change.
+favorites:
+  - { service: "Netflix Standard with Ads", country: AU }
+  - { service: "10", country: AU }
+  - { service: "7plus", country: AU }
+  - { service: "9Now", country: AU }
+  - { service: "ABC iview", country: AU }
+  - { service: "Amazon Prime Video", country: AU }
+  - { service: "Plex", country: AU }
+  - { service: "Stan", country: AU }
+  - { service: "BINGE", country: AU }
+  - { service: "Netflix", country: AU }
+  - { service: "Disney Plus", country: AU }
+  - { service: "HBO Max", country: AU }
+  - { service: "SBS On Demand", country: AU }
+  - { service: "Amazon Prime Video with Ads", country: AU }
+  - { service: "MUBI", country: AU }
+  - { service: "Criterion Channel", country: US }
+  - { service: "MUBI", country: GB }
+  - { service: "MUBI", country: US }
+  - { service: "HBO Max", country: US }
+  - { service: "Amazon Prime Video", country: US }
+  - { service: "Netflix Standard with Ads", country: US }
+  - { service: "Disney Plus", country: US }
+  - { service: "Netflix Standard with Ads", country: GB }
+  - { service: "Netflix", country: GB }
+  - { service: "Amazon Prime Video", country: GB }
+  - { service: "Plex", country: GB }
+  - { service: "MUBI", country: TR }
+  - { service: "Netflix", country: TR }
+  - { service: "Amazon Prime Video", country: TR }
+  - { service: "HBO Max", country: TR }
+  - { service: "MUBI", country: FR }
+  - { service: "Netflix", country: FR }
+  - { service: "Apple TV", country: AU }
+  - { service: "MUBI", country: MX }
+  - { service: "MUBI", country: CA }
+  - { service: "Netflix", country: DE }
+  - { service: "MUBI", country: DE }
+  - { service: "MUBI", country: AT }
+  - { service: "HBO Max", country: MX }
+  - { service: "Amazon Prime Video", country: MX }
+  - { service: "Netflix Standard with Ads", country: CA }
+  - { service: "Amazon Prime Video", country: CA }
+  - { service: "MUBI", country: KR }
+  - { service: "Netflix Standard with Ads", country: KR }
+  - { service: "Amazon Video", country: KR }
+  - { service: "Netflix", country: US }
+  - { service: "Disney Plus", country: TR }
+  - { service: "Amazon Prime Video with Ads", country: IT }
+  - { service: "Disney Plus", country: IT }
+  - { service: "MUBI", country: IT }
+  - { service: "HBO Max", country: IT }
+  - { service: "MUBI", country: NL }
+  - { service: "Disney Plus", country: NL }
+  - { service: "Amazon Prime Video", country: NL }
+  - { service: "HBO Max", country: NL }
+  - { service: "Netflix", country: NL }
+  - { service: "MUBI", country: CR }
+  - { service: "Netflix", country: CR }
+  - { service: "Amazon Prime Video", country: CR }
+  - { service: "Disney Plus", country: CR }
+  - { service: "MUBI", country: CH }
+  - { service: "BBC iPlayer", country: GB }
+  - { service: "BFI Player", country: GB }
+  - { service: "Channel 4", country: GB }
+  - { service: "Disney Plus", country: GB }
+  - { service: "ITVX", country: GB }
+  - { service: "Paramount Plus", country: GB }
+  - { service: "5", country: GB }
+  - { service: "HBO Max Amazon Channel", country: GB }
+  - { service: "Now TV Cinema", country: GB }
+  - { service: "Tubi TV", country: GB }
+  - { service: "Disney Plus", country: FR }
+  - { service: "Canal+", country: FR }
+  - { service: "Amazon Prime Video", country: FR }
+  - { service: "HBO Max", country: FR }
+  - { service: "Plex", country: FR }
+  - { service: "Amazon Prime Video", country: SG }
+  - { service: "Shudder", country: GB }

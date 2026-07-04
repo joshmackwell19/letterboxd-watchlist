@@ -37,13 +37,20 @@ def service_matches(config_name: str, justwatch_clear_name: str) -> bool:
 
 
 def load_config(path: Path) -> dict[str, CountryConfig]:
+    """Per-country subscriptions, with "global" (VPN-portable, e.g. Amazon
+    Prime Video/MUBI/Disney Plus) merged into every country — so consumers
+    scoped to just GB/AU/US still classify those correctly. For matching a
+    global subscription against a country the app doesn't otherwise track
+    (any of the other ~120 JustWatch countries), see load_global_subscriptions
+    and is_have_anywhere."""
     raw = yaml.safe_load(path.read_text())
+    global_subscriptions = raw.get("global", {}).get("subscriptions", []) or []
     countries = raw.get("countries", {})
 
     result: dict[str, CountryConfig] = {}
     for raw_country, entry in countries.items():
         country = validate_country_code(raw_country)
-        subscriptions = entry.get("subscriptions", []) or []
+        subscriptions = list(entry.get("subscriptions", []) or []) + list(global_subscriptions)
         free_tier = entry.get("free_tier", []) or []
 
         for name in subscriptions:
@@ -53,6 +60,29 @@ def load_config(path: Path) -> dict[str, CountryConfig]:
         result[country] = CountryConfig(country=country, subscriptions=subscriptions, free_tier=free_tier)
 
     return result
+
+
+def load_global_subscriptions(path: Path) -> list[str]:
+    """Raw "global" subscription names from services.yaml (VPN-portable
+    services that count as "have" regardless of country)."""
+    raw = yaml.safe_load(path.read_text())
+    return list(raw.get("global", {}).get("subscriptions", []) or [])
+
+
+def is_have_anywhere(
+    package_clear_name: str, country: str, config: dict[str, CountryConfig], global_subscriptions: list[str]
+) -> bool:
+    """The PRIMARY "have" check, valid across all ~124 JustWatch countries
+    (not just the 3 this app tracks per-country config for): true if the
+    offer's service is one of your VPN-portable global subscriptions, or one
+    of the single-region services you have in that specific country."""
+    if any(service_matches(name, package_clear_name) for name in global_subscriptions):
+        return True
+    country_config = config.get(country)
+    if country_config is None:
+        return False
+    return any(service_matches(name, package_clear_name)
+                for name in country_config.subscriptions + country_config.free_tier)
 
 
 def classify_offer(

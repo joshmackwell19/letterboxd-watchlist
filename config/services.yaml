@@ -1,34 +1,37 @@
-# Subscriptions Josh has, by country. Edit freely as subscriptions change.
-# Keys are ISO 3166-1 alpha-2 country codes (JustWatch uses these, not "uk").
+# Your actual current subscriptions — this is the PRIMARY "have" signal used
+# by the emails and reports. Edit freely as subscriptions change.
 #
-# "subscriptions" = services you pay for (or already have access to) -> ✅
-# "free_tier"     = free ad-supported apps you'd watch on if something's there,
-#                    but don't consider a "subscription" -> 🆓
-# Anything else JustWatch finds is flagged as 🆕 (might sign up).
+# "global" = subscriptions you access across many countries via VPN (Apple
+#            TV) — counts as "have" no matter which country's catalog the
+#            offer appears under.
+# "countries" = single-region services (their catalogs only ever exist under
+#               one country anyway) that you access there, keyed by ISO
+#               3166-1 alpha-2 code (JustWatch uses these, not "uk").
+#               "free_tier" = free ad-supported apps, kept separate from
+#               "subscriptions" for clarity, but both count as "have".
+global:
+  subscriptions:
+    - "Amazon Prime Video"
+    - "MUBI"
+    - "Disney Plus"
+
 countries:
   gb:
     subscriptions:
-      - "Netflix"
-      - "Amazon Prime"
-      - "MUBI"
-      - "Disney+"
       - "BBC iPlayer"
+      - "ITVX"
+      - "Channel 4"
+      - "Channel 5"
     free_tier: []
   au:
     subscriptions:
-      - "Netflix"
-      - "Amazon Prime"
       - "Stan"
-      - "MUBI"
-      - "Disney+"
+      - "ABC iview"
+      - "10"
+      - "7plus"
+      - "9Now"
       - "SBS On Demand"
     free_tier: []
   us:
-    subscriptions:
-      - "Netflix"
-      - "Amazon Prime"
-      - "MUBI"
-      - "Disney+"
-    free_tier:
-      - "Pluto TV"
-      - "Tubi"
+    subscriptions: []
+    free_tier: []

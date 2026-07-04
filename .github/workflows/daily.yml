@@ -11,6 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,3 +41,19 @@ jobs:
           git add data/state.json dashboard.html
           git diff --cached --quiet || git commit -m "Update watchlist state [skip ci]"
           git push
+
+      - name: Prepare Pages site
+        run: |
+          mkdir -p _site
+          cp dashboard.html _site/index.html
+          cp manifest.json _site/manifest.json
+          cp -r icons _site/icons
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

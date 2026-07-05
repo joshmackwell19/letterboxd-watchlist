@@ -264,7 +264,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <title>Watchlist streaming dashboard</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<meta name="theme-color" content="#0e1013">
+<meta name="theme-color" content="#4fd1c5">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Watchlist">
@@ -284,11 +284,17 @@ _TEMPLATE = """<!DOCTYPE html>
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.35);
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-    margin: 0; padding: 28px 32px 60px;
+    margin: 0; padding: calc(28px + env(safe-area-inset-top)) 32px 60px;
     background: var(--bg); color: var(--text);
     -webkit-font-smoothing: antialiased;
+    display: flex; flex-direction: column; min-height: 100dvh;
+  }
+  .status-bar-fill {
+    position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top);
+    background: var(--accent); z-index: 30;
   }
   .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
   h1 { font-size: 20px; font-weight: 600; margin: 0 0 3px; letter-spacing: -0.01em; }
@@ -343,7 +349,6 @@ _TEMPLATE = """<!DOCTYPE html>
     border-bottom: 1px solid var(--hairline-strong);
   }
   th:hover { color: var(--text); }
-  th.filterable.active { color: var(--accent); background: var(--accent-soft); }
   tbody tr { transition: background 0.1s; }
   tbody tr:hover td { background: rgba(255, 255, 255, 0.025); }
   th.sticky-col, td.sticky-col { position: sticky; left: 0; background: var(--surface); z-index: 1; }
@@ -351,7 +356,6 @@ _TEMPLATE = """<!DOCTYPE html>
   tbody tr:hover td.sticky-col { background: #1b1f25; }
   td.yes { color: #4ade80; font-weight: 600; }
   td.no { color: var(--text-faint); }
-  .cell-scroll { max-height: 3em; overflow-y: auto; overflow-wrap: break-word; }
   a.film-link { color: inherit; text-decoration: none; }
   a.film-link:hover { color: var(--accent); }
   section.view { display: none; }
@@ -373,15 +377,11 @@ _TEMPLATE = """<!DOCTYPE html>
   .quick-country:hover { border-color: var(--accent); color: var(--accent); }
   .quick-country.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
   .quick-country .count { opacity: 0.65; margin-left: 4px; }
-  .film-cell { display: flex; align-items: center; gap: 10px; }
   .poster-thumb {
     width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
     background: var(--hairline); box-shadow: 0 1px 3px rgba(0,0,0,0.35);
   }
   .poster-placeholder { width: 32px; height: 47px; border-radius: 4px; flex-shrink: 0; background: var(--hairline); }
-  .film-meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .film-title { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .film-sub { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .active-filters { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-muted); }
   .filter-chip {
     display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 999px;
@@ -418,9 +418,26 @@ _TEMPLATE = """<!DOCTYPE html>
   }
   .recommend-card .poster-thumb, .recommend-card .poster-placeholder { width: 64px; height: 94px; }
   .recommend-note { color: var(--text-muted); font-size: 12.5px; margin-bottom: 16px; }
+  .film-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .film-card {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px;
+    box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start;
+  }
+  .film-card .poster-thumb, .film-card .poster-placeholder { width: 56px; height: 82px; }
+  .film-card-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+  .film-card-title-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .film-card-title { font-weight: 600; font-size: 13.5px; }
+  .film-card-rating { font-size: 12px; color: #4ade80; font-weight: 600; white-space: nowrap; }
+  .film-card-director { font-size: 11.5px; color: var(--text-muted); }
+  .service-group { margin-top: 7px; }
+  .service-group-name {
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-muted); cursor: pointer; margin-right: 6px;
+  }
+  .service-group-name:hover, .service-group-name.active { color: var(--accent); }
   .bottom-nav { display: none; }
   @media (max-width: 700px) {
-    body { padding: 16px 12px 88px; }
+    body { padding: calc(16px + env(safe-area-inset-top)) 12px 16px; }
     h1 { font-size: 17px; }
     .tabs { display: none; }
     .controls { gap: 7px; }
@@ -429,10 +446,10 @@ _TEMPLATE = """<!DOCTYPE html>
     .table-wrap { max-height: none; border-radius: 10px; }
     table { font-size: 11px; }
     th { font-size: 10px; }
-    .film-title { font-size: 12px; }
-    .recommend-grid { grid-template-columns: 1fr; }
+    .recommend-grid, .film-cards { grid-template-columns: 1fr; }
     .bottom-nav {
-      display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+      display: flex; position: sticky; bottom: 0; left: 0; right: 0; z-index: 20;
+      margin: auto -12px -16px;
       background: var(--surface); border-top: 1px solid var(--hairline-strong);
       padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
       box-shadow: 0 -2px 16px rgba(0, 0, 0, 0.4);
@@ -448,6 +465,7 @@ _TEMPLATE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div class="status-bar-fill"></div>
 <div class="header">
   <div>
     <h1>Watchlist streaming dashboard</h1>
@@ -476,10 +494,15 @@ _TEMPLATE = """<!DOCTYPE html>
       <input type="text" id="countryFilmSearch" placeholder="Search title, year, director, cast...">
       <span class="search-clear hidden" id="countryFilmSearchClear">✕</span>
     </div>
+    <select id="countrySortSelect">
+      <option value="rating">Sort: Rating (highest)</option>
+      <option value="title">Sort: Title (A–Z)</option>
+      <option value="year">Sort: Year (newest)</option>
+    </select>
     <span id="countryFilterToggles"></span>
   </div>
   <div class="active-filters" id="activeCountryFilters"></div>
-  <div class="table-wrap"><table id="countryGrid"><thead></thead><tbody></tbody></table></div>
+  <div id="countryGrid" class="film-cards"></div>
 </section>
 
 <section class="view" id="view-services">
@@ -509,10 +532,16 @@ _TEMPLATE = """<!DOCTYPE html>
       <span class="search-clear hidden" id="searchClear">✕</span>
     </div>
     <select id="filmsCountrySelect"></select>
+    <select id="filmsSortSelect">
+      <option value="title">Sort: Title (A–Z)</option>
+      <option value="year">Sort: Year (newest)</option>
+      <option value="rating">Sort: Rating (highest)</option>
+      <option value="coverage_countries">Sort: Most countries</option>
+    </select>
     <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
   </div>
   <div class="active-filters" id="activeFilmFilters"></div>
-  <div class="table-wrap"><table id="filmsGrid"><thead></thead><tbody></tbody></table></div>
+  <div id="filmsGrid" class="film-cards"></div>
 </section>
 
 <nav class="bottom-nav">
@@ -602,15 +631,28 @@ function showView(name) {
   });
 }
 
-function filmCellHtml(row) {
+// Shared tile-card shell for the Films and Country tabs — poster + title/year/
+// rating/director up top, with per-tab service badges passed in as HTML so a
+// user never has to scroll a table sideways to see where a film streams.
+function filmCardShell(row, servicesHtml) {
   const year = row.year ? ' (' + row.year + ')' : '';
+  const rating = row.rating != null ? row.rating.toFixed(2) + '★' : '—';
   const poster = row.poster_url
     ? '<img class="poster-thumb" loading="lazy" src="' + row.poster_url + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
     : '<div class="poster-placeholder"></div>';
-  const sub = row.director ? '<span class="film-sub">' + esc(row.director) + '</span>' : '';
-  return '<div class="film-cell">' + poster +
-    '<div class="film-meta"><a class="film-link film-title" target="_blank" href="https://letterboxd.com/film/' +
-    row.slug + '/">' + esc(row.title) + year + '</a>' + sub + '</div></div>';
+  const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
+  const div = document.createElement('div');
+  div.className = 'film-card';
+  div.innerHTML = poster +
+    '<div class="film-card-body">' +
+      '<div class="film-card-title-row">' +
+        '<a class="film-link film-card-title" target="_blank" href="https://letterboxd.com/film/' + row.slug + '/">' +
+          esc(row.title) + year + '</a>' +
+        '<span class="film-card-rating">' + rating + '</span>' +
+      '</div>' +
+      director + servicesHtml +
+    '</div>';
+  return div;
 }
 
 function badgeHtml(entries, brandLabel) {
@@ -673,15 +715,13 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, compact) {
   return div;
 }
 
-// ---------- Films table ----------
+// ---------- Films cards ----------
 
 const filmCols = [
-  { key: 'title', label: 'Film', width: 260, sort: r => r.title.toLowerCase(), dir: 1 },
-  { key: 'year', label: 'Year', width: 55, sort: r => r.year || 0, dir: -1 },
-  { key: 'rating', label: 'Rating', width: 55, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
-  { key: 'any_service', label: 'Any?', width: 55, sort: r => r.any_service ? 1 : 0, dir: -1 },
-  { key: 'have_service', label: 'Have?', width: 55, sort: r => r.have_service ? 1 : 0, dir: -1 },
-  { key: 'coverage_countries', label: '# ctys', width: 60, sort: r => r.coverage_countries, dir: -1 },
+  { key: 'title', sort: r => r.title.toLowerCase(), dir: 1 },
+  { key: 'year', sort: r => r.year || 0, dir: -1 },
+  { key: 'rating', sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
+  { key: 'coverage_countries', sort: r => r.coverage_countries, dir: -1 },
 ];
 
 let filmSortKey = 'title', filmSortDir = 1;
@@ -833,49 +873,17 @@ function renderFilms() {
     });
   }
 
-  renderFilmsHead(columnBrands, showOtherServices);
-  renderFilmsBody(processed, columnBrands, showOtherServices);
-}
-
-function renderFilmsHead(columnBrands, showOtherServices) {
-  const thead = document.querySelector('#filmsGrid thead');
-  thead.innerHTML = '';
-  const headRow = document.createElement('tr');
-
-  filmCols.forEach((col, i) => {
-    const th = document.createElement('th');
-    th.style.width = col.width + 'px';
-    th.textContent = col.label;
-    if (i === 0) th.classList.add('sticky-col');
-    th.addEventListener('click', () => {
-      filmSortDir = (filmSortKey === col.key) ? -filmSortDir : col.dir;
-      filmSortKey = col.key;
-      renderFilms();
-    });
-    headRow.appendChild(th);
-  });
-  columnBrands.forEach(brand => {
-    const th = document.createElement('th');
-    th.style.width = '120px';
-    th.textContent = brand;
-    th.classList.add('filterable');
-    if (activeService === brand) th.classList.add('active');
-    th.addEventListener('click', () => {
-      activeService = (activeService === brand) ? null : brand;
-      renderFilms();
-    });
-    headRow.appendChild(th);
-  });
-  if (showOtherServices) {
-    const otherTh = document.createElement('th');
-    otherTh.style.width = '220px';
-    otherTh.textContent = 'Other services';
-    headRow.appendChild(otherTh);
-  }
-  thead.appendChild(headRow);
+  renderFilmCards(processed, columnBrands, showOtherServices);
 }
 
 function onBadgeDelegateClick(event) {
+  const brandEl = event.target.closest('[data-brand]');
+  if (brandEl) {
+    const brand = brandEl.getAttribute('data-brand');
+    activeService = (activeService === brand) ? null : brand;
+    renderFilms();
+    return;
+  }
   const badge = event.target.closest('[data-country]');
   if (!badge) return;
   const code = badge.getAttribute('data-country');
@@ -883,57 +891,36 @@ function onBadgeDelegateClick(event) {
   renderFilms();
 }
 
-function renderFilmsBody(processed, columnBrands, showOtherServices) {
-  const tbody = document.querySelector('#filmsGrid tbody');
-  tbody.innerHTML = '';
+function renderFilmCards(processed, columnBrands, showOtherServices) {
+  const container = document.getElementById('filmsGrid');
+  container.innerHTML = '';
 
   const frag = document.createDocumentFragment();
   processed.forEach(({ row, visibleMain, visibleOther }) => {
-    const tr = document.createElement('tr');
-
-    filmCols.forEach((col, i) => {
-      const td = document.createElement('td');
-      if (col.key === 'title') {
-        td.innerHTML = filmCellHtml(row);
-      } else if (col.key === 'rating') {
-        td.textContent = row.rating == null ? '' : row.rating.toFixed(2);
-      } else if (col.key === 'any_service' || col.key === 'have_service') {
-        const val = row[col.key];
-        td.textContent = val ? 'Y' : 'N';
-        td.classList.add(val ? 'yes' : 'no');
-      } else {
-        td.textContent = row[col.key];
-      }
-      if (i === 0) td.classList.add('sticky-col');
-      tr.appendChild(td);
-    });
+    let servicesHtml = '';
 
     columnBrands.forEach(brand => {
-      const td = document.createElement('td');
       const entries = visibleMain[brand];
-      if (entries) {
-        const inner = document.createElement('div');
-        inner.classList.add('cell-scroll');
-        inner.innerHTML = badgeHtml(entries, null);
-        td.appendChild(inner);
-      }
-      tr.appendChild(td);
+      if (!entries || !entries.length) return;
+      const activeCls = activeService === brand ? ' active' : '';
+      servicesHtml += '<div class="service-group">' +
+        '<span class="service-group-name' + activeCls + '" data-brand="' + esc(brand) + '">' + esc(brand) + '</span>' +
+        badgeHtml(entries, null) +
+      '</div>';
     });
 
-    if (showOtherServices) {
-      const otherTd = document.createElement('td');
-      const otherInner = document.createElement('div');
-      otherInner.classList.add('cell-scroll');
-      otherInner.innerHTML = visibleOther.map(o =>
-        '<span class="badge badge-subscription" data-country="' + o.country + '">' + esc(o.brand) + ' (' + o.country + ')</span>'
-      ).join(' ');
-      otherTd.appendChild(otherInner);
-      tr.appendChild(otherTd);
+    if (showOtherServices && visibleOther.length) {
+      servicesHtml += '<div class="service-group">' +
+        '<span class="service-group-name">Other</span>' +
+        visibleOther.map(o =>
+          '<span class="badge badge-subscription" data-country="' + o.country + '">' + esc(o.brand) + ' (' + o.country + ')</span>'
+        ).join(' ') +
+      '</div>';
     }
 
-    frag.appendChild(tr);
+    frag.appendChild(filmCardShell(row, servicesHtml));
   });
-  tbody.appendChild(frag);
+  container.appendChild(frag);
 }
 
 document.getElementById('search').addEventListener('input', renderFilms);
@@ -941,6 +928,11 @@ wireSearchClear('search', 'searchClear', renderFilms);
 document.getElementById('notHaveOnly').addEventListener('change', renderFilms);
 document.getElementById('filmsCountrySelect').addEventListener('change', e => {
   activeCountry = e.target.value || null;
+  renderFilms();
+});
+document.getElementById('filmsSortSelect').addEventListener('change', e => {
+  filmSortKey = e.target.value;
+  filmSortDir = filmCols.find(c => c.key === filmSortKey).dir;
   renderFilms();
 });
 document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateClick);
@@ -1118,10 +1110,9 @@ renderServicesRows();
 // ---------- By VPN country ----------
 
 const countryCols = [
-  { key: 'title', label: 'Film', width: 260, sort: r => r.title.toLowerCase(), dir: 1 },
-  { key: 'year', label: 'Year', width: 60, sort: r => r.year || 0, dir: -1 },
-  { key: 'rating', label: 'Rating', width: 60, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
-  { key: 'services', label: 'Services', width: 420 },
+  { key: 'title', sort: r => r.title.toLowerCase(), dir: 1 },
+  { key: 'year', sort: r => r.year || 0, dir: -1 },
+  { key: 'rating', sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
 ];
 
 const countryClassifications = ['have', 'could_get_again', 'free', 'subscription'];
@@ -1170,27 +1161,6 @@ function renderCountryFilterToggles() {
 function currentCountry() {
   const code = document.getElementById('countrySelect').value;
   return DATA.countries.find(c => c.code === code);
-}
-
-function renderCountryHead() {
-  const thead = document.querySelector('#countryGrid thead');
-  thead.innerHTML = '';
-  const headRow = document.createElement('tr');
-  countryCols.forEach((col, i) => {
-    const th = document.createElement('th');
-    th.style.width = col.width + 'px';
-    th.textContent = col.label;
-    if (i === 0) th.classList.add('sticky-col');
-    if (col.sort) {
-      th.addEventListener('click', () => {
-        countrySortDir = (countrySortKey === col.key) ? -countrySortDir : col.dir;
-        countrySortKey = col.key;
-        renderCountryRows();
-      });
-    }
-    headRow.appendChild(th);
-  });
-  thead.appendChild(headRow);
 }
 
 function renderActiveCountryFilters() {
@@ -1245,8 +1215,8 @@ function renderActiveCountryFilters() {
 }
 
 function renderCountryRows() {
-  const tbody = document.querySelector('#countryGrid tbody');
-  tbody.innerHTML = '';
+  const container = document.getElementById('countryGrid');
+  container.innerHTML = '';
   const country = currentCountry();
   renderActiveCountryFilters();
   if (!country) return;
@@ -1269,41 +1239,28 @@ function renderCountryRows() {
     if (serviceQ && !row.services.some(s => s.brand === serviceQ)) return;
     const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
     if (!visibleServices.length) return;
-    const tr = document.createElement('tr');
 
-    countryCols.forEach((col, i) => {
-      const td = document.createElement('td');
-      if (col.key === 'title') {
-        td.innerHTML = filmCellHtml(row);
-      } else if (col.key === 'rating') {
-        td.textContent = row.rating == null ? '' : row.rating.toFixed(2);
-      } else if (col.key === 'services') {
-        const inner = document.createElement('div');
-        inner.classList.add('cell-scroll');
-        inner.innerHTML = visibleServices.map(s =>
-          '<span class="badge badge-' + s.classification + '">' + esc(s.brand) + '</span>').join(' ');
-        td.appendChild(inner);
-      } else {
-        td.textContent = row[col.key];
-      }
-      if (i === 0) td.classList.add('sticky-col');
-      tr.appendChild(td);
-    });
-
-    frag.appendChild(tr);
+    const servicesHtml = '<div class="service-group">' +
+      visibleServices.map(s => '<span class="badge badge-' + s.classification + '">' + esc(s.brand) + '</span>').join(' ') +
+    '</div>';
+    frag.appendChild(filmCardShell(row, servicesHtml));
   });
-  tbody.appendChild(frag);
+  container.appendChild(frag);
 }
 
 document.getElementById('countrySelect').addEventListener('change', () => { populateCountryServiceSelect(); renderCountryRows(); });
 document.getElementById('countryServiceSelect').addEventListener('change', renderCountryRows);
 document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
 wireSearchClear('countryFilmSearch', 'countryFilmSearchClear', renderCountryRows);
+document.getElementById('countrySortSelect').addEventListener('change', e => {
+  countrySortKey = e.target.value;
+  countrySortDir = countryCols.find(c => c.key === countrySortKey).dir;
+  renderCountryRows();
+});
 
 populateCountrySelect();
 populateCountryServiceSelect();
 renderCountryFilterToggles();
-renderCountryHead();
 renderCountryRows();
 
 // ---------- Init ----------

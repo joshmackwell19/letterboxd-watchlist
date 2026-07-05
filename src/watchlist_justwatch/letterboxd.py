@@ -1,6 +1,7 @@
 import json
 import math
 import re
+import sys
 import time
 
 from curl_cffi import requests as curl_requests
@@ -203,7 +204,8 @@ def fetch_diary(
         response = _fetch_url(session, f"https://letterboxd.com/{username}/films/diary/", max_retries=max_retries,
                                backoff_base_seconds=backoff_base_seconds,
                                request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
-    except LetterboxdFetchError:
+    except LetterboxdFetchError as exc:
+        print(f"warning: diary fetch failed, skipping recent-watch recommendations ({exc})", file=sys.stderr)
         return []
 
     entries, _ = _parse_watchlist_page(response.text)  # same data-item-slug/name grid markup as the watchlist

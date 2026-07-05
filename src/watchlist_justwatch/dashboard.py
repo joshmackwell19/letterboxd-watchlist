@@ -34,10 +34,7 @@ def _all_offers_for_film(
     for brand, by_country in group_offers_by_brand_and_country(film.offers).items():
         for country, monetization_types in by_country.items():
             classification = _classify(brand, country, monetization_types, config, global_subscriptions, revisitable)
-            result.append({
-                "brand": brand, "country": country, "classification": classification,
-                "paid_subscription": "FLATRATE" in monetization_types,
-            })
+            result.append({"brand": brand, "country": country, "classification": classification})
     return result
 
 
@@ -102,10 +99,20 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
     }
 
 
+_CLASSIFICATION_PRIORITY = {"have": 0, "could_get_again": 1, "free": 2, "subscription": 3}
+
+
 def _service_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
     """One row per (brand, country). "titles"/"unique_titles" are slug lists
     — the detail page resolves full film info from films_by_slug so poster/
     synopsis/etc. text isn't duplicated across every service row it appears in.
+
+    A single "classification" represents the whole group (same have/
+    could_get_again/free/subscription taxonomy as the film and country
+    views) rather than separate have/paid booleans. "have"/"could_get_again"
+    are structural per (brand, country) so never actually vary within a
+    group; only free-vs-subscription can, when the service isn't one you
+    have, and there the best (most favorable) classification wins.
     """
     by_brand_country: dict[tuple[str, str], dict] = {}
 
@@ -113,26 +120,21 @@ def _service_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> l
         film_has_have = any(o["classification"] == "have" for o in all_offers)
         for offer in all_offers:
             key = (offer["brand"], offer["country"])
-            entry = by_brand_country.setdefault(key, {
-                "slugs": [], "has_have_flags": {}, "have": False, "paid_subscription_needed": False,
-            })
+            entry = by_brand_country.setdefault(key, {"slugs": [], "has_have_flags": {}, "classifications": set()})
             entry["slugs"].append(slug)
             entry["has_have_flags"][slug] = film_has_have
-            if offer["classification"] == "have":
-                entry["have"] = True
-            if offer["paid_subscription"]:
-                entry["paid_subscription_needed"] = True
+            entry["classifications"].add(offer["classification"])
 
     rows = []
     for (brand, country), entry in by_brand_country.items():
         slugs = sorted(entry["slugs"], key=lambda s: state.films[s].title.lower())
         unique_slugs = [s for s in slugs if not entry["has_have_flags"][s]]
+        classification = min(entry["classifications"], key=lambda c: _CLASSIFICATION_PRIORITY[c])
         rows.append({
             "brand": brand,
             "country": country,
             "country_name": country_name(country),
-            "have": entry["have"],
-            "paid_subscription_needed": entry["paid_subscription_needed"],
+            "classification": classification,
             "film_count": len(slugs),
             "slugs": slugs,
             "unique_film_count": len(unique_slugs),
@@ -304,6 +306,17 @@ _TEMPLATE = """<!DOCTYPE html>
     padding: 7px 14px; border: 1px solid var(--hairline-strong); border-radius: 999px; white-space: nowrap;
   }
   .watchlist-link:hover { background: var(--accent-soft); }
+  .info-icon {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-faint); cursor: pointer; font-size: 12.5px; margin-left: 4px;
+  }
+  .info-icon:hover { color: var(--text-muted); }
+  .info-tooltip {
+    display: none; position: absolute; bottom: 135%; left: 50%; transform: translateX(-50%);
+    background: var(--surface-2); color: var(--text); font-size: 11px; padding: 6px 10px; border-radius: 8px;
+    white-space: nowrap; box-shadow: var(--shadow); border: 1px solid var(--hairline-strong); z-index: 10;
+  }
+  .info-icon:hover .info-tooltip, .info-icon.open .info-tooltip { display: block; }
   .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
   .tab-btn {
     padding: 7px 15px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
@@ -334,28 +347,6 @@ _TEMPLATE = """<!DOCTYPE html>
     padding: 8px 11px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 12.5px;
     background: var(--surface); color: var(--text);
   }
-  .table-wrap {
-    overflow: auto; max-height: 74vh; border-radius: 14px; background: var(--surface);
-    box-shadow: var(--shadow); border: 1px solid var(--hairline); position: relative;
-  }
-  table { border-collapse: collapse; font-size: 12px; table-layout: fixed; width: 100%; }
-  th, td {
-    padding: 8px 12px; border-bottom: 1px solid var(--hairline); text-align: left;
-    vertical-align: middle; overflow: hidden;
-  }
-  th {
-    position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; z-index: 2;
-    font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
-    border-bottom: 1px solid var(--hairline-strong);
-  }
-  th:hover { color: var(--text); }
-  tbody tr { transition: background 0.1s; }
-  tbody tr:hover td { background: rgba(255, 255, 255, 0.025); }
-  th.sticky-col, td.sticky-col { position: sticky; left: 0; background: var(--surface); z-index: 1; }
-  th.sticky-col { z-index: 3; }
-  tbody tr:hover td.sticky-col { background: #1b1f25; }
-  td.yes { color: #4ade80; font-weight: 600; }
-  td.no { color: var(--text-faint); }
   a.film-link { color: inherit; text-decoration: none; }
   a.film-link:hover { color: var(--accent); }
   section.view { display: none; }
@@ -389,9 +380,6 @@ _TEMPLATE = """<!DOCTYPE html>
   }
   .clear-all-chip { background: rgba(255, 255, 255, 0.07); color: var(--text-muted); }
   .clear-all-chip:hover { background: rgba(255, 255, 255, 0.12); color: var(--text); }
-  .service-name-cell { cursor: pointer; }
-  .service-name-cell:hover { color: var(--accent); }
-  .service-name-cell i { color: var(--text-faint); font-style: italic; font-weight: 400; }
   .back-btn {
     background: none; border: 1px solid var(--hairline-strong); color: var(--text-muted); padding: 7px 14px;
     border-radius: 999px; cursor: pointer; font-size: 12.5px; margin-bottom: 16px;
@@ -411,6 +399,25 @@ _TEMPLATE = """<!DOCTYPE html>
   .detail-synopsis { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin: 4px 0 8px; }
   .badge-wrap { display: flex; flex-wrap: wrap; gap: 2px; }
   .muted { color: var(--text-faint); font-size: 12px; }
+  .detail-card.collapsible { cursor: pointer; }
+  .detail-card.collapsible .other-services-section { display: none; }
+  .detail-card.collapsible.expanded .other-services-section { display: block; }
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 50;
+    align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-overlay.active { display: flex; }
+  .modal-card {
+    position: relative; background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px;
+    max-width: 560px; width: 100%; max-height: 85vh; overflow-y: auto; padding: 20px; box-shadow: var(--shadow);
+  }
+  .modal-card .detail-card { border-bottom: none; padding: 0; }
+  .modal-card .detail-poster, .modal-card .detail-poster-placeholder { width: 120px; height: 176px; }
+  .modal-close {
+    position: absolute; top: 10px; right: 10px; background: var(--hairline); border: none; color: var(--text);
+    width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 14px; z-index: 1;
+  }
+  .modal-close:hover { background: var(--hairline-strong); }
   .recommend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
   .recommend-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 16px;
@@ -435,6 +442,16 @@ _TEMPLATE = """<!DOCTYPE html>
     color: var(--text-muted); cursor: pointer; margin-right: 6px;
   }
   .service-group-name:hover, .service-group-name.active { color: var(--accent); }
+  .service-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .service-card {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px;
+    box-shadow: var(--shadow); cursor: pointer; display: flex; flex-direction: column; gap: 8px;
+  }
+  .service-card:hover { border-color: var(--accent); }
+  .service-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .service-card-name { font-weight: 600; font-size: 13.5px; }
+  .service-card-name i { color: var(--text-faint); font-style: italic; font-weight: 400; display: block; font-size: 11.5px; }
+  .service-card-stats { color: var(--text-muted); font-size: 11.5px; }
   .bottom-nav { display: none; }
   @media (max-width: 700px) {
     body { padding: calc(16px + env(safe-area-inset-top)) 12px 16px; }
@@ -443,10 +460,7 @@ _TEMPLATE = """<!DOCTYPE html>
     .controls { gap: 7px; }
     .controls input[type=text], .controls select, .controls .search-wrap { width: auto; flex: 1 1 120px; }
     .controls .search-wrap input[type=text] { width: 100%; }
-    .table-wrap { max-height: none; border-radius: 10px; }
-    table { font-size: 11px; }
-    th { font-size: 10px; }
-    .recommend-grid, .film-cards { grid-template-columns: 1fr; }
+    .recommend-grid, .film-cards, .service-cards { grid-template-columns: 1fr; }
     .bottom-nav {
       display: flex; position: sticky; bottom: 0; left: 0; right: 0; z-index: 20;
       margin: auto -12px -16px;
@@ -513,10 +527,15 @@ _TEMPLATE = """<!DOCTYPE html>
       <input type="text" id="serviceFilmSearch" placeholder="Search title, year, director, cast...">
       <span class="search-clear hidden" id="serviceFilmSearchClear">✕</span>
     </div>
+    <select id="servicesSortSelect">
+      <option value="film_count">Sort: # films (most)</option>
+      <option value="brand">Sort: Service (A–Z)</option>
+      <option value="unique_film_count">Sort: # unique (most)</option>
+    </select>
     <label><input type="checkbox" id="haveOnlyServices"> Only services I have</label>
   </div>
   <div class="active-filters" id="activeServiceFilters"></div>
-  <div class="table-wrap"><table id="servicesGrid"><thead></thead><tbody></tbody></table></div>
+  <div id="servicesGrid" class="service-cards"></div>
 </section>
 
 <section class="view" id="view-service-detail">
@@ -577,18 +596,41 @@ _TEMPLATE = """<!DOCTYPE html>
   </button>
 </nav>
 
+<div class="modal-overlay" id="quickLookOverlay">
+  <div class="modal-card">
+    <button class="modal-close" id="quickLookClose">✕</button>
+    <div id="quickLookContent"></div>
+  </div>
+</div>
+
 <script>
 const DATA = __DATA__;
 const TABS = ['home', 'country', 'services', 'films'];
-
-document.getElementById('meta').textContent =
-  DATA.films.length + ' films, ' + DATA.main_brands.length + ' main services, last checked ' + (DATA.last_run_at || 'never');
-document.getElementById('watchlistLink').href = DATA.letterboxd_watchlist_url;
 
 function esc(text) {
   if (text == null) return '';
   return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+
+function formatLastChecked(iso) {
+  if (!iso) return 'never';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+document.getElementById('meta').innerHTML =
+  DATA.films.length + ' films, ' + DATA.main_brands.length + ' main services ' +
+  '<span class="info-icon" id="lastCheckedInfo">ⓘ<span class="info-tooltip">Last checked ' +
+  esc(formatLastChecked(DATA.last_run_at)) + '</span></span>';
+document.getElementById('lastCheckedInfo').addEventListener('click', event => {
+  event.stopPropagation();
+  event.currentTarget.classList.toggle('open');
+});
+document.addEventListener('click', () => {
+  document.getElementById('lastCheckedInfo').classList.remove('open');
+});
+document.getElementById('watchlistLink').href = DATA.letterboxd_watchlist_url;
 
 // Searches title, year, director and starring cast so a query like "1994" or
 // "Tarantino" or a lead actor's name all work from the same box.
@@ -629,11 +671,17 @@ function showView(name) {
     document.getElementById('tab-' + n).classList.toggle('active', isActive);
     document.getElementById('nav-' + n).classList.toggle('active', isActive);
   });
+  // All tabs share one page-level scroll (only one section is visible at a
+  // time), so switching tabs without resetting scroll left whatever the
+  // previous tab was scrolled to still in effect on the new one.
+  window.scrollTo(0, 0);
 }
 
 // Shared tile-card shell for the Films and Country tabs — poster + title/year/
 // rating/director up top, with per-tab service badges passed in as HTML so a
 // user never has to scroll a table sideways to see where a film streams.
+// Clicking the card (outside the title link or a filter badge) opens a quick
+// look with the film's synopsis and full cast.
 function filmCardShell(row, servicesHtml) {
   const year = row.year ? ' (' + row.year + ')' : '';
   const rating = row.rating != null ? row.rating.toFixed(2) + '★' : '—';
@@ -643,6 +691,7 @@ function filmCardShell(row, servicesHtml) {
   const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
   const div = document.createElement('div');
   div.className = 'film-card';
+  div.dataset.slug = row.slug;
   div.innerHTML = poster +
     '<div class="film-card-body">' +
       '<div class="film-card-title-row">' +
@@ -672,7 +721,7 @@ function renderHome() {
 
 // ---------- Film detail card (shared: home + service detail) ----------
 
-function buildFilmDetailCard(film, excludeBrand, excludeCountry, compact) {
+function buildFilmDetailCard(film, excludeBrand, excludeCountry, compact, collapsible) {
   const div = document.createElement('div');
   div.className = compact ? 'recommend-card' : 'detail-card';
   const year = film.year ? ' (' + film.year + ')' : '';
@@ -703,17 +752,51 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, compact) {
     otherHtml = '<span class="muted">No availability data</span>';
   }
 
+  const otherLabel = excludeBrand ? 'Other services' : 'Where to watch';
   div.innerHTML =
     '<div style="flex-shrink:0;">' + poster + '</div>' +
     '<div class="detail-body">' +
       '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
       '<p class="detail-rating">' + rating + '</p>' +
       director + starring + synopsis +
-      '<p class="detail-meta"><strong>' + (film.all_offers ? 'Other services' : 'Where to watch') + '</strong></p>' +
-      '<div class="badge-wrap">' + otherHtml + '</div>' +
+      '<div class="other-services-section">' +
+        '<p class="detail-meta"><strong>' + otherLabel + '</strong></p>' +
+        '<div class="badge-wrap">' + otherHtml + '</div>' +
+      '</div>' +
     '</div>';
+
+  if (collapsible) {
+    div.classList.add('collapsible');
+    div.addEventListener('click', event => {
+      if (event.target.closest('a.film-link')) return;
+      div.classList.toggle('expanded');
+    });
+  }
   return div;
 }
+
+// ---------- Quick look modal (Films + Country card click) ----------
+
+function openQuickLook(slug) {
+  const film = DATA.films_by_slug[slug];
+  if (!film) return;
+  const content = document.getElementById('quickLookContent');
+  content.innerHTML = '';
+  content.appendChild(buildFilmDetailCard(film, null, null, false));
+  document.getElementById('quickLookOverlay').classList.add('active');
+}
+
+function closeQuickLook() {
+  document.getElementById('quickLookOverlay').classList.remove('active');
+}
+
+document.getElementById('quickLookClose').addEventListener('click', closeQuickLook);
+document.getElementById('quickLookOverlay').addEventListener('click', event => {
+  if (event.target.id === 'quickLookOverlay') closeQuickLook();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeQuickLook();
+});
 
 // ---------- Films cards ----------
 
@@ -885,10 +968,15 @@ function onBadgeDelegateClick(event) {
     return;
   }
   const badge = event.target.closest('[data-country]');
-  if (!badge) return;
-  const code = badge.getAttribute('data-country');
-  activeCountry = (activeCountry === code) ? null : code;
-  renderFilms();
+  if (badge) {
+    const code = badge.getAttribute('data-country');
+    activeCountry = (activeCountry === code) ? null : code;
+    renderFilms();
+    return;
+  }
+  if (event.target.closest('a.film-link')) return;
+  const card = event.target.closest('.film-card');
+  if (card) openQuickLook(card.dataset.slug);
 }
 
 function renderFilmCards(processed, columnBrands, showOtherServices) {
@@ -937,15 +1025,14 @@ document.getElementById('filmsSortSelect').addEventListener('change', e => {
 });
 document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateClick);
 
-// ---------- Services table ----------
+// ---------- Services cards ----------
 
 const serviceCols = [
-  { key: 'brand', label: 'Service', width: 210, sort: r => r.brand.toLowerCase(), dir: 1 },
-  { key: 'have', label: 'Have?', width: 60, sort: r => r.have ? 1 : 0, dir: -1 },
-  { key: 'paid_subscription_needed', label: 'Paid?', width: 60, sort: r => r.paid_subscription_needed ? 1 : 0, dir: -1 },
-  { key: 'film_count', label: '# films', width: 70, sort: r => r.film_count, dir: -1 },
-  { key: 'unique_film_count', label: '# unique', width: 75, sort: r => r.unique_film_count, dir: -1 },
+  { key: 'brand', sort: r => r.brand.toLowerCase(), dir: 1 },
+  { key: 'film_count', sort: r => r.film_count, dir: -1 },
+  { key: 'unique_film_count', sort: r => r.unique_film_count, dir: -1 },
 ];
+const serviceClassificationLabels = { have: 'Have', could_get_again: 'Could get again', free: 'Free', subscription: 'Subscription needed' };
 
 let serviceSortKey = 'film_count', serviceSortDir = -1;
 
@@ -960,27 +1047,6 @@ function populateServiceSelects() {
   const countrySelect = document.getElementById('serviceCountrySelect');
   countrySelect.innerHTML = '<option value="">All countries</option>' +
     countryNames.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
-}
-
-function renderServicesHead() {
-  const thead = document.querySelector('#servicesGrid thead');
-  thead.innerHTML = '';
-  const headRow = document.createElement('tr');
-  serviceCols.forEach((col, i) => {
-    const th = document.createElement('th');
-    th.style.width = col.width + 'px';
-    th.textContent = col.label;
-    if (i === 0) th.classList.add('sticky-col');
-    if (col.sort) {
-      th.addEventListener('click', () => {
-        serviceSortDir = (serviceSortKey === col.key) ? -serviceSortDir : col.dir;
-        serviceSortKey = col.key;
-        renderServicesRows();
-      });
-    }
-    headRow.appendChild(th);
-  });
-  thead.appendChild(headRow);
 }
 
 function renderActiveServiceFilters() {
@@ -1039,8 +1105,8 @@ function renderActiveServiceFilters() {
 }
 
 function renderServicesRows() {
-  const tbody = document.querySelector('#servicesGrid tbody');
-  tbody.innerHTML = '';
+  const container = document.getElementById('servicesGrid');
+  container.innerHTML = '';
   const serviceQ = document.getElementById('serviceSelect').value;
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
@@ -1061,28 +1127,20 @@ function renderServicesRows() {
     if (serviceQ && row.brand !== serviceQ) return;
     if (countryQ && row.country_name !== countryQ) return;
     if (filmQ && !row.slugs.some(s => searchHaystack(DATA.films_by_slug[s]).includes(filmQ))) return;
-    if (haveOnly && !row.have) return;
-    const tr = document.createElement('tr');
+    if (haveOnly && row.classification !== 'have') return;
 
-    serviceCols.forEach((col, i) => {
-      const td = document.createElement('td');
-      if (col.key === 'brand') {
-        td.classList.add('service-name-cell');
-        td.innerHTML = esc(row.brand) + ' <i>' + esc(row.country_name) + '</i>';
-        td.addEventListener('click', () => openServiceDetail(row.brand, row.country, row.country_name));
-      } else if (col.key === 'have' || col.key === 'paid_subscription_needed') {
-        td.textContent = row[col.key] ? 'Y' : 'N';
-        td.classList.add(row[col.key] ? 'yes' : 'no');
-      } else {
-        td.textContent = row[col.key];
-      }
-      if (i === 0) td.classList.add('sticky-col');
-      tr.appendChild(td);
-    });
-
-    frag.appendChild(tr);
+    const card = document.createElement('div');
+    card.className = 'service-card';
+    card.innerHTML =
+      '<div class="service-card-head">' +
+        '<span class="service-card-name">' + esc(row.brand) + '<i>' + esc(row.country_name) + '</i></span>' +
+        '<span class="badge badge-' + row.classification + '">' + serviceClassificationLabels[row.classification] + '</span>' +
+      '</div>' +
+      '<div class="service-card-stats">' + row.film_count + ' films tracked · ' + row.unique_film_count + ' unique</div>';
+    card.addEventListener('click', () => openServiceDetail(row.brand, row.country, row.country_name));
+    frag.appendChild(card);
   });
-  tbody.appendChild(frag);
+  container.appendChild(frag);
 }
 
 function openServiceDetail(brand, country, countryName) {
@@ -1092,7 +1150,7 @@ function openServiceDetail(brand, country, countryName) {
   container.innerHTML = '';
   row.slugs.forEach(slug => {
     const film = DATA.films_by_slug[slug];
-    container.appendChild(buildFilmDetailCard(film, brand, country, false));
+    container.appendChild(buildFilmDetailCard(film, brand, country, false, true));
   });
   showView('service-detail');
 }
@@ -1102,9 +1160,13 @@ document.getElementById('serviceCountrySelect').addEventListener('change', rende
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
 document.getElementById('haveOnlyServices').addEventListener('change', renderServicesRows);
 wireSearchClear('serviceFilmSearch', 'serviceFilmSearchClear', renderServicesRows);
+document.getElementById('servicesSortSelect').addEventListener('change', e => {
+  serviceSortKey = e.target.value;
+  serviceSortDir = serviceCols.find(c => c.key === serviceSortKey).dir;
+  renderServicesRows();
+});
 
 populateServiceSelects();
-renderServicesHead();
 renderServicesRows();
 
 // ---------- By VPN country ----------
@@ -1241,12 +1303,29 @@ function renderCountryRows() {
     if (!visibleServices.length) return;
 
     const servicesHtml = '<div class="service-group">' +
-      visibleServices.map(s => '<span class="badge badge-' + s.classification + '">' + esc(s.brand) + '</span>').join(' ') +
+      visibleServices.map(s =>
+        '<span class="badge badge-' + s.classification + '" data-brand="' + esc(s.brand) + '">' + esc(s.brand) + '</span>'
+      ).join(' ') +
     '</div>';
     frag.appendChild(filmCardShell(row, servicesHtml));
   });
   container.appendChild(frag);
 }
+
+function onCountryCardClick(event) {
+  const badge = event.target.closest('[data-brand]');
+  if (badge) {
+    const brand = badge.getAttribute('data-brand');
+    const select = document.getElementById('countryServiceSelect');
+    select.value = (select.value === brand) ? '' : brand;
+    renderCountryRows();
+    return;
+  }
+  if (event.target.closest('a.film-link')) return;
+  const card = event.target.closest('.film-card');
+  if (card) openQuickLook(card.dataset.slug);
+}
+document.getElementById('countryGrid').addEventListener('click', onCountryCardClick);
 
 document.getElementById('countrySelect').addEventListener('change', () => { populateCountryServiceSelect(); renderCountryRows(); });
 document.getElementById('countryServiceSelect').addEventListener('change', renderCountryRows);

@@ -27,7 +27,7 @@ from .html_email import (
     render_report_html,
 )
 from .justwatch_client import resolve_and_fetch
-from .letterboxd import LetterboxdFetchError, fetch_diary, fetch_watchlist, get_film_details_by_slug
+from .letterboxd import LetterboxdFetchError, fetch_recent_watches, fetch_watchlist, get_film_details_by_slug
 from .notify import send_if_configured
 from .report import render_report
 from .similar import find_similar, recommend_from_recent_watches, render_similar
@@ -50,12 +50,9 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
     films = fetch_watchlist(username)
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Fetched early, before the ~600+ requests the main per-film loop below
-    # makes, so it isn't the one that happens to trip Letterboxd's rate
-    # limiting for this run.
-    diary_films = fetch_diary(username, limit=4)
+    recent_watch_films = fetch_recent_watches(username, limit=4)
     recent_watches = []
-    for w in diary_films:
+    for w in recent_watch_films:
         details = get_film_details_by_slug(w.slug)
         recent_watches.append({
             "slug": w.slug, "title": w.title, "year": w.year,

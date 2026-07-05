@@ -14,6 +14,7 @@ ITEM_SLUG_RE = re.compile(r'data-item-slug="([^"]+)"')
 TITLE_YEAR_RE = re.compile(r"^(?P<title>.+) \((?P<year>\d{4})\)$")
 RATING_RE = re.compile(r'name="twitter:data2" content="([\d.]+) out of 5"')
 JSON_LD_RE = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.DOTALL)
+RECENT_ACTIVITY_RE = re.compile(r'<section id="recent-activity".*?</section>', re.DOTALL)
 MAX_STARRING = 5
 
 
@@ -185,7 +186,7 @@ def fetch_watchlist(
     return list(all_films.values())
 
 
-def fetch_diary(
+def fetch_recent_watches(
     username: str,
     *,
     limit: int = 4,
@@ -194,21 +195,28 @@ def fetch_diary(
     backoff_base_seconds: float = 2.0,
     request_timeout_seconds: float = 15.0,
 ) -> list[WatchlistFilm]:
-    """Most recently watched films first (page 1 of the diary is already in
-    that order), deduped by slug so a rewatch only counts once. Feeds the
-    dashboard's "because you recently watched" recommendations, which are a
-    nice-to-have — any fetch failure just yields no recent-watch data rather
-    than breaking the whole daily run."""
+    """Most recently watched films first, read from the "Recent activity"
+    poster grid Letterboxd already embeds on the profile homepage. The
+    dedicated diary page (/films/diary/) returns a 403 from GitHub Actions'
+    IP range even though the profile and watchlist pages don't, so this
+    reads the same last-few-watched data from a page that isn't blocked.
+    Feeds the dashboard's "because you recently watched" recommendations,
+    a nice-to-have — any fetch failure just yields no recent-watch data
+    rather than breaking the whole daily run."""
     session = curl_requests.Session()
     try:
-        response = _fetch_url(session, f"https://letterboxd.com/{username}/films/diary/", max_retries=max_retries,
+        response = _fetch_url(session, f"https://letterboxd.com/{username}/", max_retries=max_retries,
                                backoff_base_seconds=backoff_base_seconds,
                                request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
     except LetterboxdFetchError as exc:
-        print(f"warning: diary fetch failed, skipping recent-watch recommendations ({exc})", file=sys.stderr)
+        print(f"warning: profile fetch failed, skipping recent-watch recommendations ({exc})", file=sys.stderr)
         return []
 
-    entries, _ = _parse_watchlist_page(response.text)  # same data-item-slug/name grid markup as the watchlist
+    section_match = RECENT_ACTIVITY_RE.search(response.text)
+    if not section_match:
+        return []
+
+    entries, _ = _parse_watchlist_page(section_match.group(0))  # same data-item-slug/name grid markup
     seen: set[str] = set()
     result: list[WatchlistFilm] = []
     for entry in entries:

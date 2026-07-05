@@ -10,7 +10,8 @@ from .state import StateDoc
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
 FREE_TIER_COUNTRIES = {"AU", "GB", "US"}
 ALWAYS_MAIN_BRANDS = {"Netflix", "HBO Max"}
-TOP_COUNTRIES_LIMIT = 10
+RECOMMENDED_COUNT = 4
+LETTERBOXD_USERNAME = "Jmackwell"
 
 
 def _classify(brand: str, country: str, monetization_types: set[str], config: dict[str, CountryConfig],
@@ -22,6 +23,22 @@ def _classify(brand: str, country: str, monetization_types: set[str], config: di
     if "FLATRATE" in monetization_types:
         return "subscription"
     return "free"
+
+
+def _all_offers_for_film(
+    film, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
+) -> list[dict]:
+    """Every (brand, country) this film has a qualifying offer for, each
+    classified — the single source of truth other views bucket/filter."""
+    result = []
+    for brand, by_country in group_offers_by_brand_and_country(film.offers).items():
+        for country, monetization_types in by_country.items():
+            classification = _classify(brand, country, monetization_types, config, global_subscriptions, revisitable)
+            result.append({
+                "brand": brand, "country": country, "classification": classification,
+                "paid_subscription": "FLATRATE" in monetization_types,
+            })
+    return result
 
 
 def _select_main_brands(
@@ -48,52 +65,25 @@ def _select_main_brands(
     return sorted(main, key=lambda b: (priority.get(b, 1), b))
 
 
-def _top_have_countries(
-    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], limit: int = TOP_COUNTRIES_LIMIT
-) -> list[dict]:
-    """Countries ranked by how many watchlist films have a "have" offer
-    there — quick-filter shortcuts for the films tab."""
-    counts: dict[str, int] = defaultdict(int)
-    for film in state.films.values():
-        countries_with_have = {
-            country
-            for brand, by_country in group_offers_by_brand_and_country(film.offers).items()
-            for country, _monetization_types in by_country.items()
-            if is_have_anywhere(brand, country, config, global_subscriptions)
-        }
-        for country in countries_with_have:
-            counts[country] += 1
-
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-    return [{"code": code, "name": country_name(code), "count": count} for code, count in ranked]
-
-
-def _film_row(
-    film, main_brands: set[str], config: dict[str, CountryConfig], global_subscriptions: list[str],
-    revisitable: set[str]
-) -> dict:
-    by_brand_country = group_offers_by_brand_and_country(film.offers)
-
+def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
     main_availability: dict[str, list[dict]] = {}
     other_services: list[dict] = []
     any_have = False
     all_countries: set[str] = set()
 
-    for brand, by_country in by_brand_country.items():
-        entries = []
-        for country, monetization_types in by_country.items():
-            all_countries.add(country)
-            classification = _classify(brand, country, monetization_types, config, global_subscriptions, revisitable)
-            if classification == "have":
-                any_have = True
-            if brand in main_brands:
-                entries.append({"country": country, "classification": classification})
-            else:
-                other_services.append({"brand": brand, "country": country})
-        if entries:
-            entries.sort(key=lambda e: (e["classification"] != "have", e["country"]))
-            main_availability[brand] = entries
+    for offer in all_offers:
+        all_countries.add(offer["country"])
+        if offer["classification"] == "have":
+            any_have = True
+        if offer["brand"] in main_brands:
+            main_availability.setdefault(offer["brand"], []).append(
+                {"country": offer["country"], "classification": offer["classification"]}
+            )
+        else:
+            other_services.append({"brand": offer["brand"], "country": offer["country"]})
 
+    for entries in main_availability.values():
+        entries.sort(key=lambda e: (e["classification"] != "have", e["country"]))
     other_services.sort(key=lambda o: (o["brand"], o["country"]))
 
     return {
@@ -103,7 +93,7 @@ def _film_row(
         "rating": film.rating,
         "poster_url": film.poster_url,
         "director": ", ".join(film.director) if film.director else None,
-        "any_service": bool(by_brand_country),
+        "any_service": bool(all_offers),
         "have_service": any_have,
         "coverage_countries": len(all_countries),
         "main": main_availability,
@@ -111,52 +101,54 @@ def _film_row(
     }
 
 
-def _service_rows(
-    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], film_has_have: dict[str, bool]
-) -> list[dict]:
+def _service_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
+    """One row per (brand, country). "titles"/"unique_titles" are slug lists
+    — the detail page resolves full film info from films_by_slug so poster/
+    synopsis/etc. text isn't duplicated across every service row it appears in.
+    """
     by_brand_country: dict[tuple[str, str], dict] = {}
 
-    for film in state.films.values():
-        by_brand_country_types = group_offers_by_brand_and_country(film.offers)
-        for brand, by_country in by_brand_country_types.items():
-            for country, monetization_types in by_country.items():
-                key = (brand, country)
-                entry = by_brand_country.setdefault(key, {"titles": [], "monetization_types": set()})
-                entry["titles"].append((film.slug, film.title))
-                entry["monetization_types"] |= monetization_types
+    for slug, all_offers in films_all_offers.items():
+        film_has_have = any(o["classification"] == "have" for o in all_offers)
+        for offer in all_offers:
+            key = (offer["brand"], offer["country"])
+            entry = by_brand_country.setdefault(key, {
+                "slugs": [], "has_have_flags": {}, "have": False, "paid_subscription_needed": False,
+            })
+            entry["slugs"].append(slug)
+            entry["has_have_flags"][slug] = film_has_have
+            if offer["classification"] == "have":
+                entry["have"] = True
+            if offer["paid_subscription"]:
+                entry["paid_subscription_needed"] = True
 
     rows = []
     for (brand, country), entry in by_brand_country.items():
-        titles = sorted(t for _slug, t in entry["titles"])
-        unique_titles = sorted(t for slug, t in entry["titles"] if not film_has_have.get(slug, False))
+        slugs = sorted(entry["slugs"], key=lambda s: state.films[s].title.lower())
+        unique_slugs = [s for s in slugs if not entry["has_have_flags"][s]]
         rows.append({
             "brand": brand,
             "country": country,
             "country_name": country_name(country),
-            "have": is_have_anywhere(brand, country, config, global_subscriptions),
-            "paid_subscription_needed": "FLATRATE" in entry["monetization_types"],
-            "film_count": len(titles),
-            "titles": titles,
-            "unique_film_count": len(unique_titles),
-            "unique_titles": unique_titles,
+            "have": entry["have"],
+            "paid_subscription_needed": entry["paid_subscription_needed"],
+            "film_count": len(slugs),
+            "slugs": slugs,
+            "unique_film_count": len(unique_slugs),
+            "unique_slugs": unique_slugs,
         })
     rows.sort(key=lambda r: (-r["film_count"], r["brand"], r["country"]))
     return rows
 
 
-def _country_rows(
-    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
-) -> list[dict]:
+def _country_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
     by_country: dict[str, list[dict]] = defaultdict(list)
 
-    for film in state.films.values():
-        by_brand_country = group_offers_by_brand_and_country(film.offers)
+    for slug, all_offers in films_all_offers.items():
+        film = state.films[slug]
         country_services: dict[str, list[dict]] = defaultdict(list)
-        for brand, by_c in by_brand_country.items():
-            for country, monetization_types in by_c.items():
-                classification = _classify(brand, country, monetization_types, config, global_subscriptions,
-                                            revisitable)
-                country_services[country].append({"brand": brand, "classification": classification})
+        for offer in all_offers:
+            country_services[offer["country"]].append({"brand": offer["brand"], "classification": offer["classification"]})
 
         for country, services in country_services.items():
             services.sort(key=lambda s: (s["classification"] != "have", s["brand"]))
@@ -176,6 +168,57 @@ def _country_rows(
     return countries
 
 
+def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> dict[str, dict]:
+    lookup = {}
+    for slug, all_offers in films_all_offers.items():
+        film = state.films[slug]
+        lookup[slug] = {
+            "slug": slug,
+            "title": film.title,
+            "year": film.year,
+            "rating": film.rating,
+            "poster_url": film.poster_url,
+            "director": ", ".join(film.director) if film.director else None,
+            "starring": film.starring,
+            "synopsis": film.synopsis,
+            "all_offers": all_offers,
+        }
+    return lookup
+
+
+def _recommended_films(state: StateDoc, films_all_offers: dict[str, list[dict]], limit: int = RECOMMENDED_COUNT) -> list[dict]:
+    """Placeholder recommendation methodology (no watch-history data exists
+    yet, only watchlist + availability + Letterboxd's crowd rating): the
+    highest-rated films you can actually watch right now on a service you
+    have, falling back to highest-rated overall if fewer than `limit`
+    qualify. Revisit once there's a richer signal to rank on."""
+    def has_have(slug: str) -> bool:
+        return any(o["classification"] == "have" for o in films_all_offers.get(slug, []))
+
+    rated = [(slug, film.rating) for slug, film in state.films.items() if film.rating is not None]
+    watchable_now = sorted((s for s, r in rated if has_have(s)), key=lambda s: (-state.films[s].rating, state.films[s].title))
+    chosen = watchable_now[:limit]
+    if len(chosen) < limit:
+        fallback = sorted((s for s, r in rated if s not in chosen), key=lambda s: (-state.films[s].rating, state.films[s].title))
+        chosen += fallback[: limit - len(chosen)]
+
+    results = []
+    for slug in chosen:
+        film = state.films[slug]
+        offers = films_all_offers.get(slug, [])
+        buckets: dict[str, list[dict]] = defaultdict(list)
+        for o in offers:
+            buckets[o["classification"]].append({"brand": o["brand"], "country": o["country"]})
+        results.append({
+            "slug": slug, "title": film.title, "year": film.year, "rating": film.rating,
+            "poster_url": film.poster_url,
+            "director": ", ".join(film.director) if film.director else None,
+            "starring": film.starring, "synopsis": film.synopsis,
+            "availability": buckets,
+        })
+    return results
+
+
 def build_dashboard_data(
     state: StateDoc,
     favorites: set[tuple[str, str]],
@@ -186,24 +229,23 @@ def build_dashboard_data(
     main_brands = _select_main_brands(state, config, global_subscriptions)
     main_brand_set = set(main_brands)
 
-    film_has_have: dict[str, bool] = {}
-    for slug, film in state.films.items():
-        film_has_have[slug] = any(
-            is_have_anywhere(offer.package_clear_name, offer.country, config, global_subscriptions)
-            for offer in film.offers
-        )
+    films_all_offers = {
+        slug: _all_offers_for_film(film, config, global_subscriptions, revisitable)
+        for slug, film in state.films.items()
+    }
 
-    rows = [_film_row(film, main_brand_set, config, global_subscriptions, revisitable)
-            for film in state.films.values()]
+    rows = [_film_row(film, main_brand_set, films_all_offers[slug]) for slug, film in state.films.items()]
     rows.sort(key=lambda r: r["title"].lower())
 
     return {
         "last_run_at": state.last_run_at,
+        "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
-        "top_countries": _top_have_countries(state, config, global_subscriptions),
+        "recommended": _recommended_films(state, films_all_offers),
         "films": rows,
-        "services": _service_rows(state, config, global_subscriptions, film_has_have),
-        "countries": _country_rows(state, config, global_subscriptions, revisitable),
+        "services": _service_rows(state, films_all_offers),
+        "countries": _country_rows(state, films_all_offers),
+        "films_by_slug": _films_by_slug(state, films_all_offers),
     }
 
 
@@ -220,154 +262,202 @@ _TEMPLATE = """<!DOCTYPE html>
 <title>Watchlist streaming dashboard</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<meta name="theme-color" content="#1f5f5b">
+<meta name="theme-color" content="#0e1013">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Watchlist">
 <style>
   :root {
-    color-scheme: light dark;
-    --bg: #fbfbfa;
-    --surface: #ffffff;
-    --text: #14171a;
-    --text-muted: #6b7280;
-    --text-faint: #9aa1a9;
-    --hairline: rgba(20, 23, 26, 0.08);
-    --hairline-strong: rgba(20, 23, 26, 0.14);
-    --accent: #1f5f5b;
-    --accent-soft: #e7f1f0;
-    --shadow: 0 1px 2px rgba(20, 23, 26, 0.04), 0 8px 24px rgba(20, 23, 26, 0.06);
+    color-scheme: dark;
+    --bg: #0e1013;
+    --surface: #171a1f;
+    --surface-2: #1e222a;
+    --text: #edf0f2;
+    --text-muted: #98a1ab;
+    --text-faint: #5f6770;
+    --hairline: rgba(255, 255, 255, 0.07);
+    --hairline-strong: rgba(255, 255, 255, 0.14);
+    --accent: #4fd1c5;
+    --accent-soft: rgba(79, 209, 197, 0.14);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.35);
   }
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-    margin: 0; padding: 32px 36px 60px;
+    margin: 0; padding: 28px 32px 60px;
     background: var(--bg); color: var(--text);
     -webkit-font-smoothing: antialiased;
   }
-  h1 { font-size: 21px; font-weight: 600; margin: 0 0 3px; letter-spacing: -0.01em; }
-  .meta { color: var(--text-muted); font-size: 13px; margin-bottom: 20px; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 18px; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 3px; letter-spacing: -0.01em; }
+  .meta { color: var(--text-muted); font-size: 12.5px; }
+  .watchlist-link {
+    color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 500;
+    padding: 7px 14px; border: 1px solid var(--hairline-strong); border-radius: 999px; white-space: nowrap;
+  }
+  .watchlist-link:hover { background: var(--accent-soft); }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
   .tab-btn {
-    padding: 7px 16px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
-    cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.15s, color 0.15s;
+    padding: 7px 15px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
+    cursor: pointer; font-size: 12.5px; font-weight: 500; transition: background 0.15s, color 0.15s;
   }
   .tab-btn:hover { background: var(--hairline); }
-  .tab-btn.active { background: var(--text); color: var(--surface); }
-  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; font-size: 13px; }
-  .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
-  .quick-filters .hint { color: var(--text-faint); font-size: 12px; margin-right: 2px; }
+  .tab-btn.active { background: var(--text); color: var(--bg); }
+  .controls { display: flex; gap: 9px; align-items: center; margin-bottom: 11px; flex-wrap: wrap; font-size: 12.5px; }
+  .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .quick-filters .hint { color: var(--text-faint); font-size: 11.5px; margin-right: 2px; }
   input[type=text] {
-    padding: 9px 13px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 13px; width: 210px;
+    padding: 8px 12px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 12.5px; width: 190px;
     background: var(--surface); color: var(--text); outline: none; transition: border-color 0.15s;
   }
+  input[type=text]::placeholder { color: var(--text-faint); }
   input[type=text]:focus { border-color: var(--accent); }
-  label { color: var(--text-muted); display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
-  .table-wrap {
-    overflow: auto; max-height: 76vh; border-radius: 14px; background: var(--surface);
-    box-shadow: var(--shadow); border: 1px solid var(--hairline);
+  label { color: var(--text-muted); display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12.5px; }
+  select {
+    padding: 8px 11px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 12.5px;
+    background: var(--surface); color: var(--text);
   }
-  table { border-collapse: collapse; font-size: 13px; table-layout: fixed; width: 100%; }
+  .table-wrap {
+    overflow: auto; max-height: 74vh; border-radius: 14px; background: var(--surface);
+    box-shadow: var(--shadow); border: 1px solid var(--hairline); position: relative;
+  }
+  table { border-collapse: collapse; font-size: 12px; table-layout: fixed; width: 100%; }
   th, td {
-    padding: 10px 14px; border-bottom: 1px solid var(--hairline); text-align: left;
+    padding: 8px 12px; border-bottom: 1px solid var(--hairline); text-align: left;
     vertical-align: middle; overflow: hidden;
   }
   th {
     position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; z-index: 2;
-    font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
+    font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
     border-bottom: 1px solid var(--hairline-strong);
   }
   th:hover { color: var(--text); }
+  th.filterable.active { color: var(--accent); background: var(--accent-soft); }
   tbody tr { transition: background 0.1s; }
-  tbody tr:hover td { background: rgba(20, 23, 26, 0.02); }
+  tbody tr:hover td { background: rgba(255, 255, 255, 0.025); }
   th.sticky-col, td.sticky-col { position: sticky; left: 0; background: var(--surface); z-index: 1; }
   th.sticky-col { z-index: 3; }
-  tbody tr:hover td.sticky-col { background: #f7f8f7; }
-  td.yes { color: #0f7a4a; font-weight: 600; }
+  tbody tr:hover td.sticky-col { background: #1b1f25; }
+  td.yes { color: #4ade80; font-weight: 600; }
   td.no { color: var(--text-faint); }
-  .cell-scroll { max-height: 3.2em; overflow-y: auto; overflow-wrap: break-word; }
+  .cell-scroll { max-height: 3em; overflow-y: auto; overflow-wrap: break-word; }
   a.film-link { color: inherit; text-decoration: none; }
   a.film-link:hover { color: var(--accent); }
   section.view { display: none; }
   section.view.active { display: block; }
-  select {
-    padding: 8px 12px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 13px;
-    background: var(--surface); color: var(--text);
-  }
   .badge {
-    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 500;
-    margin: 1px 4px 1px 0; white-space: nowrap;
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 500;
+    margin: 1px 4px 1px 0; white-space: nowrap; cursor: pointer;
   }
-  .badge-have { background: #e4f3ea; color: #0f7a4a; }
-  .badge-could_get_again { background: #efe7fa; color: #6d3fb8; }
-  .badge-free { background: #e6f1fb; color: #1c68b0; }
-  .badge-subscription { background: #f0f0ee; color: #6b6b68; }
+  .badge-have { background: rgba(74, 222, 128, 0.14); color: #4ade80; }
+  .badge-could_get_again { background: rgba(192, 132, 252, 0.14); color: #c084fc; }
+  .badge-free { background: rgba(96, 165, 250, 0.14); color: #60a5fa; }
+  .badge-subscription { background: rgba(255, 255, 255, 0.07); color: var(--text-muted); }
   .filter-toggle { cursor: pointer; border: 1.5px solid transparent; transition: opacity 0.15s; }
   .filter-toggle.off { opacity: 0.3; }
   .quick-country {
-    padding: 5px 13px; border-radius: 999px; font-size: 12.5px; font-weight: 500; cursor: pointer;
+    padding: 5px 12px; border-radius: 999px; font-size: 11.5px; font-weight: 500; cursor: pointer;
     background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text-muted);
-    transition: all 0.15s;
   }
   .quick-country:hover { border-color: var(--accent); color: var(--accent); }
-  .quick-country.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .quick-country .count { color: inherit; opacity: 0.6; margin-left: 4px; }
-  .film-cell { display: flex; align-items: center; gap: 11px; }
+  .quick-country.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
+  .quick-country .count { opacity: 0.65; margin-left: 4px; }
+  .film-cell { display: flex; align-items: center; gap: 10px; }
   .poster-thumb {
-    width: 38px; height: 56px; object-fit: cover; border-radius: 5px; flex-shrink: 0;
-    background: var(--hairline); box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
+    background: var(--hairline); box-shadow: 0 1px 3px rgba(0,0,0,0.35);
   }
-  .poster-placeholder {
-    width: 38px; height: 56px; border-radius: 5px; flex-shrink: 0; background: var(--hairline);
+  .poster-placeholder { width: 32px; height: 47px; border-radius: 4px; flex-shrink: 0; background: var(--hairline); }
+  .film-meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .film-title { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .film-sub { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .active-filters { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-muted); }
+  .filter-chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); cursor: pointer; font-weight: 500;
   }
-  .film-meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .film-title { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .film-sub { font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .service-name-cell { cursor: pointer; }
+  .service-name-cell:hover { color: var(--accent); }
+  .service-name-cell i { color: var(--text-faint); font-style: italic; font-weight: 400; }
+  .back-btn {
+    background: none; border: 1px solid var(--hairline-strong); color: var(--text-muted); padding: 7px 14px;
+    border-radius: 999px; cursor: pointer; font-size: 12.5px; margin-bottom: 16px;
+  }
+  .back-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  .detail-title { font-size: 17px; font-weight: 600; margin: 0 0 16px; }
+  .detail-title i { color: var(--text-faint); font-style: italic; font-weight: 400; }
+  .detail-card {
+    display: flex; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--hairline);
+  }
+  .detail-poster { width: 76px; height: 112px; object-fit: cover; border-radius: 6px; flex-shrink: 0; background: var(--hairline); }
+  .detail-poster-placeholder { width: 76px; height: 112px; border-radius: 6px; flex-shrink: 0; background: var(--hairline); }
+  .detail-body h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .detail-rating { font-size: 12.5px; color: #4ade80; font-weight: 600; margin: 0 0 6px; }
+  .detail-meta { font-size: 12px; color: var(--text-muted); margin: 0 0 5px; }
+  .detail-meta strong { color: var(--text); font-weight: 600; }
+  .detail-synopsis { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin: 4px 0 8px; }
+  .badge-wrap { display: flex; flex-wrap: wrap; gap: 2px; }
+  .muted { color: var(--text-faint); font-size: 12px; }
+  .recommend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
+  .recommend-card {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 16px;
+    box-shadow: var(--shadow); display: flex; gap: 14px;
+  }
+  .recommend-card .poster-thumb, .recommend-card .poster-placeholder { width: 64px; height: 94px; }
+  .recommend-note { color: var(--text-muted); font-size: 12.5px; margin-bottom: 16px; }
   .bottom-nav { display: none; }
   @media (max-width: 700px) {
     body { padding: 16px 12px 88px; }
-    h1 { font-size: 18px; }
+    h1 { font-size: 17px; }
     .tabs { display: none; }
-    .controls { gap: 8px; }
-    .controls input[type=text] { width: auto; flex: 1 1 130px; }
+    .controls { gap: 7px; }
+    .controls input[type=text], .controls select { width: auto; flex: 1 1 120px; }
     .table-wrap { max-height: none; border-radius: 10px; }
+    table { font-size: 11px; }
+    th { font-size: 10px; }
+    .film-title { font-size: 12px; }
+    .recommend-grid { grid-template-columns: 1fr; }
     .bottom-nav {
       display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
       background: var(--surface); border-top: 1px solid var(--hairline-strong);
-      padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
-      box-shadow: 0 -2px 16px rgba(20, 23, 26, 0.07);
+      padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+      box-shadow: 0 -2px 16px rgba(0, 0, 0, 0.4);
     }
     .bottom-nav-btn {
       flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
       padding: 6px 2px; background: none; border: none; color: var(--text-faint);
-      font-size: 10.5px; font-weight: 500; cursor: pointer;
+      font-size: 10px; font-weight: 500; cursor: pointer;
     }
     .bottom-nav-btn.active { color: var(--accent); }
-    .bottom-nav-btn svg { width: 22px; height: 22px; stroke: currentColor; }
+    .bottom-nav-btn svg { width: 21px; height: 21px; stroke: currentColor; }
   }
 </style>
 </head>
 <body>
-<h1>Watchlist streaming dashboard</h1>
-<div class="meta" id="meta"></div>
-<div class="tabs">
-  <button class="tab-btn active" id="tab-films">By film</button>
-  <button class="tab-btn" id="tab-services">By service</button>
-  <button class="tab-btn" id="tab-country">By VPN country</button>
+<div class="header">
+  <div>
+    <h1>Watchlist streaming dashboard</h1>
+    <div class="meta" id="meta"></div>
+  </div>
+  <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
 </div>
 
-<section class="view active" id="view-films">
-  <div class="controls">
-    <input type="text" id="search" placeholder="Search films...">
-    <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
-  </div>
-  <div class="quick-filters" id="quickCountryFilters"></div>
-  <div class="table-wrap"><table id="filmsGrid"><thead></thead><tbody></tbody></table></div>
+<div class="tabs">
+  <button class="tab-btn active" id="tab-home">Home</button>
+  <button class="tab-btn" id="tab-country">By VPN country</button>
+  <button class="tab-btn" id="tab-services">By service</button>
+  <button class="tab-btn" id="tab-films">By film</button>
+</div>
+
+<section class="view active" id="view-home">
+  <p class="recommend-note">4 films worth watching right now, picked as the highest-rated on a service you already have. (Simple placeholder methodology for now — happy to refine once there's richer signal to rank on.)</p>
+  <div class="recommend-grid" id="recommendGrid"></div>
 </section>
 
 <section class="view" id="view-country">
   <div class="controls">
     <select id="countrySelect"></select>
+    <select id="countryServiceSelect"></select>
     <input type="text" id="countryFilmSearch" placeholder="Search films...">
     <span id="countryFilterToggles"></span>
   </div>
@@ -376,23 +466,43 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <section class="view" id="view-services">
   <div class="controls">
-    <input type="text" id="serviceSearch" placeholder="Search services...">
-    <input type="text" id="serviceCountrySearch" placeholder="Search country...">
+    <select id="serviceSelect"></select>
+    <select id="serviceCountrySelect"></select>
     <input type="text" id="serviceFilmSearch" placeholder="Search film...">
     <label><input type="checkbox" id="haveOnlyServices"> Only services I have</label>
   </div>
   <div class="table-wrap"><table id="servicesGrid"><thead></thead><tbody></tbody></table></div>
 </section>
 
+<section class="view" id="view-service-detail">
+  <button class="back-btn" id="backToServices">← Back to services</button>
+  <h2 class="detail-title" id="serviceDetailTitle"></h2>
+  <div id="serviceDetailCards"></div>
+</section>
+
+<section class="view" id="view-films">
+  <div class="controls">
+    <input type="text" id="search" placeholder="Search films...">
+    <select id="filmsCountrySelect"></select>
+    <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
+  </div>
+  <div class="active-filters" id="activeFilmFilters"></div>
+  <div class="table-wrap"><table id="filmsGrid"><thead></thead><tbody></tbody></table></div>
+</section>
+
 <nav class="bottom-nav">
-  <button class="bottom-nav-btn active" id="nav-films">
+  <button class="bottom-nav-btn active" id="nav-home">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
-      <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
-      <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
-      <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+      <path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path>
     </svg>
-    Films
+    Home
+  </button>
+  <button class="bottom-nav-btn" id="nav-country">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
+    </svg>
+    Country
   </button>
   <button class="bottom-nav-btn" id="nav-services">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -402,32 +512,47 @@ _TEMPLATE = """<!DOCTYPE html>
     </svg>
     Services
   </button>
-  <button class="bottom-nav-btn" id="nav-country">
+  <button class="bottom-nav-btn" id="nav-films">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="9"></circle>
-      <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
+      <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+      <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+      <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+      <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
     </svg>
-    Country
+    Films
   </button>
 </nav>
 
 <script>
 const DATA = __DATA__;
+const TABS = ['home', 'country', 'services', 'films'];
 
 document.getElementById('meta').textContent =
   DATA.films.length + ' films, ' + DATA.main_brands.length + ' main services, last checked ' + (DATA.last_run_at || 'never');
+document.getElementById('watchlistLink').href = DATA.letterboxd_watchlist_url;
 
-document.getElementById('tab-films').addEventListener('click', () => switchTab('films'));
-document.getElementById('tab-services').addEventListener('click', () => switchTab('services'));
-document.getElementById('tab-country').addEventListener('click', () => switchTab('country'));
-document.getElementById('nav-films').addEventListener('click', () => switchTab('films'));
-document.getElementById('nav-services').addEventListener('click', () => switchTab('services'));
-document.getElementById('nav-country').addEventListener('click', () => switchTab('country'));
-function switchTab(name) {
-  ['films', 'services', 'country'].forEach(n => {
-    document.getElementById('tab-' + n).classList.toggle('active', n === name);
-    document.getElementById('nav-' + n).classList.toggle('active', n === name);
-    document.getElementById('view-' + n).classList.toggle('active', n === name);
+function esc(text) {
+  if (text == null) return '';
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+document.getElementById('tab-home').addEventListener('click', () => showView('home'));
+document.getElementById('tab-country').addEventListener('click', () => showView('country'));
+document.getElementById('tab-services').addEventListener('click', () => showView('services'));
+document.getElementById('tab-films').addEventListener('click', () => showView('films'));
+document.getElementById('nav-home').addEventListener('click', () => showView('home'));
+document.getElementById('nav-country').addEventListener('click', () => showView('country'));
+document.getElementById('nav-services').addEventListener('click', () => showView('services'));
+document.getElementById('nav-films').addEventListener('click', () => showView('films'));
+document.getElementById('backToServices').addEventListener('click', () => showView('services'));
+
+function showView(name) {
+  document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  TABS.forEach(n => {
+    const isActive = n === name || (name === 'service-detail' && n === 'services');
+    document.getElementById('tab-' + n).classList.toggle('active', isActive);
+    document.getElementById('nav-' + n).classList.toggle('active', isActive);
   });
 }
 
@@ -436,55 +561,205 @@ function filmCellHtml(row) {
   const poster = row.poster_url
     ? '<img class="poster-thumb" loading="lazy" src="' + row.poster_url + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
     : '<div class="poster-placeholder"></div>';
-  const sub = row.director ? '<span class="film-sub">' + row.director.replace(/</g, '&lt;') + '</span>' : '';
+  const sub = row.director ? '<span class="film-sub">' + esc(row.director) + '</span>' : '';
   return '<div class="film-cell">' + poster +
     '<div class="film-meta"><a class="film-link film-title" target="_blank" href="https://letterboxd.com/film/' +
-    row.slug + '/">' + row.title.replace(/</g, '&lt;') + year + '</a>' + sub + '</div></div>';
+    row.slug + '/">' + esc(row.title) + year + '</a>' + sub + '</div></div>';
 }
 
 function badgeHtml(entries, brandLabel) {
   return entries.map(e => {
     const label = brandLabel ? brandLabel : e.country;
-    return '<span class="badge badge-' + e.classification + '">' + label + '</span>';
+    return '<span class="badge badge-' + e.classification + '" data-country="' + e.country + '">' + label + '</span>';
   }).join(' ');
+}
+
+// ---------- Home ----------
+
+function renderHome() {
+  const grid = document.getElementById('recommendGrid');
+  grid.innerHTML = '';
+  DATA.recommended.forEach(film => grid.appendChild(buildFilmDetailCard(film, null, null, true)));
+}
+
+// ---------- Film detail card (shared: home + service detail) ----------
+
+function buildFilmDetailCard(film, excludeBrand, excludeCountry, compact) {
+  const div = document.createElement('div');
+  div.className = compact ? 'recommend-card' : 'detail-card';
+  const year = film.year ? ' (' + film.year + ')' : '';
+  const rating = film.rating != null ? film.rating.toFixed(2) + '★' : '—';
+  const poster = film.poster_url
+    ? '<img class="' + (compact ? 'poster-thumb' : 'detail-poster') + '" loading="lazy" src="' + film.poster_url + '">'
+    : '<div class="' + (compact ? 'poster-placeholder' : 'detail-poster-placeholder') + '"></div>';
+  const director = film.director ? '<p class="detail-meta"><strong>Director:</strong> ' + esc(film.director) + '</p>' : '';
+  const starring = (film.starring && film.starring.length)
+    ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
+  const synopsis = film.synopsis ? '<p class="detail-synopsis">' + esc(film.synopsis) + '</p>' : '';
+
+  let otherHtml;
+  if (film.all_offers) {
+    const others = film.all_offers.filter(o => !(o.brand === excludeBrand && o.country === excludeCountry));
+    otherHtml = others.length
+      ? others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(o.country) + '</i></span>').join(' ')
+      : '<span class="muted">Not available anywhere else tracked</span>';
+  } else if (film.availability) {
+    const parts = [];
+    ['have', 'could_get_again', 'free', 'subscription'].forEach(key => {
+      (film.availability[key] || []).forEach(o => {
+        parts.push('<span class="badge badge-' + key + '">' + esc(o.brand) + ' <i>' + esc(o.country) + '</i></span>');
+      });
+    });
+    otherHtml = parts.length ? parts.join(' ') : '<span class="muted">Not currently streaming anywhere tracked</span>';
+  } else {
+    otherHtml = '<span class="muted">No availability data</span>';
+  }
+
+  div.innerHTML =
+    '<div style="flex-shrink:0;">' + poster + '</div>' +
+    '<div class="detail-body">' +
+      '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
+      '<p class="detail-rating">' + rating + '</p>' +
+      director + starring + synopsis +
+      '<p class="detail-meta"><strong>' + (film.all_offers ? 'Other services' : 'Where to watch') + '</strong></p>' +
+      '<div class="badge-wrap">' + otherHtml + '</div>' +
+    '</div>';
+  return div;
 }
 
 // ---------- Films table ----------
 
 const filmCols = [
-  { key: 'title', label: 'Film', width: 300, sort: r => r.title.toLowerCase(), dir: 1 },
-  { key: 'year', label: 'Year', width: 60, sort: r => r.year || 0, dir: -1 },
-  { key: 'rating', label: 'Rating', width: 60, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
-  { key: 'any_service', label: 'Any service?', width: 90, sort: r => r.any_service ? 1 : 0, dir: -1 },
-  { key: 'have_service', label: 'Have?', width: 70, sort: r => r.have_service ? 1 : 0, dir: -1 },
-  { key: 'coverage_countries', label: '# countries', width: 90, sort: r => r.coverage_countries, dir: -1 },
+  { key: 'title', label: 'Film', width: 260, sort: r => r.title.toLowerCase(), dir: 1 },
+  { key: 'year', label: 'Year', width: 55, sort: r => r.year || 0, dir: -1 },
+  { key: 'rating', label: 'Rating', width: 55, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
+  { key: 'any_service', label: 'Any?', width: 55, sort: r => r.any_service ? 1 : 0, dir: -1 },
+  { key: 'have_service', label: 'Have?', width: 55, sort: r => r.have_service ? 1 : 0, dir: -1 },
+  { key: 'coverage_countries', label: '# ctys', width: 60, sort: r => r.coverage_countries, dir: -1 },
 ];
 
 let filmSortKey = 'title', filmSortDir = 1;
-let quickCountry = null;
+let activeCountry = null;
+let activeService = null;
 
-function renderQuickCountryFilters() {
-  const container = document.getElementById('quickCountryFilters');
-  container.innerHTML = '';
-  const hint = document.createElement('span');
-  hint.className = 'hint';
-  hint.textContent = 'Focus on:';
-  container.appendChild(hint);
-  DATA.top_countries.forEach(c => {
-    const span = document.createElement('span');
-    span.className = 'quick-country';
-    span.innerHTML = c.name + '<span class="count">' + c.count + '</span>';
-    span.addEventListener('click', () => {
-      quickCountry = (quickCountry === c.code) ? null : c.code;
-      renderQuickCountryFilters();
-      renderFilmsRows();
-    });
-    if (quickCountry === c.code) span.classList.add('active');
-    container.appendChild(span);
+function baseFilteredFilms() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  const notHaveOnly = document.getElementById('notHaveOnly').checked;
+  return DATA.films.filter(row => {
+    if (q && !row.title.toLowerCase().includes(q)) return false;
+    if (notHaveOnly && row.have_service) return false;
+    if (activeService && !row.main[activeService]) return false;
+    return true;
   });
 }
 
-function renderFilmsHead() {
+function countryCountsFromRows(rows) {
+  const counts = {};
+  rows.forEach(row => {
+    const withHave = new Set();
+    Object.values(row.main).forEach(entries => {
+      entries.forEach(e => { if (e.classification === 'have') withHave.add(e.country); });
+    });
+    withHave.forEach(c => { counts[c] = (counts[c] || 0) + 1; });
+  });
+  return counts;
+}
+
+function updateFilmsCountrySelect(counts) {
+  const select = document.getElementById('filmsCountrySelect');
+  select.innerHTML = '';
+  const allOpt = document.createElement('option');
+  allOpt.value = '';
+  allOpt.textContent = 'Focus on a country...';
+  select.appendChild(allOpt);
+
+  const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  // A badge click can set activeCountry to a country with zero "have" films
+  // (e.g. a free/subscription-only market) — keep it selectable rather than
+  // silently clearing the filter just because it isn't have-ranked.
+  if (activeCountry && !counts[activeCountry]) {
+    ranked.push([activeCountry, 0]);
+  }
+  ranked.forEach(([code, count]) => {
+    const opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = (DATA.countryNames && DATA.countryNames[code] || code) + ' (' + count + ')';
+    select.appendChild(opt);
+  });
+  select.value = activeCountry || '';
+}
+
+function renderActiveFilmFilters() {
+  const container = document.getElementById('activeFilmFilters');
+  container.innerHTML = '';
+  if (!activeCountry && !activeService) return;
+  if (activeCountry) {
+    const name = (DATA.countryNames && DATA.countryNames[activeCountry]) || activeCountry;
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = name + ' ✕';
+    chip.addEventListener('click', () => { activeCountry = null; renderFilms(); });
+    container.appendChild(chip);
+  }
+  if (activeService) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = activeService + ' ✕';
+    chip.addEventListener('click', () => { activeService = null; renderFilms(); });
+    container.appendChild(chip);
+  }
+}
+
+function renderFilms() {
+  const base = baseFilteredFilms();
+  updateFilmsCountrySelect(countryCountsFromRows(base));
+  renderActiveFilmFilters();
+
+  // Clicking a service header narrows the column set to just that service
+  // (symmetric with clicking a country badge narrowing to that country) —
+  // "filter for that service only" means the field set narrows, not just
+  // the row set.
+  const candidateBrands = activeService ? [activeService] : DATA.main_brands;
+  const showOtherServices = !activeService;
+
+  const processed = [];
+  const visibleBrands = new Set();
+
+  base.forEach(row => {
+    const visibleMain = {};
+    candidateBrands.forEach(brand => {
+      const entries = row.main[brand];
+      if (!entries) return;
+      const filtered = activeCountry ? entries.filter(e => e.country === activeCountry) : entries;
+      if (filtered.length) visibleMain[brand] = filtered;
+    });
+    const visibleOther = showOtherServices
+      ? (activeCountry ? row.other_services.filter(o => o.country === activeCountry) : row.other_services)
+      : [];
+
+    const include = Object.keys(visibleMain).length > 0 || visibleOther.length > 0;
+    if (!include) return;
+    Object.keys(visibleMain).forEach(b => visibleBrands.add(b));
+    processed.push({ row, visibleMain, visibleOther });
+  });
+
+  const columnBrands = activeCountry
+    ? candidateBrands.filter(b => visibleBrands.has(b))
+    : candidateBrands;
+
+  const col = filmCols.find(c => c.key === filmSortKey);
+  if (col) {
+    processed.sort((a, b) => {
+      const av = col.sort(a.row), bv = col.sort(b.row);
+      return av < bv ? -filmSortDir : av > bv ? filmSortDir : 0;
+    });
+  }
+
+  renderFilmsHead(columnBrands, showOtherServices);
+  renderFilmsBody(processed, columnBrands, showOtherServices);
+}
+
+function renderFilmsHead(columnBrands, showOtherServices) {
   const thead = document.querySelector('#filmsGrid thead');
   thead.innerHTML = '';
   const headRow = document.createElement('tr');
@@ -497,61 +772,45 @@ function renderFilmsHead() {
     th.addEventListener('click', () => {
       filmSortDir = (filmSortKey === col.key) ? -filmSortDir : col.dir;
       filmSortKey = col.key;
-      renderFilmsRows();
+      renderFilms();
     });
     headRow.appendChild(th);
   });
-  DATA.main_brands.forEach(brand => {
+  columnBrands.forEach(brand => {
     const th = document.createElement('th');
-    th.style.width = '130px';
+    th.style.width = '120px';
     th.textContent = brand;
+    th.classList.add('filterable');
+    if (activeService === brand) th.classList.add('active');
+    th.addEventListener('click', () => {
+      activeService = (activeService === brand) ? null : brand;
+      renderFilms();
+    });
     headRow.appendChild(th);
   });
-  const otherTh = document.createElement('th');
-  otherTh.style.width = '260px';
-  otherTh.textContent = 'Other services';
-  headRow.appendChild(otherTh);
+  if (showOtherServices) {
+    const otherTh = document.createElement('th');
+    otherTh.style.width = '220px';
+    otherTh.textContent = 'Other services';
+    headRow.appendChild(otherTh);
+  }
   thead.appendChild(headRow);
 }
 
-function renderFilmsRows() {
+function onBadgeDelegateClick(event) {
+  const badge = event.target.closest('[data-country]');
+  if (!badge) return;
+  const code = badge.getAttribute('data-country');
+  activeCountry = (activeCountry === code) ? null : code;
+  renderFilms();
+}
+
+function renderFilmsBody(processed, columnBrands, showOtherServices) {
   const tbody = document.querySelector('#filmsGrid tbody');
   tbody.innerHTML = '';
-  const q = document.getElementById('search').value.trim().toLowerCase();
-  const notHaveOnly = document.getElementById('notHaveOnly').checked;
-
-  let rows = DATA.films.slice();
-  const col = filmCols.find(c => c.key === filmSortKey);
-  if (col) {
-    rows.sort((a, b) => {
-      const av = col.sort(a), bv = col.sort(b);
-      return av < bv ? -filmSortDir : av > bv ? filmSortDir : 0;
-    });
-  }
 
   const frag = document.createDocumentFragment();
-  rows.forEach(row => {
-    if (q && !row.title.toLowerCase().includes(q)) return;
-    if (notHaveOnly && row.have_service) return;
-
-    const visibleMain = {};
-    let anyVisible = false;
-    DATA.main_brands.forEach(brand => {
-      const entries = row.main[brand];
-      if (!entries) return;
-      const filtered = quickCountry ? entries.filter(e => e.country === quickCountry) : entries;
-      if (filtered.length) {
-        visibleMain[brand] = filtered;
-        anyVisible = true;
-      }
-    });
-    const visibleOther = quickCountry
-      ? row.other_services.filter(o => o.country === quickCountry)
-      : row.other_services;
-    if (visibleOther.length) anyVisible = true;
-
-    if (quickCountry && !anyVisible) return;
-
+  processed.forEach(({ row, visibleMain, visibleOther }) => {
     const tr = document.createElement('tr');
 
     filmCols.forEach((col, i) => {
@@ -571,7 +830,7 @@ function renderFilmsRows() {
       tr.appendChild(td);
     });
 
-    DATA.main_brands.forEach(brand => {
+    columnBrands.forEach(brand => {
       const td = document.createElement('td');
       const entries = visibleMain[brand];
       if (entries) {
@@ -583,39 +842,54 @@ function renderFilmsRows() {
       tr.appendChild(td);
     });
 
-    const otherTd = document.createElement('td');
-    const otherInner = document.createElement('div');
-    otherInner.classList.add('cell-scroll');
-    otherInner.textContent = visibleOther.map(o => o.brand + ' (' + o.country + ')').join(', ');
-    otherTd.appendChild(otherInner);
-    tr.appendChild(otherTd);
+    if (showOtherServices) {
+      const otherTd = document.createElement('td');
+      const otherInner = document.createElement('div');
+      otherInner.classList.add('cell-scroll');
+      otherInner.innerHTML = visibleOther.map(o =>
+        '<span class="badge badge-subscription" data-country="' + o.country + '">' + esc(o.brand) + ' (' + o.country + ')</span>'
+      ).join(' ');
+      otherTd.appendChild(otherInner);
+      tr.appendChild(otherTd);
+    }
 
     frag.appendChild(tr);
   });
   tbody.appendChild(frag);
 }
 
-document.getElementById('search').addEventListener('input', renderFilmsRows);
-document.getElementById('notHaveOnly').addEventListener('change', renderFilmsRows);
-
-renderQuickCountryFilters();
-renderFilmsHead();
-renderFilmsRows();
+document.getElementById('search').addEventListener('input', renderFilms);
+document.getElementById('notHaveOnly').addEventListener('change', renderFilms);
+document.getElementById('filmsCountrySelect').addEventListener('change', e => {
+  activeCountry = e.target.value || null;
+  renderFilms();
+});
+document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateClick);
 
 // ---------- Services table ----------
 
 const serviceCols = [
-  { key: 'brand', label: 'Service', width: 220, sort: r => r.brand.toLowerCase(), dir: 1 },
-  { key: 'country_name', label: 'Country', width: 110, sort: r => r.country_name, dir: 1 },
-  { key: 'have', label: 'Have?', width: 70, sort: r => r.have ? 1 : 0, dir: -1 },
-  { key: 'paid_subscription_needed', label: 'Paid sub needed?', width: 100, sort: r => r.paid_subscription_needed ? 1 : 0, dir: -1 },
+  { key: 'brand', label: 'Service', width: 210, sort: r => r.brand.toLowerCase(), dir: 1 },
+  { key: 'have', label: 'Have?', width: 60, sort: r => r.have ? 1 : 0, dir: -1 },
+  { key: 'paid_subscription_needed', label: 'Paid?', width: 60, sort: r => r.paid_subscription_needed ? 1 : 0, dir: -1 },
   { key: 'film_count', label: '# films', width: 70, sort: r => r.film_count, dir: -1 },
-  { key: 'titles', label: 'Films', width: 750 },
-  { key: 'unique_film_count', label: '# unique', width: 80, sort: r => r.unique_film_count, dir: -1 },
-  { key: 'unique_titles', label: 'Films not on a service I have', width: 400 },
+  { key: 'unique_film_count', label: '# unique', width: 75, sort: r => r.unique_film_count, dir: -1 },
 ];
 
 let serviceSortKey = 'film_count', serviceSortDir = -1;
+
+function populateServiceSelects() {
+  const serviceNames = [...new Set(DATA.services.map(r => r.brand))].sort((a, b) => a.localeCompare(b));
+  const countryNames = [...new Set(DATA.services.map(r => r.country_name))].sort((a, b) => a.localeCompare(b));
+
+  const serviceSelect = document.getElementById('serviceSelect');
+  serviceSelect.innerHTML = '<option value="">All services</option>' +
+    serviceNames.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+
+  const countrySelect = document.getElementById('serviceCountrySelect');
+  countrySelect.innerHTML = '<option value="">All countries</option>' +
+    countryNames.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+}
 
 function renderServicesHead() {
   const thead = document.querySelector('#servicesGrid thead');
@@ -641,8 +915,8 @@ function renderServicesHead() {
 function renderServicesRows() {
   const tbody = document.querySelector('#servicesGrid tbody');
   tbody.innerHTML = '';
-  const q = document.getElementById('serviceSearch').value.trim().toLowerCase();
-  const countryQ = document.getElementById('serviceCountrySearch').value.trim().toLowerCase();
+  const serviceQ = document.getElementById('serviceSelect').value;
+  const countryQ = document.getElementById('serviceCountrySelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
   const haveOnly = document.getElementById('haveOnlyServices').checked;
 
@@ -657,22 +931,21 @@ function renderServicesRows() {
 
   const frag = document.createDocumentFragment();
   rows.forEach(row => {
-    if (q && !row.brand.toLowerCase().includes(q)) return;
-    if (countryQ && !row.country_name.toLowerCase().includes(countryQ)) return;
-    if (filmQ && !row.titles.some(t => t.toLowerCase().includes(filmQ))) return;
+    if (serviceQ && row.brand !== serviceQ) return;
+    if (countryQ && row.country_name !== countryQ) return;
+    if (filmQ && !row.slugs.some(s => DATA.films_by_slug[s].title.toLowerCase().includes(filmQ))) return;
     if (haveOnly && !row.have) return;
     const tr = document.createElement('tr');
 
     serviceCols.forEach((col, i) => {
       const td = document.createElement('td');
-      if (col.key === 'have' || col.key === 'paid_subscription_needed') {
+      if (col.key === 'brand') {
+        td.classList.add('service-name-cell');
+        td.innerHTML = esc(row.brand) + ' <i>' + esc(row.country_name) + '</i>';
+        td.addEventListener('click', () => openServiceDetail(row.brand, row.country, row.country_name));
+      } else if (col.key === 'have' || col.key === 'paid_subscription_needed') {
         td.textContent = row[col.key] ? 'Y' : 'N';
         td.classList.add(row[col.key] ? 'yes' : 'no');
-      } else if (col.key === 'titles' || col.key === 'unique_titles') {
-        const inner = document.createElement('div');
-        inner.classList.add('cell-scroll');
-        inner.textContent = row[col.key].join(', ');
-        td.appendChild(inner);
       } else {
         td.textContent = row[col.key];
       }
@@ -685,21 +958,34 @@ function renderServicesRows() {
   tbody.appendChild(frag);
 }
 
-document.getElementById('serviceSearch').addEventListener('input', renderServicesRows);
-document.getElementById('serviceCountrySearch').addEventListener('input', renderServicesRows);
+function openServiceDetail(brand, country, countryName) {
+  const row = DATA.services.find(r => r.brand === brand && r.country === country);
+  document.getElementById('serviceDetailTitle').innerHTML = esc(brand) + ' <i>' + esc(countryName) + '</i>';
+  const container = document.getElementById('serviceDetailCards');
+  container.innerHTML = '';
+  row.slugs.forEach(slug => {
+    const film = DATA.films_by_slug[slug];
+    container.appendChild(buildFilmDetailCard(film, brand, country, false));
+  });
+  showView('service-detail');
+}
+
+document.getElementById('serviceSelect').addEventListener('change', renderServicesRows);
+document.getElementById('serviceCountrySelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
 document.getElementById('haveOnlyServices').addEventListener('change', renderServicesRows);
 
+populateServiceSelects();
 renderServicesHead();
 renderServicesRows();
 
 // ---------- By VPN country ----------
 
 const countryCols = [
-  { key: 'title', label: 'Film', width: 300, sort: r => r.title.toLowerCase(), dir: 1 },
-  { key: 'year', label: 'Year', width: 70, sort: r => r.year || 0, dir: -1 },
-  { key: 'rating', label: 'Rating', width: 70, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
-  { key: 'services', label: 'Services', width: 480 },
+  { key: 'title', label: 'Film', width: 260, sort: r => r.title.toLowerCase(), dir: 1 },
+  { key: 'year', label: 'Year', width: 60, sort: r => r.year || 0, dir: -1 },
+  { key: 'rating', label: 'Rating', width: 60, sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
+  { key: 'services', label: 'Services', width: 420 },
 ];
 
 const countryClassifications = ['have', 'could_get_again', 'free', 'subscription'];
@@ -717,6 +1003,16 @@ function populateCountrySelect() {
     select.appendChild(opt);
   });
   if (DATA.countries.length) select.value = DATA.countries[0].code;
+}
+
+function populateCountryServiceSelect() {
+  const country = currentCountry();
+  const select = document.getElementById('countryServiceSelect');
+  const previous = select.value;
+  const services = country ? [...new Set(country.films.flatMap(f => f.services.map(s => s.brand)))].sort((a, b) => a.localeCompare(b)) : [];
+  select.innerHTML = '<option value="">All services</option>' +
+    services.map(s => '<option value="' + esc(s) + '">' + esc(s) + '</option>').join('');
+  if (services.includes(previous)) select.value = previous;
 }
 
 function renderCountryFilterToggles() {
@@ -768,6 +1064,7 @@ function renderCountryRows() {
   if (!country) return;
 
   const q = document.getElementById('countryFilmSearch').value.trim().toLowerCase();
+  const serviceQ = document.getElementById('countryServiceSelect').value;
 
   let rows = country.films.slice();
   const col = countryCols.find(c => c.key === countrySortKey);
@@ -781,6 +1078,7 @@ function renderCountryRows() {
   const frag = document.createDocumentFragment();
   rows.forEach(row => {
     if (q && !row.title.toLowerCase().includes(q)) return;
+    if (serviceQ && !row.services.some(s => s.brand === serviceQ)) return;
     const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
     if (!visibleServices.length) return;
     const tr = document.createElement('tr');
@@ -795,7 +1093,7 @@ function renderCountryRows() {
         const inner = document.createElement('div');
         inner.classList.add('cell-scroll');
         inner.innerHTML = visibleServices.map(s =>
-          '<span class="badge badge-' + s.classification + '">' + s.brand + '</span>').join(' ');
+          '<span class="badge badge-' + s.classification + '">' + esc(s.brand) + '</span>').join(' ');
         td.appendChild(inner);
       } else {
         td.textContent = row[col.key];
@@ -809,13 +1107,23 @@ function renderCountryRows() {
   tbody.appendChild(frag);
 }
 
-document.getElementById('countrySelect').addEventListener('change', renderCountryRows);
+document.getElementById('countrySelect').addEventListener('change', () => { populateCountryServiceSelect(); renderCountryRows(); });
+document.getElementById('countryServiceSelect').addEventListener('change', renderCountryRows);
 document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
 
 populateCountrySelect();
+populateCountryServiceSelect();
 renderCountryFilterToggles();
 renderCountryHead();
 renderCountryRows();
+
+// ---------- Init ----------
+
+DATA.countryNames = {};
+DATA.countries.forEach(c => { DATA.countryNames[c.code] = c.name; });
+
+renderHome();
+renderFilms();
 </script>
 </body>
 </html>

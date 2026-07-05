@@ -14,6 +14,15 @@ class StateDoc:
     schema_version: int = SCHEMA_VERSION
     last_run_at: str | None = None
     films: dict[str, FilmState] = field(default_factory=dict)
+    # Last few watched films (from the Letterboxd diary) plus their director/
+    # cast, used to correlate home-page recommendations — refreshed each run.
+    recent_watches: list[dict] = field(default_factory=list)
+    # Watchlist slugs TMDB correlated to recent_watches — precomputed here
+    # since the dashboard itself must stay network-free to regenerate.
+    recent_watch_recommendations: list[str] = field(default_factory=list)
+    # Rolling log of newly-detected have/free offers, newest first, capped —
+    # a single day's diff is often too small to fill a "recently added" list.
+    recent_additions: list[dict] = field(default_factory=list)
 
 
 def _offer_to_dict(offer: OfferRecord) -> dict:
@@ -81,6 +90,9 @@ def load_state(path: Path) -> StateDoc:
         schema_version=data.get("schema_version", SCHEMA_VERSION),
         last_run_at=data.get("last_run_at"),
         films=films,
+        recent_watches=data.get("recent_watches", []),
+        recent_watch_recommendations=data.get("recent_watch_recommendations", []),
+        recent_additions=data.get("recent_additions", []),
     )
 
 
@@ -89,6 +101,9 @@ def save_state(path: Path, state: StateDoc) -> None:
         "schema_version": state.schema_version,
         "last_run_at": state.last_run_at,
         "films": {slug: _film_to_dict(film) for slug, film in state.films.items()},
+        "recent_watches": state.recent_watches,
+        "recent_watch_recommendations": state.recent_watch_recommendations,
+        "recent_additions": state.recent_additions,
     }
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")

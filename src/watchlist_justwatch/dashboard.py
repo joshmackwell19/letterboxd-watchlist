@@ -38,6 +38,21 @@ def _all_offers_for_film(
     return result
 
 
+def compute_offer_snapshot(
+    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
+) -> dict[str, dict[tuple[str, str], str]]:
+    """slug -> {(brand, country): classification}, using the same have/
+    could_get_again/free/subscription taxonomy as the rest of the dashboard —
+    lets the daily run diff today's snapshot against yesterday's to detect
+    newly-added have/free offers without a second, differently-classified
+    audit system."""
+    return {
+        slug: {(o["brand"], o["country"]): o["classification"]
+               for o in _all_offers_for_film(film, config, global_subscriptions, revisitable)}
+        for slug, film in state.films.items()
+    }
+
+
 def _select_main_brands(
     state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str]
 ) -> list[str]:
@@ -190,7 +205,22 @@ def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> 
     return lookup
 
 
-def _recommended_films(state: StateDoc, films_all_offers: dict[str, list[dict]], limit: int = RECOMMENDED_COUNT) -> list[dict]:
+def _mini_card(film) -> dict:
+    """Minimal shape for a home-page tile: no services shown there (that's
+    what the quick-look modal is for, resolved client-side from
+    films_by_slug), so only enough to render the card itself."""
+    return {
+        "slug": film.slug,
+        "title": film.title,
+        "year": film.year,
+        "rating": film.rating,
+        "poster_url": film.poster_url,
+        "director": ", ".join(film.director) if film.director else None,
+    }
+
+
+def _top_rated_section(state: StateDoc, films_all_offers: dict[str, list[dict]], exclude: set[str],
+                        limit: int = RECOMMENDED_COUNT) -> dict:
     """Placeholder recommendation methodology (no watch-history data exists
     yet, only watchlist + availability + Letterboxd's crowd rating): the
     highest-rated films you can actually watch right now on a service you
@@ -199,28 +229,114 @@ def _recommended_films(state: StateDoc, films_all_offers: dict[str, list[dict]],
     def has_have(slug: str) -> bool:
         return any(o["classification"] == "have" for o in films_all_offers.get(slug, []))
 
-    rated = [(slug, film.rating) for slug, film in state.films.items() if film.rating is not None]
+    rated = [(slug, film.rating) for slug, film in state.films.items()
+             if film.rating is not None and slug not in exclude]
     watchable_now = sorted((s for s, r in rated if has_have(s)), key=lambda s: (-state.films[s].rating, state.films[s].title))
     chosen = watchable_now[:limit]
     if len(chosen) < limit:
         fallback = sorted((s for s, r in rated if s not in chosen), key=lambda s: (-state.films[s].rating, state.films[s].title))
         chosen += fallback[: limit - len(chosen)]
 
-    results = []
-    for slug in chosen:
-        film = state.films[slug]
-        offers = films_all_offers.get(slug, [])
-        buckets: dict[str, list[dict]] = defaultdict(list)
-        for o in offers:
-            buckets[o["classification"]].append({"brand": o["brand"], "country": o["country"]})
-        results.append({
-            "slug": slug, "title": film.title, "year": film.year, "rating": film.rating,
-            "poster_url": film.poster_url,
-            "director": ", ".join(film.director) if film.director else None,
-            "starring": film.starring, "synopsis": film.synopsis,
-            "availability": buckets,
-        })
-    return results
+    return {
+        "key": "top_rated", "header": "Top rated, ready to watch",
+        "films": [_mini_card(state.films[s]) for s in chosen],
+    }
+
+
+def _because_you_watched_section(state: StateDoc, exclude: set[str], limit: int = RECOMMENDED_COUNT) -> dict:
+    """TMDB-correlated recommendations resolved once (network required)
+    during the real daily run and cached on state.recent_watch_recommendations,
+    since this function itself must stay network-free to regenerate."""
+    chosen = [s for s in state.recent_watch_recommendations if s in state.films and s not in exclude][:limit]
+    return {
+        "key": "because_you_watched", "header": "Because you've been watching",
+        "films": [_mini_card(state.films[s]) for s in chosen],
+    }
+
+
+def _same_director_section(state: StateDoc, exclude: set[str], limit: int = RECOMMENDED_COUNT) -> dict:
+    directors: list[str] = []
+    for watched in state.recent_watches:
+        for d in watched.get("director") or []:
+            if d not in directors:
+                directors.append(d)
+
+    if not directors:
+        return {"key": "same_director", "header": "", "films": []}
+
+    matches = [
+        slug for slug, film in state.films.items()
+        if slug not in exclude and any(d in (film.director or []) for d in directors)
+    ]
+    matches.sort(key=lambda s: -(state.films[s].rating or 0))
+    chosen = matches[:limit]
+    if len(chosen) < limit:
+        # No real "similar director" data source exists yet, so pad with the
+        # next highest-rated watchlist films rather than leaving it sparse —
+        # only once we know there was a real director signal to begin with.
+        fallback = sorted(
+            (s for s in state.films if s not in exclude and s not in chosen),
+            key=lambda s: -(state.films[s].rating or 0),
+        )
+        chosen += fallback[: limit - len(chosen)]
+
+    header = "More from " + " & ".join(directors[:2])
+    return {"key": "same_director", "header": header, "films": [_mini_card(state.films[s]) for s in chosen]}
+
+
+def _same_cast_section(state: StateDoc, exclude: set[str], limit: int = RECOMMENDED_COUNT) -> dict:
+    counts: dict[str, int] = defaultdict(int)
+    order: list[str] = []
+    for watched in state.recent_watches:
+        for actor in watched.get("starring") or []:
+            counts[actor] += 1
+            if actor not in order:
+                order.append(actor)
+    top_actors = sorted(order, key=lambda a: (-counts[a], order.index(a)))[:3]
+
+    matches = [
+        slug for slug, film in state.films.items()
+        if slug not in exclude and any(a in (film.starring or []) for a in top_actors)
+    ]
+    matches.sort(key=lambda s: -(state.films[s].rating or 0))
+    chosen = matches[:limit]
+
+    header = "More starring " + ", ".join(top_actors) if top_actors else "More starring actors you've watched"
+    return {"key": "same_cast", "header": header, "films": [_mini_card(state.films[s]) for s in chosen]}
+
+
+def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12) -> dict:
+    seen: set[str] = set()
+    chosen: list[str] = []
+    for entry in state.recent_additions:  # already newest-first, capped rolling log
+        slug = entry["slug"]
+        if slug in seen or slug in exclude or slug not in state.films:
+            continue
+        seen.add(slug)
+        chosen.append(slug)
+        if len(chosen) >= limit:
+            break
+    return {
+        "key": "recently_added", "header": "Recently added to your services",
+        "films": [_mini_card(state.films[s]) for s in chosen],
+    }
+
+
+def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
+    used: set[str] = set()
+    sections = []
+    for build in (
+        lambda ex: _top_rated_section(state, films_all_offers, ex),
+        lambda ex: _because_you_watched_section(state, ex),
+        lambda ex: _same_director_section(state, ex),
+        lambda ex: _same_cast_section(state, ex),
+        lambda ex: _recently_added_section(state, ex),
+    ):
+        section = build(used)
+        if section["films"]:
+            sections.append(section)
+            used.update(f["slug"] for f in section["films"])
+    return sections
 
 
 def build_dashboard_data(
@@ -245,7 +361,7 @@ def build_dashboard_data(
         "last_run_at": state.last_run_at,
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
-        "recommended": _recommended_films(state, films_all_offers),
+        "home_sections": _build_home_sections(state, films_all_offers),
         "films": rows,
         "services": _service_rows(state, films_all_offers),
         "countries": _country_rows(state, films_all_offers),
@@ -418,13 +534,8 @@ _TEMPLATE = """<!DOCTYPE html>
     width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 14px; z-index: 1;
   }
   .modal-close:hover { background: var(--hairline-strong); }
-  .recommend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; }
-  .recommend-card {
-    background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 16px;
-    box-shadow: var(--shadow); display: flex; gap: 14px;
-  }
-  .recommend-card .poster-thumb, .recommend-card .poster-placeholder { width: 64px; height: 94px; }
-  .recommend-note { color: var(--text-muted); font-size: 12.5px; margin-bottom: 16px; }
+  .home-section { margin-bottom: 24px; }
+  .home-section-header { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
   .film-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
   .film-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px;
@@ -460,7 +571,7 @@ _TEMPLATE = """<!DOCTYPE html>
     .controls { gap: 7px; }
     .controls input[type=text], .controls select, .controls .search-wrap { width: auto; flex: 1 1 120px; }
     .controls .search-wrap input[type=text] { width: 100%; }
-    .recommend-grid, .film-cards, .service-cards { grid-template-columns: 1fr; }
+    .film-cards, .service-cards { grid-template-columns: 1fr; }
     .bottom-nav {
       display: flex; position: sticky; bottom: 0; left: 0; right: 0; z-index: 20;
       margin: auto -12px -16px;
@@ -496,8 +607,7 @@ _TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <section class="view active" id="view-home">
-  <p class="recommend-note">4 films worth watching right now, picked as the highest-rated on a service you already have. (Simple placeholder methodology for now — happy to refine once there's richer signal to rank on.)</p>
-  <div class="recommend-grid" id="recommendGrid"></div>
+  <div id="homeSections"></div>
 </section>
 
 <section class="view" id="view-country">
@@ -714,43 +824,50 @@ function badgeHtml(entries, brandLabel) {
 // ---------- Home ----------
 
 function renderHome() {
-  const grid = document.getElementById('recommendGrid');
-  grid.innerHTML = '';
-  DATA.recommended.forEach(film => grid.appendChild(buildFilmDetailCard(film, null, null, true)));
+  const container = document.getElementById('homeSections');
+  container.innerHTML = '';
+  DATA.home_sections.forEach(section => {
+    const wrap = document.createElement('div');
+    wrap.className = 'home-section';
+    const header = document.createElement('h2');
+    header.className = 'home-section-header';
+    header.textContent = section.header;
+    wrap.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.className = 'film-cards';
+    section.films.forEach(film => grid.appendChild(filmCardShell(film, '')));
+    wrap.appendChild(grid);
+
+    container.appendChild(wrap);
+  });
 }
 
-// ---------- Film detail card (shared: home + service detail) ----------
+document.getElementById('homeSections').addEventListener('click', event => {
+  if (event.target.closest('a.film-link')) return;
+  const card = event.target.closest('.film-card');
+  if (card) openQuickLook(card.dataset.slug);
+});
 
-function buildFilmDetailCard(film, excludeBrand, excludeCountry, compact, collapsible) {
+// ---------- Film detail card (shared: quick look + service detail) ----------
+
+function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
   const div = document.createElement('div');
-  div.className = compact ? 'recommend-card' : 'detail-card';
+  div.className = 'detail-card';
   const year = film.year ? ' (' + film.year + ')' : '';
   const rating = film.rating != null ? film.rating.toFixed(2) + '★' : '—';
   const poster = film.poster_url
-    ? '<img class="' + (compact ? 'poster-thumb' : 'detail-poster') + '" loading="lazy" src="' + film.poster_url + '">'
-    : '<div class="' + (compact ? 'poster-placeholder' : 'detail-poster-placeholder') + '"></div>';
+    ? '<img class="detail-poster" loading="lazy" src="' + film.poster_url + '">'
+    : '<div class="detail-poster-placeholder"></div>';
   const director = film.director ? '<p class="detail-meta"><strong>Director:</strong> ' + esc(film.director) + '</p>' : '';
   const starring = (film.starring && film.starring.length)
     ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
   const synopsis = film.synopsis ? '<p class="detail-synopsis">' + esc(film.synopsis) + '</p>' : '';
 
-  let otherHtml;
-  if (film.all_offers) {
-    const others = film.all_offers.filter(o => !(o.brand === excludeBrand && o.country === excludeCountry));
-    otherHtml = others.length
-      ? others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(o.country) + '</i></span>').join(' ')
-      : '<span class="muted">Not available anywhere else tracked</span>';
-  } else if (film.availability) {
-    const parts = [];
-    ['have', 'could_get_again', 'free', 'subscription'].forEach(key => {
-      (film.availability[key] || []).forEach(o => {
-        parts.push('<span class="badge badge-' + key + '">' + esc(o.brand) + ' <i>' + esc(o.country) + '</i></span>');
-      });
-    });
-    otherHtml = parts.length ? parts.join(' ') : '<span class="muted">Not currently streaming anywhere tracked</span>';
-  } else {
-    otherHtml = '<span class="muted">No availability data</span>';
-  }
+  const others = film.all_offers.filter(o => !(o.brand === excludeBrand && o.country === excludeCountry));
+  const otherHtml = others.length
+    ? others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(o.country) + '</i></span>').join(' ')
+    : '<span class="muted">Not available anywhere else tracked</span>';
 
   const otherLabel = excludeBrand ? 'Other services' : 'Where to watch';
   div.innerHTML =
@@ -782,7 +899,7 @@ function openQuickLook(slug) {
   if (!film) return;
   const content = document.getElementById('quickLookContent');
   content.innerHTML = '';
-  content.appendChild(buildFilmDetailCard(film, null, null, false));
+  content.appendChild(buildFilmDetailCard(film, null, null));
   document.getElementById('quickLookOverlay').classList.add('active');
 }
 
@@ -1150,7 +1267,7 @@ function openServiceDetail(brand, country, countryName) {
   container.innerHTML = '';
   row.slugs.forEach(slug => {
     const film = DATA.films_by_slug[slug];
-    container.appendChild(buildFilmDetailCard(film, brand, country, false, true));
+    container.appendChild(buildFilmDetailCard(film, brand, country, true));
   });
   showView('service-detail');
 }

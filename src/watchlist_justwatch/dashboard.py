@@ -93,6 +93,7 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
         "rating": film.rating,
         "poster_url": film.poster_url,
         "director": ", ".join(film.director) if film.director else None,
+        "starring": ", ".join(film.starring) if film.starring else None,
         "any_service": bool(all_offers),
         "have_service": any_have,
         "coverage_countries": len(all_countries),
@@ -156,6 +157,7 @@ def _country_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> l
                 "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
                 "poster_url": film.poster_url,
                 "director": ", ".join(film.director) if film.director else None,
+                "starring": ", ".join(film.starring) if film.starring else None,
                 "services": services,
                 "has_have": any(s["classification"] == "have" for s in services),
             })
@@ -307,11 +309,20 @@ _TEMPLATE = """<!DOCTYPE html>
   .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
   .quick-filters .hint { color: var(--text-faint); font-size: 11.5px; margin-right: 2px; }
   input[type=text] {
-    padding: 8px 12px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 12.5px; width: 190px;
+    padding: 8px 28px 8px 12px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 12.5px; width: 190px;
     background: var(--surface); color: var(--text); outline: none; transition: border-color 0.15s;
   }
   input[type=text]::placeholder { color: var(--text-faint); }
   input[type=text]:focus { border-color: var(--accent); }
+  .search-wrap { position: relative; display: inline-flex; align-items: center; }
+  .search-clear {
+    position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+    width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; cursor: pointer; color: var(--text-faint); font-size: 12px; line-height: 1;
+    transition: background 0.15s, color 0.15s;
+  }
+  .search-clear:hover { color: var(--text); background: var(--hairline); }
+  .search-clear.hidden { display: none; }
   label { color: var(--text-muted); display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12.5px; }
   select {
     padding: 8px 11px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 12.5px;
@@ -376,6 +387,8 @@ _TEMPLATE = """<!DOCTYPE html>
     display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 999px;
     background: var(--accent-soft); color: var(--accent); cursor: pointer; font-weight: 500;
   }
+  .clear-all-chip { background: rgba(255, 255, 255, 0.07); color: var(--text-muted); }
+  .clear-all-chip:hover { background: rgba(255, 255, 255, 0.12); color: var(--text); }
   .service-name-cell { cursor: pointer; }
   .service-name-cell:hover { color: var(--accent); }
   .service-name-cell i { color: var(--text-faint); font-style: italic; font-weight: 400; }
@@ -411,7 +424,8 @@ _TEMPLATE = """<!DOCTYPE html>
     h1 { font-size: 17px; }
     .tabs { display: none; }
     .controls { gap: 7px; }
-    .controls input[type=text], .controls select { width: auto; flex: 1 1 120px; }
+    .controls input[type=text], .controls select, .controls .search-wrap { width: auto; flex: 1 1 120px; }
+    .controls .search-wrap input[type=text] { width: 100%; }
     .table-wrap { max-height: none; border-radius: 10px; }
     table { font-size: 11px; }
     th { font-size: 10px; }
@@ -458,9 +472,13 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="controls">
     <select id="countrySelect"></select>
     <select id="countryServiceSelect"></select>
-    <input type="text" id="countryFilmSearch" placeholder="Search films...">
+    <div class="search-wrap">
+      <input type="text" id="countryFilmSearch" placeholder="Search title, year, director, cast...">
+      <span class="search-clear hidden" id="countryFilmSearchClear">✕</span>
+    </div>
     <span id="countryFilterToggles"></span>
   </div>
+  <div class="active-filters" id="activeCountryFilters"></div>
   <div class="table-wrap"><table id="countryGrid"><thead></thead><tbody></tbody></table></div>
 </section>
 
@@ -468,9 +486,13 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="controls">
     <select id="serviceSelect"></select>
     <select id="serviceCountrySelect"></select>
-    <input type="text" id="serviceFilmSearch" placeholder="Search film...">
+    <div class="search-wrap">
+      <input type="text" id="serviceFilmSearch" placeholder="Search title, year, director, cast...">
+      <span class="search-clear hidden" id="serviceFilmSearchClear">✕</span>
+    </div>
     <label><input type="checkbox" id="haveOnlyServices"> Only services I have</label>
   </div>
+  <div class="active-filters" id="activeServiceFilters"></div>
   <div class="table-wrap"><table id="servicesGrid"><thead></thead><tbody></tbody></table></div>
 </section>
 
@@ -482,7 +504,10 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <section class="view" id="view-films">
   <div class="controls">
-    <input type="text" id="search" placeholder="Search films...">
+    <div class="search-wrap">
+      <input type="text" id="search" placeholder="Search title, year, director, cast...">
+      <span class="search-clear hidden" id="searchClear">✕</span>
+    </div>
     <select id="filmsCountrySelect"></select>
     <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
   </div>
@@ -534,6 +559,27 @@ document.getElementById('watchlistLink').href = DATA.letterboxd_watchlist_url;
 function esc(text) {
   if (text == null) return '';
   return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Searches title, year, director and starring cast so a query like "1994" or
+// "Tarantino" or a lead actor's name all work from the same box.
+function searchHaystack(row) {
+  const starring = Array.isArray(row.starring) ? row.starring.join(' ') : (row.starring || '');
+  return [row.title, row.year, row.director, starring].filter(Boolean).join(' ').toLowerCase();
+}
+
+function wireSearchClear(inputId, clearId, rerender) {
+  const input = document.getElementById(inputId);
+  const btn = document.getElementById(clearId);
+  const sync = () => btn.classList.toggle('hidden', !input.value);
+  input.addEventListener('input', sync);
+  btn.addEventListener('click', () => {
+    input.value = '';
+    sync();
+    rerender();
+    input.focus();
+  });
+  sync();
 }
 
 document.getElementById('tab-home').addEventListener('click', () => showView('home'));
@@ -646,7 +692,7 @@ function baseFilteredFilms() {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const notHaveOnly = document.getElementById('notHaveOnly').checked;
   return DATA.films.filter(row => {
-    if (q && !row.title.toLowerCase().includes(q)) return false;
+    if (q && !searchHaystack(row).includes(q)) return false;
     if (notHaveOnly && row.have_service) return false;
     if (activeService && !row.main[activeService]) return false;
     return true;
@@ -692,7 +738,9 @@ function updateFilmsCountrySelect(counts) {
 function renderActiveFilmFilters() {
   const container = document.getElementById('activeFilmFilters');
   container.innerHTML = '';
-  if (!activeCountry && !activeService) return;
+  const searchVal = document.getElementById('search').value.trim();
+  const notHaveOnly = document.getElementById('notHaveOnly').checked;
+  if (!activeCountry && !activeService && !searchVal && !notHaveOnly) return;
   if (activeCountry) {
     const name = (DATA.countryNames && DATA.countryNames[activeCountry]) || activeCountry;
     const chip = document.createElement('span');
@@ -708,6 +756,36 @@ function renderActiveFilmFilters() {
     chip.addEventListener('click', () => { activeService = null; renderFilms(); });
     container.appendChild(chip);
   }
+  if (searchVal) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = '"' + searchVal + '" ✕';
+    chip.addEventListener('click', () => {
+      document.getElementById('search').value = '';
+      document.getElementById('searchClear').classList.add('hidden');
+      renderFilms();
+    });
+    container.appendChild(chip);
+  }
+  if (notHaveOnly) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Not on a service I have ✕';
+    chip.addEventListener('click', () => { document.getElementById('notHaveOnly').checked = false; renderFilms(); });
+    container.appendChild(chip);
+  }
+  const clearAll = document.createElement('span');
+  clearAll.className = 'filter-chip clear-all-chip';
+  clearAll.textContent = 'Clear all ✕';
+  clearAll.addEventListener('click', () => {
+    activeCountry = null;
+    activeService = null;
+    document.getElementById('search').value = '';
+    document.getElementById('searchClear').classList.add('hidden');
+    document.getElementById('notHaveOnly').checked = false;
+    renderFilms();
+  });
+  container.appendChild(clearAll);
 }
 
 function renderFilms() {
@@ -859,6 +937,7 @@ function renderFilmsBody(processed, columnBrands, showOtherServices) {
 }
 
 document.getElementById('search').addEventListener('input', renderFilms);
+wireSearchClear('search', 'searchClear', renderFilms);
 document.getElementById('notHaveOnly').addEventListener('change', renderFilms);
 document.getElementById('filmsCountrySelect').addEventListener('change', e => {
   activeCountry = e.target.value || null;
@@ -912,6 +991,61 @@ function renderServicesHead() {
   thead.appendChild(headRow);
 }
 
+function renderActiveServiceFilters() {
+  const container = document.getElementById('activeServiceFilters');
+  container.innerHTML = '';
+  const serviceQ = document.getElementById('serviceSelect').value;
+  const countryQ = document.getElementById('serviceCountrySelect').value;
+  const filmQ = document.getElementById('serviceFilmSearch').value.trim();
+  const haveOnly = document.getElementById('haveOnlyServices').checked;
+  if (!serviceQ && !countryQ && !filmQ && !haveOnly) return;
+
+  if (serviceQ) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = serviceQ + ' ✕';
+    chip.addEventListener('click', () => { document.getElementById('serviceSelect').value = ''; renderServicesRows(); });
+    container.appendChild(chip);
+  }
+  if (countryQ) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = countryQ + ' ✕';
+    chip.addEventListener('click', () => { document.getElementById('serviceCountrySelect').value = ''; renderServicesRows(); });
+    container.appendChild(chip);
+  }
+  if (filmQ) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = '"' + filmQ + '" ✕';
+    chip.addEventListener('click', () => {
+      document.getElementById('serviceFilmSearch').value = '';
+      document.getElementById('serviceFilmSearchClear').classList.add('hidden');
+      renderServicesRows();
+    });
+    container.appendChild(chip);
+  }
+  if (haveOnly) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Only services I have ✕';
+    chip.addEventListener('click', () => { document.getElementById('haveOnlyServices').checked = false; renderServicesRows(); });
+    container.appendChild(chip);
+  }
+  const clearAll = document.createElement('span');
+  clearAll.className = 'filter-chip clear-all-chip';
+  clearAll.textContent = 'Clear all ✕';
+  clearAll.addEventListener('click', () => {
+    document.getElementById('serviceSelect').value = '';
+    document.getElementById('serviceCountrySelect').value = '';
+    document.getElementById('serviceFilmSearch').value = '';
+    document.getElementById('serviceFilmSearchClear').classList.add('hidden');
+    document.getElementById('haveOnlyServices').checked = false;
+    renderServicesRows();
+  });
+  container.appendChild(clearAll);
+}
+
 function renderServicesRows() {
   const tbody = document.querySelector('#servicesGrid tbody');
   tbody.innerHTML = '';
@@ -919,6 +1053,7 @@ function renderServicesRows() {
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
   const haveOnly = document.getElementById('haveOnlyServices').checked;
+  renderActiveServiceFilters();
 
   let rows = DATA.services.slice();
   const col = serviceCols.find(c => c.key === serviceSortKey);
@@ -933,7 +1068,7 @@ function renderServicesRows() {
   rows.forEach(row => {
     if (serviceQ && row.brand !== serviceQ) return;
     if (countryQ && row.country_name !== countryQ) return;
-    if (filmQ && !row.slugs.some(s => DATA.films_by_slug[s].title.toLowerCase().includes(filmQ))) return;
+    if (filmQ && !row.slugs.some(s => searchHaystack(DATA.films_by_slug[s]).includes(filmQ))) return;
     if (haveOnly && !row.have) return;
     const tr = document.createElement('tr');
 
@@ -974,6 +1109,7 @@ document.getElementById('serviceSelect').addEventListener('change', renderServic
 document.getElementById('serviceCountrySelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
 document.getElementById('haveOnlyServices').addEventListener('change', renderServicesRows);
+wireSearchClear('serviceFilmSearch', 'serviceFilmSearchClear', renderServicesRows);
 
 populateServiceSelects();
 renderServicesHead();
@@ -1057,10 +1193,62 @@ function renderCountryHead() {
   thead.appendChild(headRow);
 }
 
+function renderActiveCountryFilters() {
+  const container = document.getElementById('activeCountryFilters');
+  container.innerHTML = '';
+  const q = document.getElementById('countryFilmSearch').value.trim();
+  const serviceQ = document.getElementById('countryServiceSelect').value;
+  const anyToggleOff = countryClassifications.some(k => !countryFilterState[k]);
+  if (!q && !serviceQ && !anyToggleOff) return;
+
+  if (q) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = '"' + q + '" ✕';
+    chip.addEventListener('click', () => {
+      document.getElementById('countryFilmSearch').value = '';
+      document.getElementById('countryFilmSearchClear').classList.add('hidden');
+      renderCountryRows();
+    });
+    container.appendChild(chip);
+  }
+  if (serviceQ) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = serviceQ + ' ✕';
+    chip.addEventListener('click', () => { document.getElementById('countryServiceSelect').value = ''; renderCountryRows(); });
+    container.appendChild(chip);
+  }
+  if (anyToggleOff) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Availability filters ✕';
+    chip.addEventListener('click', () => {
+      countryClassifications.forEach(k => { countryFilterState[k] = true; });
+      renderCountryFilterToggles();
+      renderCountryRows();
+    });
+    container.appendChild(chip);
+  }
+  const clearAll = document.createElement('span');
+  clearAll.className = 'filter-chip clear-all-chip';
+  clearAll.textContent = 'Clear all ✕';
+  clearAll.addEventListener('click', () => {
+    document.getElementById('countryFilmSearch').value = '';
+    document.getElementById('countryFilmSearchClear').classList.add('hidden');
+    document.getElementById('countryServiceSelect').value = '';
+    countryClassifications.forEach(k => { countryFilterState[k] = true; });
+    renderCountryFilterToggles();
+    renderCountryRows();
+  });
+  container.appendChild(clearAll);
+}
+
 function renderCountryRows() {
   const tbody = document.querySelector('#countryGrid tbody');
   tbody.innerHTML = '';
   const country = currentCountry();
+  renderActiveCountryFilters();
   if (!country) return;
 
   const q = document.getElementById('countryFilmSearch').value.trim().toLowerCase();
@@ -1077,7 +1265,7 @@ function renderCountryRows() {
 
   const frag = document.createDocumentFragment();
   rows.forEach(row => {
-    if (q && !row.title.toLowerCase().includes(q)) return;
+    if (q && !searchHaystack(row).includes(q)) return;
     if (serviceQ && !row.services.some(s => s.brand === serviceQ)) return;
     const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
     if (!visibleServices.length) return;
@@ -1110,6 +1298,7 @@ function renderCountryRows() {
 document.getElementById('countrySelect').addEventListener('change', () => { populateCountryServiceSelect(); renderCountryRows(); });
 document.getElementById('countryServiceSelect').addEventListener('change', renderCountryRows);
 document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
+wireSearchClear('countryFilmSearch', 'countryFilmSearchClear', renderCountryRows);
 
 populateCountrySelect();
 populateCountryServiceSelect();

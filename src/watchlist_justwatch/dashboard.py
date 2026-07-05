@@ -243,66 +243,28 @@ def _top_rated_section(state: StateDoc, films_all_offers: dict[str, list[dict]],
     }
 
 
-def _because_you_watched_section(state: StateDoc, exclude: set[str], limit: int = RECOMMENDED_COUNT) -> dict:
-    """TMDB-correlated recommendations resolved once (network required)
-    during the real daily run and cached on state.recent_watch_recommendations,
-    since this function itself must stay network-free to regenerate."""
-    chosen = [s for s in state.recent_watch_recommendations if s in state.films and s not in exclude][:limit]
+def _mini_card_from_lookup(entry: dict) -> dict:
+    """Same shape as _mini_card, but from a films_by_slug-shaped dict (either
+    a watchlist film or a discovered one — see _build_home_sections)."""
     return {
-        "key": "because_you_watched", "header": "Because you've been watching",
-        "films": [_mini_card(state.films[s]) for s in chosen],
+        "slug": entry["slug"], "title": entry["title"], "year": entry["year"],
+        "rating": entry["rating"], "poster_url": entry["poster_url"], "director": entry["director"],
     }
 
 
-def _same_director_section(state: StateDoc, exclude: set[str], limit: int = RECOMMENDED_COUNT) -> dict:
-    directors: list[str] = []
-    for watched in state.recent_watches:
-        for d in watched.get("director") or []:
-            if d not in directors:
-                directors.append(d)
+def _cached_section(state: StateDoc, lookup: dict[str, dict], key: str, exclude: set[str],
+                     limit: int = RECOMMENDED_COUNT) -> dict:
+    """because_you_watched/same_director/same_cast are correlated across all
+    of TMDB (not just the watchlist), which needs network calls — resolved
+    once during the real daily run and cached on state.recommendation_sections
+    (+ state.discovery_films for anything not already on the watchlist),
+    since this function itself must stay network-free to regenerate."""
+    cached = next((s for s in state.recommendation_sections if s["key"] == key), None)
+    if cached is None:
+        return {"key": key, "header": "", "films": []}
 
-    if not directors:
-        return {"key": "same_director", "header": "", "films": []}
-
-    matches = [
-        slug for slug, film in state.films.items()
-        if slug not in exclude and any(d in (film.director or []) for d in directors)
-    ]
-    matches.sort(key=lambda s: -(state.films[s].rating or 0))
-    chosen = matches[:limit]
-    if len(chosen) < limit:
-        # No real "similar director" data source exists yet, so pad with the
-        # next highest-rated watchlist films rather than leaving it sparse —
-        # only once we know there was a real director signal to begin with.
-        fallback = sorted(
-            (s for s in state.films if s not in exclude and s not in chosen),
-            key=lambda s: -(state.films[s].rating or 0),
-        )
-        chosen += fallback[: limit - len(chosen)]
-
-    header = "More from " + " & ".join(directors[:2])
-    return {"key": "same_director", "header": header, "films": [_mini_card(state.films[s]) for s in chosen]}
-
-
-def _same_cast_section(state: StateDoc, exclude: set[str], limit: int = RECOMMENDED_COUNT) -> dict:
-    counts: dict[str, int] = defaultdict(int)
-    order: list[str] = []
-    for watched in state.recent_watches:
-        for actor in watched.get("starring") or []:
-            counts[actor] += 1
-            if actor not in order:
-                order.append(actor)
-    top_actors = sorted(order, key=lambda a: (-counts[a], order.index(a)))[:3]
-
-    matches = [
-        slug for slug, film in state.films.items()
-        if slug not in exclude and any(a in (film.starring or []) for a in top_actors)
-    ]
-    matches.sort(key=lambda s: -(state.films[s].rating or 0))
-    chosen = matches[:limit]
-
-    header = "More starring " + ", ".join(top_actors) if top_actors else "More starring actors you've watched"
-    return {"key": "same_cast", "header": header, "films": [_mini_card(state.films[s]) for s in chosen]}
+    chosen = [s for s in cached["slugs"] if s in lookup and s not in exclude][:limit]
+    return {"key": key, "header": cached["header"], "films": [_mini_card_from_lookup(lookup[s]) for s in chosen]}
 
 
 def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12) -> dict:
@@ -322,14 +284,16 @@ def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12)
     }
 
 
-def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
+def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
+                          films_by_slug: dict[str, dict]) -> list[dict]:
+    lookup = {**films_by_slug, **state.discovery_films}
     used: set[str] = set()
     sections = []
     for build in (
         lambda ex: _top_rated_section(state, films_all_offers, ex),
-        lambda ex: _because_you_watched_section(state, ex),
-        lambda ex: _same_director_section(state, ex),
-        lambda ex: _same_cast_section(state, ex),
+        lambda ex: _cached_section(state, lookup, "because_you_watched", ex),
+        lambda ex: _cached_section(state, lookup, "same_director", ex),
+        lambda ex: _cached_section(state, lookup, "same_cast", ex),
         lambda ex: _recently_added_section(state, ex),
     ):
         section = build(used)
@@ -357,15 +321,17 @@ def build_dashboard_data(
     rows = [_film_row(film, main_brand_set, films_all_offers[slug]) for slug, film in state.films.items()]
     rows.sort(key=lambda r: r["title"].lower())
 
+    films_by_slug = _films_by_slug(state, films_all_offers)
+
     return {
         "last_run_at": state.last_run_at,
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
-        "home_sections": _build_home_sections(state, films_all_offers),
+        "home_sections": _build_home_sections(state, films_all_offers, films_by_slug),
         "films": rows,
         "services": _service_rows(state, films_all_offers),
         "countries": _country_rows(state, films_all_offers),
-        "films_by_slug": _films_by_slug(state, films_all_offers),
+        "films_by_slug": {**films_by_slug, **state.discovery_films},
     }
 
 
@@ -642,7 +608,7 @@ _TEMPLATE = """<!DOCTYPE html>
       <option value="brand">Sort: Service (A–Z)</option>
       <option value="unique_film_count">Sort: # unique (most)</option>
     </select>
-    <label><input type="checkbox" id="haveOnlyServices"> Only services I have</label>
+    <span id="serviceFilterToggles"></span>
   </div>
   <div class="active-filters" id="activeServiceFilters"></div>
   <div id="servicesGrid" class="service-cards"></div>
@@ -741,6 +707,35 @@ document.addEventListener('click', () => {
   document.getElementById('lastCheckedInfo').classList.remove('open');
 });
 document.getElementById('watchlistLink').href = DATA.letterboxd_watchlist_url;
+
+// have > free > could_get_again > subscription, always — used to order the
+// "where to watch" badges on quick-look and service-detail cards.
+const CLASSIFICATION_PRIORITY = { have: 0, free: 1, could_get_again: 2, subscription: 3 };
+const CLASSIFICATIONS = ['have', 'could_get_again', 'free', 'subscription'];
+const CLASSIFICATION_LABELS = { have: 'have', could_get_again: 'could get again', free: 'free', subscription: 'subscription needed' };
+
+// Shared pill-toggle filter row (Country and Services tabs) for the four
+// have/could_get_again/free/subscription classifications.
+function renderClassificationToggles(containerId, filterState, onChange) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  CLASSIFICATIONS.forEach(key => {
+    const span = document.createElement('span');
+    span.textContent = CLASSIFICATION_LABELS[key];
+    span.classList.add('filter-toggle', 'badge', 'badge-' + key);
+    span.addEventListener('click', () => {
+      filterState[key] = !filterState[key];
+      span.classList.toggle('off', !filterState[key]);
+      onChange();
+    });
+    container.appendChild(span);
+  });
+}
+
+function classificationBadgeLabel(key) {
+  const label = CLASSIFICATION_LABELS[key];
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
 
 // Searches title, year, director and starring cast so a query like "1994" or
 // "Tarantino" or a lead actor's name all work from the same box.
@@ -864,7 +859,10 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
   const synopsis = film.synopsis ? '<p class="detail-synopsis">' + esc(film.synopsis) + '</p>' : '';
 
-  const others = film.all_offers.filter(o => !(o.brand === excludeBrand && o.country === excludeCountry));
+  const others = film.all_offers
+    .filter(o => !(o.brand === excludeBrand && o.country === excludeCountry))
+    .slice()
+    .sort((a, b) => CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification]);
   const otherHtml = others.length
     ? others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(o.country) + '</i></span>').join(' ')
     : '<span class="muted">Not available anywhere else tracked</span>';
@@ -1149,7 +1147,7 @@ const serviceCols = [
   { key: 'film_count', sort: r => r.film_count, dir: -1 },
   { key: 'unique_film_count', sort: r => r.unique_film_count, dir: -1 },
 ];
-const serviceClassificationLabels = { have: 'Have', could_get_again: 'Could get again', free: 'Free', subscription: 'Subscription needed' };
+const serviceFilterState = { have: true, could_get_again: true, free: true, subscription: true };
 
 let serviceSortKey = 'film_count', serviceSortDir = -1;
 
@@ -1172,8 +1170,8 @@ function renderActiveServiceFilters() {
   const serviceQ = document.getElementById('serviceSelect').value;
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim();
-  const haveOnly = document.getElementById('haveOnlyServices').checked;
-  if (!serviceQ && !countryQ && !filmQ && !haveOnly) return;
+  const anyToggleOff = CLASSIFICATIONS.some(k => !serviceFilterState[k]);
+  if (!serviceQ && !countryQ && !filmQ && !anyToggleOff) return;
 
   if (serviceQ) {
     const chip = document.createElement('span');
@@ -1200,11 +1198,15 @@ function renderActiveServiceFilters() {
     });
     container.appendChild(chip);
   }
-  if (haveOnly) {
+  if (anyToggleOff) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = 'Only services I have ✕';
-    chip.addEventListener('click', () => { document.getElementById('haveOnlyServices').checked = false; renderServicesRows(); });
+    chip.textContent = 'Type filters ✕';
+    chip.addEventListener('click', () => {
+      CLASSIFICATIONS.forEach(k => { serviceFilterState[k] = true; });
+      renderServiceFilterToggles();
+      renderServicesRows();
+    });
     container.appendChild(chip);
   }
   const clearAll = document.createElement('span');
@@ -1215,10 +1217,15 @@ function renderActiveServiceFilters() {
     document.getElementById('serviceCountrySelect').value = '';
     document.getElementById('serviceFilmSearch').value = '';
     document.getElementById('serviceFilmSearchClear').classList.add('hidden');
-    document.getElementById('haveOnlyServices').checked = false;
+    CLASSIFICATIONS.forEach(k => { serviceFilterState[k] = true; });
+    renderServiceFilterToggles();
     renderServicesRows();
   });
   container.appendChild(clearAll);
+}
+
+function renderServiceFilterToggles() {
+  renderClassificationToggles('serviceFilterToggles', serviceFilterState, renderServicesRows);
 }
 
 function renderServicesRows() {
@@ -1227,7 +1234,6 @@ function renderServicesRows() {
   const serviceQ = document.getElementById('serviceSelect').value;
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
-  const haveOnly = document.getElementById('haveOnlyServices').checked;
   renderActiveServiceFilters();
 
   let rows = DATA.services.slice();
@@ -1244,14 +1250,14 @@ function renderServicesRows() {
     if (serviceQ && row.brand !== serviceQ) return;
     if (countryQ && row.country_name !== countryQ) return;
     if (filmQ && !row.slugs.some(s => searchHaystack(DATA.films_by_slug[s]).includes(filmQ))) return;
-    if (haveOnly && row.classification !== 'have') return;
+    if (!serviceFilterState[row.classification]) return;
 
     const card = document.createElement('div');
     card.className = 'service-card';
     card.innerHTML =
       '<div class="service-card-head">' +
         '<span class="service-card-name">' + esc(row.brand) + '<i>' + esc(row.country_name) + '</i></span>' +
-        '<span class="badge badge-' + row.classification + '">' + serviceClassificationLabels[row.classification] + '</span>' +
+        '<span class="badge badge-' + row.classification + '">' + classificationBadgeLabel(row.classification) + '</span>' +
       '</div>' +
       '<div class="service-card-stats">' + row.film_count + ' films tracked · ' + row.unique_film_count + ' unique</div>';
     card.addEventListener('click', () => openServiceDetail(row.brand, row.country, row.country_name));
@@ -1275,7 +1281,6 @@ function openServiceDetail(brand, country, countryName) {
 document.getElementById('serviceSelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceCountrySelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
-document.getElementById('haveOnlyServices').addEventListener('change', renderServicesRows);
 wireSearchClear('serviceFilmSearch', 'serviceFilmSearchClear', renderServicesRows);
 document.getElementById('servicesSortSelect').addEventListener('change', e => {
   serviceSortKey = e.target.value;
@@ -1284,6 +1289,7 @@ document.getElementById('servicesSortSelect').addEventListener('change', e => {
 });
 
 populateServiceSelects();
+renderServiceFilterToggles();
 renderServicesRows();
 
 // ---------- By VPN country ----------
@@ -1294,21 +1300,34 @@ const countryCols = [
   { key: 'rating', sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
 ];
 
-const countryClassifications = ['have', 'could_get_again', 'free', 'subscription'];
-const countryClassificationLabels = { have: 'have', could_get_again: 'could get again', free: 'free', subscription: 'subscription needed' };
 const countryFilterState = { have: true, could_get_again: true, free: true, subscription: true };
 
 let countrySortKey = 'rating', countrySortDir = -1;
 
 function populateCountrySelect() {
   const select = document.getElementById('countrySelect');
-  DATA.countries.forEach(c => {
-    const opt = document.createElement('option');
-    opt.value = c.code;
-    opt.textContent = c.name + ' (' + c.films.length + ' films)';
-    select.appendChild(opt);
-  });
-  if (DATA.countries.length) select.value = DATA.countries[0].code;
+
+  const byFilmCount = DATA.countries.slice().sort((a, b) => b.films.length - a.films.length || a.name.localeCompare(b.name));
+  const top = byFilmCount.slice(0, 10);
+  const topCodes = new Set(top.map(c => c.code));
+  const rest = DATA.countries.filter(c => !topCodes.has(c.code)); // DATA.countries is already name-sorted
+
+  const addOptions = (label, countries) => {
+    if (!countries.length) return;
+    const group = document.createElement('optgroup');
+    group.label = label;
+    countries.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.code;
+      opt.textContent = c.name + ' (' + c.films.length + ' films)';
+      group.appendChild(opt);
+    });
+    select.appendChild(group);
+  };
+  addOptions('Most films on your watchlist', top);
+  addOptions('All other countries', rest);
+
+  if (top.length) select.value = top[0].code;
 }
 
 function populateCountryServiceSelect() {
@@ -1322,19 +1341,7 @@ function populateCountryServiceSelect() {
 }
 
 function renderCountryFilterToggles() {
-  const container = document.getElementById('countryFilterToggles');
-  container.innerHTML = '';
-  countryClassifications.forEach(key => {
-    const span = document.createElement('span');
-    span.textContent = countryClassificationLabels[key];
-    span.classList.add('filter-toggle', 'badge', 'badge-' + key);
-    span.addEventListener('click', () => {
-      countryFilterState[key] = !countryFilterState[key];
-      span.classList.toggle('off', !countryFilterState[key]);
-      renderCountryRows();
-    });
-    container.appendChild(span);
-  });
+  renderClassificationToggles('countryFilterToggles', countryFilterState, renderCountryRows);
 }
 
 function currentCountry() {
@@ -1347,7 +1354,7 @@ function renderActiveCountryFilters() {
   container.innerHTML = '';
   const q = document.getElementById('countryFilmSearch').value.trim();
   const serviceQ = document.getElementById('countryServiceSelect').value;
-  const anyToggleOff = countryClassifications.some(k => !countryFilterState[k]);
+  const anyToggleOff = CLASSIFICATIONS.some(k => !countryFilterState[k]);
   if (!q && !serviceQ && !anyToggleOff) return;
 
   if (q) {
@@ -1373,7 +1380,7 @@ function renderActiveCountryFilters() {
     chip.className = 'filter-chip';
     chip.textContent = 'Availability filters ✕';
     chip.addEventListener('click', () => {
-      countryClassifications.forEach(k => { countryFilterState[k] = true; });
+      CLASSIFICATIONS.forEach(k => { countryFilterState[k] = true; });
       renderCountryFilterToggles();
       renderCountryRows();
     });
@@ -1386,7 +1393,7 @@ function renderActiveCountryFilters() {
     document.getElementById('countryFilmSearch').value = '';
     document.getElementById('countryFilmSearchClear').classList.add('hidden');
     document.getElementById('countryServiceSelect').value = '';
-    countryClassifications.forEach(k => { countryFilterState[k] = true; });
+    CLASSIFICATIONS.forEach(k => { countryFilterState[k] = true; });
     renderCountryFilterToggles();
     renderCountryRows();
   });

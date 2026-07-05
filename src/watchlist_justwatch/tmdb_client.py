@@ -56,3 +56,14 @@ def similar_and_recommended(tmdb_id: int, *, limit: int = 15) -> list[dict]:
 def release_year(movie: dict) -> int | None:
     date = movie.get("release_date") or ""
     return int(date[:4]) if len(date) >= 4 and date[:4].isdigit() else None
+
+
+def search_person(name: str) -> dict | None:
+    results = _get("/search/person", query=name).get("results", [])
+    return results[0] if results else None
+
+
+def person_movie_credits(person_id: int) -> dict:
+    """{"cast": [...], "crew": [...]} — crew entries include a "job" field
+    ("Director", "Writer", etc.) to filter down to directing credits."""
+    return _get(f"/person/{person_id}/movie_credits")

@@ -37,8 +37,10 @@ def _bucket_lines_html(entries: list[tuple[str, str]]) -> str:
     )
 
 
-def render_film_card_html(film, config: dict[str, CountryConfig], global_subscriptions: list[str],
-                           revisitable: set[str]) -> str:
+def _film_header_html(film) -> tuple[str, str]:
+    """Poster + title/rating/director/starring/synopsis shared by every film
+    card in the email — the rich look "new to your watchlist" already had,
+    now reused everywhere a film is mentioned rather than a single line."""
     year = f" ({film.year})" if film.year else ""
     rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
     poster = (
@@ -48,6 +50,28 @@ def render_film_card_html(film, config: dict[str, CountryConfig], global_subscri
     director = f'<p style="{_STYLE_META}">Directed by {_esc(", ".join(film.director))}</p>' if film.director else ""
     starring = f'<p style="{_STYLE_META}">Starring {_esc(", ".join(film.starring))}</p>' if film.starring else ""
     synopsis = f'<p style="{_STYLE_SYNOPSIS}">{_esc(film.synopsis)}</p>' if film.synopsis else ""
+    title_html = (
+        f'<p style="{_STYLE_TITLE}"><a href="https://letterboxd.com/film/{film.slug}/" '
+        f'style="color:#111; text-decoration:none;">{_esc(film.title)}{year}</a>{rating}</p>'
+        f"{director}{starring}{synopsis}"
+    )
+    return poster, title_html
+
+
+def _film_card_table_html(poster: str, body_html: str) -> str:
+    return f"""
+<table role="presentation" style="{_STYLE_CARD}" width="100%">
+  <tr>
+    <td style="vertical-align:top; width:112px; padding-right:16px;">{poster}</td>
+    <td style="vertical-align:top;">{body_html}</td>
+  </tr>
+</table>
+"""
+
+
+def render_film_card_html(film, config: dict[str, CountryConfig], global_subscriptions: list[str],
+                           revisitable: set[str]) -> str:
+    poster, title_html = _film_header_html(film)
 
     buckets = bucket_offers(film.offers, config, global_subscriptions, revisitable)
     buckets_html = ""
@@ -60,21 +84,18 @@ def render_film_card_html(film, config: dict[str, CountryConfig], global_subscri
         buckets_html = (f'<p style="{_STYLE_BUCKET_LINE}">Not currently streaming '
                          f'(subscription/free) in any tracked country.</p>')
 
-    return f"""
-<table role="presentation" style="{_STYLE_CARD}" width="100%">
-  <tr>
-    <td style="vertical-align:top; width:112px; padding-right:16px;">{poster}</td>
-    <td style="vertical-align:top;">
-      <p style="{_STYLE_TITLE}"><a href="https://letterboxd.com/film/{film.slug}/" style="color:#111; text-decoration:none;">
-        {_esc(film.title)}{year}</a>{rating}</p>
-      {director}
-      {starring}
-      {synopsis}
-      {buckets_html}
-    </td>
-  </tr>
-</table>
-"""
+    return _film_card_table_html(poster, title_html + buckets_html)
+
+
+def render_new_offer_card_html(film, offers: list, heading: str) -> str:
+    """Same rich poster/title/director/starring/synopsis card as a brand-new
+    watchlist addition, but for an existing film that just gained specific
+    new offers — the heading + offer list replaces the full-availability
+    breakdown since the point here is what's new, not everything it's on."""
+    poster, title_html = _film_header_html(film)
+    offers_html = f'<p style="{_STYLE_BUCKET_HEADING}">{heading}</p>'
+    offers_html += _bucket_lines_html([(o.package_clear_name, o.country) for o in offers])
+    return _film_card_table_html(poster, title_html + offers_html)
 
 
 def _wrap_document(body: str) -> str:
@@ -131,15 +152,27 @@ def _dedupe_by_film_country(entries: list[ReportEntry]) -> list[ReportEntry]:
     return list(best.values())
 
 
+def _group_by_film(entries: list[ReportEntry]) -> list[tuple]:
+    """One (film, offers) group per film, preserving first-seen order — a
+    film with new offers in several countries gets one card listing them
+    all, rather than one bare line per country."""
+    order: list[str] = []
+    by_slug: dict[str, dict] = {}
+    for e in entries:
+        group = by_slug.setdefault(e.film.slug, {"film": e.film, "offers": []})
+        if e.film.slug not in order:
+            order.append(e.film.slug)
+        group["offers"].append(e.offer)
+    return [(by_slug[slug]["film"], by_slug[slug]["offers"]) for slug in order]
+
+
 def _render_classified_section(heading: str, entries: list[ReportEntry]) -> str:
     if not entries:
         return ""
-    lines = "".join(
-        f'<p style="{_STYLE_BUCKET_LINE}">{_esc(e.film.title)}'
-        f'{f" ({e.film.year})" if e.film.year else ""} — {_esc(e.offer.package_clear_name)} '
-        f'({_esc(country_name(e.offer.country))})</p>'
-        for e in _dedupe_by_film_country(entries)
-    )
+    section = f'<h3 style="font-size:15px;">{heading}</h3>'
+    for film, offers in _group_by_film(_dedupe_by_film_country(entries)):
+        section += render_new_offer_card_html(film, offers, "Newly available:")
+    return section
     return f'<h3 style="font-size:15px;">{heading}</h3>{lines}'
 
 

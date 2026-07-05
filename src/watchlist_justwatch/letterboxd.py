@@ -182,3 +182,38 @@ def fetch_watchlist(
                 all_films[f.slug] = f
 
     return list(all_films.values())
+
+
+def fetch_diary(
+    username: str,
+    *,
+    limit: int = 4,
+    impersonate: str = "chrome124",
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+    request_timeout_seconds: float = 15.0,
+) -> list[WatchlistFilm]:
+    """Most recently watched films first (page 1 of the diary is already in
+    that order), deduped by slug so a rewatch only counts once. Feeds the
+    dashboard's "because you recently watched" recommendations, which are a
+    nice-to-have — any fetch failure just yields no recent-watch data rather
+    than breaking the whole daily run."""
+    session = curl_requests.Session()
+    try:
+        response = _fetch_url(session, f"https://letterboxd.com/{username}/films/diary/", max_retries=max_retries,
+                               backoff_base_seconds=backoff_base_seconds,
+                               request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
+    except LetterboxdFetchError:
+        return []
+
+    entries, _ = _parse_watchlist_page(response.text)  # same data-item-slug/name grid markup as the watchlist
+    seen: set[str] = set()
+    result: list[WatchlistFilm] = []
+    for entry in entries:
+        if entry.slug in seen:
+            continue
+        seen.add(entry.slug)
+        result.append(entry)
+        if len(result) >= limit:
+            break
+    return result

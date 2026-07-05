@@ -17,7 +17,7 @@ from .analysis import (
     render_ranking,
 )
 from .config import load_config, load_favorites, load_global_subscriptions, load_revisitable_services
-from .dashboard import build_dashboard_data, render_dashboard_html
+from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .diff import build_report
 from .html_email import (
     render_country_audit_html,
@@ -27,10 +27,10 @@ from .html_email import (
     render_report_html,
 )
 from .justwatch_client import resolve_and_fetch
-from .letterboxd import LetterboxdFetchError, fetch_watchlist, get_film_details_by_slug
+from .letterboxd import LetterboxdFetchError, fetch_diary, fetch_watchlist, get_film_details_by_slug
 from .notify import send_if_configured
 from .report import render_report
-from .similar import find_similar, render_similar
+from .similar import find_similar, recommend_from_recent_watches, render_similar
 from .state import StateDoc, get_cached_entry_id, load_state, save_state
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
@@ -74,6 +74,35 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
             film_state.synopsis = details["synopsis"]
 
         current_state.films[film.slug] = film_state
+
+    diary_films = fetch_diary(username, limit=4)
+    for w in diary_films:
+        details = get_film_details_by_slug(w.slug)
+        current_state.recent_watches.append({
+            "slug": w.slug, "title": w.title, "year": w.year,
+            "director": details["director"], "starring": details["starring"],
+        })
+    current_state.recent_watch_recommendations = (
+        recommend_from_recent_watches(current_state.recent_watches, current_state, limit=4)
+        if current_state.recent_watches else []
+    )
+
+    # A single day's diff is usually too small to fill a "recently added"
+    # section on its own, so newly-detected have/free offers accumulate into
+    # a capped rolling log instead of a one-day snapshot. Skipped on a true
+    # first run, where every offer would otherwise look "new".
+    if previous_state.films:
+        today = now_iso[:10]
+        previous_snapshot = compute_offer_snapshot(previous_state, config, global_subscriptions, revisitable)
+        current_snapshot = compute_offer_snapshot(current_state, config, global_subscriptions, revisitable)
+        new_additions = [
+            {"slug": slug, "brand": brand, "country": country, "classification": classification, "added_at": today}
+            for slug, offers in current_snapshot.items()
+            for (brand, country), classification in offers.items()
+            if classification in ("have", "free")
+            and previous_snapshot.get(slug, {}).get((brand, country)) != classification
+        ]
+        current_state.recent_additions = (new_additions + previous_state.recent_additions)[:200]
 
     report = build_report(previous_state, current_state, config)
     text = render_report(report, config, global_subscriptions, revisitable)

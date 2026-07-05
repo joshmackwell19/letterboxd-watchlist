@@ -17,12 +17,51 @@ class SimilarFilmResult:
     availability: dict[str, list[tuple[str, str]]]  # country -> [(clear_name, classification)]
 
 
-def _on_watchlist(state: StateDoc, title: str, year: int | None) -> bool:
+def _match_watchlist_slug(state: StateDoc, title: str, year: int | None) -> str | None:
     title_lower = title.lower()
     for film in state.films.values():
         if film.title.lower() == title_lower and (year is None or film.year == year):
-            return True
-    return False
+            return film.slug
+    return None
+
+
+def _on_watchlist(state: StateDoc, title: str, year: int | None) -> bool:
+    return _match_watchlist_slug(state, title, year) is not None
+
+
+def recommend_from_recent_watches(
+    recent_watches: list[dict], state: StateDoc, *, limit: int = 4, request_delay_seconds: float = 0.2,
+) -> list[str]:
+    """For each recently watched film, ask TMDB what's similar/recommended,
+    then keep only the candidates that are actually on the watchlist —
+    correlates "what you just watched" with "what to watch next" without
+    fetching fresh availability for films that aren't already tracked.
+    Best-effort: a TMDB hookup failure just skips that seed film rather than
+    breaking the whole daily run, since this is a nice-to-have.
+    """
+    already_watched = {w["slug"] for w in recent_watches}
+    seen_slugs: set[str] = set()
+    recommendations: list[str] = []
+
+    for watched in recent_watches:
+        try:
+            source = tmdb_client.search_movie(watched["title"], watched.get("year"))
+            if source is None:
+                continue
+            candidates = tmdb_client.similar_and_recommended(source["id"], limit=30)
+        except Exception:
+            continue
+
+        for movie in candidates:
+            slug = _match_watchlist_slug(state, movie["title"], tmdb_client.release_year(movie))
+            if slug and slug not in already_watched and slug not in seen_slugs:
+                seen_slugs.add(slug)
+                recommendations.append(slug)
+                if len(recommendations) >= limit:
+                    return recommendations
+        time.sleep(request_delay_seconds)
+
+    return recommendations
 
 
 def find_similar(

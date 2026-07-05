@@ -1,10 +1,13 @@
 import time
+from collections import Counter
 from dataclasses import dataclass
 
 from . import tmdb_client
 from .config import CountryConfig, canonical_display_name, classify_offer
-from .justwatch_client import fetch_offers, search_film
-from .letterboxd import get_rating_by_tmdb_id
+from .dashboard import _all_offers_for_film
+from .justwatch_client import fetch_offers, resolve_and_fetch, search_film
+from .letterboxd import get_film_details_by_tmdb_id, get_rating_by_tmdb_id
+from .models import WatchlistFilm
 from .state import StateDoc
 
 
@@ -29,39 +32,144 @@ def _on_watchlist(state: StateDoc, title: str, year: int | None) -> bool:
     return _match_watchlist_slug(state, title, year) is not None
 
 
-def recommend_from_recent_watches(
-    recent_watches: list[dict], state: StateDoc, *, limit: int = 4, request_delay_seconds: float = 0.2,
-) -> list[str]:
-    """For each recently watched film, ask TMDB what's similar/recommended,
-    then keep only the candidates that are actually on the watchlist —
-    correlates "what you just watched" with "what to watch next" without
-    fetching fresh availability for films that aren't already tracked.
-    Best-effort: a TMDB hookup failure just skips that seed film rather than
-    breaking the whole daily run, since this is a nice-to-have.
-    """
-    already_watched = {w["slug"] for w in recent_watches}
-    seen_slugs: set[str] = set()
-    recommendations: list[str] = []
+def _rank_by_rating(movies: list[dict]) -> list[dict]:
+    return sorted(movies, key=lambda m: -(m.get("vote_average") or 0))
 
+
+def _candidates_from_recent_watches(recent_watches: list[dict], *, candidate_pool: int) -> list[dict]:
+    """TMDB similar/recommended movies seeded from recent watches — not
+    matched against the watchlist, since the whole point is surfacing films
+    that aren't on it yet."""
+    seen_ids: set[int] = set()
+    candidates: list[dict] = []
     for watched in recent_watches:
         try:
             source = tmdb_client.search_movie(watched["title"], watched.get("year"))
             if source is None:
                 continue
-            candidates = tmdb_client.similar_and_recommended(source["id"], limit=30)
+            movies = tmdb_client.similar_and_recommended(source["id"], limit=candidate_pool)
         except Exception:
             continue
+        for movie in movies:
+            if movie["id"] not in seen_ids:
+                seen_ids.add(movie["id"])
+                candidates.append(movie)
+    return _rank_by_rating(candidates)
 
-        for movie in candidates:
-            slug = _match_watchlist_slug(state, movie["title"], tmdb_client.release_year(movie))
-            if slug and slug not in already_watched and slug not in seen_slugs:
-                seen_slugs.add(slug)
-                recommendations.append(slug)
-                if len(recommendations) >= limit:
-                    return recommendations
-        time.sleep(request_delay_seconds)
 
-    return recommendations
+def _candidates_by_person(names: list[str], role: str, *, candidate_pool: int) -> list[dict]:
+    """TMDB filmography for a director or actor name — role is "director"
+    (crew credits with job == Director) or "cast" (acting credits)."""
+    seen_ids: set[int] = set()
+    candidates: list[dict] = []
+    for name in names:
+        try:
+            person = tmdb_client.search_person(name)
+            if person is None:
+                continue
+            credits = tmdb_client.person_movie_credits(person["id"])
+        except Exception:
+            continue
+        movies = credits.get("crew", []) if role == "director" else credits.get("cast", [])
+        if role == "director":
+            movies = [m for m in movies if m.get("job") == "Director"]
+        for movie in movies:
+            if movie["id"] not in seen_ids:
+                seen_ids.add(movie["id"])
+                candidates.append(movie)
+    return _rank_by_rating(candidates)[:candidate_pool]
+
+
+def _enrich_candidates(
+    candidates: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
+    revisitable: set[str], *, exclude_slugs: set[str], limit: int,
+) -> tuple[list[str], dict[str, dict]]:
+    """Resolves TMDB candidates to real Letterboxd + JustWatch data, stopping
+    once `limit` films have real tracked availability. Over-fetches on
+    purpose (candidates is usually much longer than `limit`): some won't
+    have a Letterboxd match, and some won't currently have any tracked
+    offer anywhere, and silently skipping those is what lets a section
+    reliably reach `limit` films instead of coming up short."""
+    slugs: list[str] = []
+    films: dict[str, dict] = {}
+
+    for movie in candidates:
+        if len(slugs) >= limit:
+            break
+
+        details = get_film_details_by_tmdb_id(movie["id"])
+        if details is None or details["slug"] in exclude_slugs or details["slug"] in films:
+            continue
+
+        temp_film = WatchlistFilm(slug=details["slug"], title=movie.get("title") or "",
+                                   year=tmdb_client.release_year(movie))
+        film_state = resolve_and_fetch(temp_film, None, None, now_iso=now_iso)
+        if not film_state.offers:
+            continue
+        all_offers = _all_offers_for_film(film_state, config, global_subscriptions, revisitable)
+        if not all_offers:
+            continue
+
+        slug = details["slug"]
+        films[slug] = {
+            "slug": slug, "title": movie.get("title") or "", "year": tmdb_client.release_year(movie),
+            "rating": details["rating"], "poster_url": details["poster_url"],
+            "director": ", ".join(details["director"]) if details["director"] else None,
+            "starring": details["starring"], "synopsis": details["synopsis"],
+            "all_offers": all_offers,
+        }
+        slugs.append(slug)
+
+    return slugs, films
+
+
+def discover_because_watched(
+    recent_watches: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
+    revisitable: set[str], exclude_slugs: set[str], *, limit: int = 4,
+) -> tuple[str, list[str], dict[str, dict]]:
+    candidates = _candidates_from_recent_watches(recent_watches, candidate_pool=30)
+    slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
+                                       exclude_slugs=exclude_slugs, limit=limit)
+    return "Because you've been watching", slugs, films
+
+
+def discover_same_director(
+    recent_watches: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
+    revisitable: set[str], exclude_slugs: set[str], *, limit: int = 4,
+) -> tuple[str, list[str], dict[str, dict]]:
+    directors: list[str] = []
+    for watched in recent_watches:
+        for d in watched.get("director") or []:
+            if d not in directors:
+                directors.append(d)
+    if not directors:
+        return "", [], {}
+
+    candidates = _candidates_by_person(directors, "director", candidate_pool=30)
+    slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
+                                       exclude_slugs=exclude_slugs, limit=limit)
+    return "More from " + " & ".join(directors[:2]), slugs, films
+
+
+def discover_same_cast(
+    recent_watches: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
+    revisitable: set[str], exclude_slugs: set[str], *, limit: int = 4,
+) -> tuple[str, list[str], dict[str, dict]]:
+    counts: Counter = Counter()
+    order: list[str] = []
+    for watched in recent_watches:
+        for actor in watched.get("starring") or []:
+            counts[actor] += 1
+            if actor not in order:
+                order.append(actor)
+    top_actors = sorted(order, key=lambda a: (-counts[a], order.index(a)))[:3]
+    if not top_actors:
+        return "", [], {}
+
+    candidates = _candidates_by_person(top_actors, "cast", candidate_pool=30)
+    slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
+                                       exclude_slugs=exclude_slugs, limit=limit)
+    return "More starring " + ", ".join(top_actors), slugs, films
 
 
 def find_similar(

@@ -90,6 +90,24 @@ def _parse_film_json_ld(html: str) -> dict | None:
         return None
 
 
+_EMPTY_FILM_DETAILS = {"rating": None, "poster_url": None, "director": [], "starring": [], "synopsis": None}
+
+
+def _film_details_from_json_ld(html: str) -> dict:
+    data = _parse_film_json_ld(html)
+    if data is None:
+        return dict(_EMPTY_FILM_DETAILS)
+
+    rating = data.get("aggregateRating", {}).get("ratingValue")
+    return {
+        "rating": float(rating) if rating is not None else None,
+        "poster_url": data.get("image"),
+        "director": [p["name"] for p in data.get("director", []) if p.get("name")],
+        "starring": [p["name"] for p in data.get("actor", [])[:MAX_STARRING] if p.get("name")],
+        "synopsis": data.get("description"),
+    }
+
+
 def get_film_details_by_slug(
     slug: str,
     *,
@@ -107,30 +125,46 @@ def get_film_details_by_slug(
     Always returns a dict (possibly all-None/empty) rather than raising or
     returning None, so callers can merge it in unconditionally.
     """
-    empty = {"rating": None, "poster_url": None, "director": [], "starring": [], "synopsis": None}
-
-    own_session = session is None
-    if own_session:
-        session = curl_requests.Session()
+    session = session or curl_requests.Session()
     try:
         response = _fetch_url(session, f"https://letterboxd.com/film/{slug}/", max_retries=max_retries,
                                backoff_base_seconds=backoff_base_seconds,
                                request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
     except LetterboxdFetchError:
-        return empty
+        return dict(_EMPTY_FILM_DETAILS)
 
-    data = _parse_film_json_ld(response.text)
-    if data is None:
-        return empty
+    return _film_details_from_json_ld(response.text)
 
-    rating = data.get("aggregateRating", {}).get("ratingValue")
-    return {
-        "rating": float(rating) if rating is not None else None,
-        "poster_url": data.get("image"),
-        "director": [p["name"] for p in data.get("director", []) if p.get("name")],
-        "starring": [p["name"] for p in data.get("actor", [])[:MAX_STARRING] if p.get("name")],
-        "synopsis": data.get("description"),
-    }
+
+def get_film_details_by_tmdb_id(
+    tmdb_id: int,
+    *,
+    session=None,
+    impersonate: str = "chrome124",
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+    request_timeout_seconds: float = 15.0,
+) -> dict | None:
+    """Same rating/poster/director/starring/synopsis as get_film_details_by_slug,
+    plus the resolved slug — for films discovered via TMDB correlation that
+    aren't on the watchlist, where no Letterboxd slug is known yet.
+    Letterboxd redirects /tmdb/{id}/ straight to the matching /film/{slug}/,
+    so one request resolves both. Returns None if there's no Letterboxd
+    match (rare) or the fetch fails, so callers can just skip that candidate.
+    """
+    session = session or curl_requests.Session()
+    try:
+        response = _fetch_url(session, f"https://letterboxd.com/tmdb/{tmdb_id}/", max_retries=max_retries,
+                               backoff_base_seconds=backoff_base_seconds,
+                               request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
+    except LetterboxdFetchError:
+        return None
+
+    slug_match = re.search(r"/film/([^/]+)/", response.url)
+    if not slug_match:
+        return None
+
+    return {"slug": slug_match.group(1), **_film_details_from_json_ld(response.text)}
 
 
 def _parse_watchlist_page(html: str) -> tuple[list[WatchlistFilm], int | None]:

@@ -30,7 +30,7 @@ from .justwatch_client import resolve_and_fetch
 from .letterboxd import LetterboxdFetchError, fetch_recent_watches, fetch_watchlist, get_film_details_by_slug
 from .notify import send_if_configured
 from .report import render_report
-from .similar import find_similar, recommend_from_recent_watches, render_similar
+from .similar import discover_because_watched, discover_same_cast, discover_same_director, find_similar, render_similar
 from .state import StateDoc, get_cached_entry_id, load_state, save_state
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
@@ -59,6 +59,30 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
             "director": details["director"], "starring": details["starring"],
         })
 
+    # Correlated across all of TMDB, not just the watchlist, so these can
+    # surface films worth discovering rather than only re-surfacing what's
+    # already tracked. Done early (like the recent-watches fetch above),
+    # before the per-film loop's ~600+ requests pile up.
+    recommendation_sections: list[dict] = []
+    discovery_films: dict[str, dict] = {}
+    if recent_watches:
+        exclude_slugs = {w["slug"] for w in recent_watches}
+        for key, (header, slugs, films_map) in zip(
+            ("because_you_watched", "same_director", "same_cast"),
+            (
+                discover_because_watched(recent_watches, now_iso, config, global_subscriptions, revisitable,
+                                          exclude_slugs),
+                discover_same_director(recent_watches, now_iso, config, global_subscriptions, revisitable,
+                                       exclude_slugs),
+                discover_same_cast(recent_watches, now_iso, config, global_subscriptions, revisitable,
+                                    exclude_slugs),
+            ),
+        ):
+            if slugs:
+                recommendation_sections.append({"key": key, "header": header, "slugs": slugs})
+                discovery_films.update(films_map)
+                exclude_slugs.update(slugs)
+
     current_state = StateDoc(last_run_at=now_iso)
     for i, film in enumerate(films, start=1):
         if progress and i % 25 == 0:
@@ -85,9 +109,8 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         current_state.films[film.slug] = film_state
 
     current_state.recent_watches = recent_watches
-    current_state.recent_watch_recommendations = (
-        recommend_from_recent_watches(recent_watches, current_state, limit=4) if recent_watches else []
-    )
+    current_state.recommendation_sections = recommendation_sections
+    current_state.discovery_films = discovery_films
 
     # A single day's diff is usually too small to fill a "recently added"
     # section on its own, so newly-detected have/free offers accumulate into

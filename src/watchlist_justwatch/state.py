@@ -14,12 +14,19 @@ class StateDoc:
     schema_version: int = SCHEMA_VERSION
     last_run_at: str | None = None
     films: dict[str, FilmState] = field(default_factory=dict)
-    # Last few watched films (from the Letterboxd diary) plus their director/
-    # cast, used to correlate home-page recommendations — refreshed each run.
+    # Last few watched films (from the Letterboxd profile) plus their
+    # director/cast, used to correlate home-page recommendations — refreshed
+    # each run.
     recent_watches: list[dict] = field(default_factory=list)
-    # Watchlist slugs TMDB correlated to recent_watches — precomputed here
-    # since the dashboard itself must stay network-free to regenerate.
-    recent_watch_recommendations: list[str] = field(default_factory=list)
+    # because_you_watched/same_director/same_cast — [{"key","header","slugs"}].
+    # Correlated across all of TMDB (not just the watchlist) so discovery
+    # sections can surface films you haven't added yet, which needs network
+    # calls (TMDB/Letterboxd/JustWatch) precomputed here since the dashboard
+    # itself must stay network-free to regenerate.
+    recommendation_sections: list[dict] = field(default_factory=list)
+    # slug -> same shape as a films_by_slug entry, for films the sections
+    # above surfaced that aren't already on the watchlist.
+    discovery_films: dict[str, dict] = field(default_factory=dict)
     # Rolling log of newly-detected have/free offers, newest first, capped —
     # a single day's diff is often too small to fill a "recently added" list.
     recent_additions: list[dict] = field(default_factory=list)
@@ -91,7 +98,8 @@ def load_state(path: Path) -> StateDoc:
         last_run_at=data.get("last_run_at"),
         films=films,
         recent_watches=data.get("recent_watches", []),
-        recent_watch_recommendations=data.get("recent_watch_recommendations", []),
+        recommendation_sections=data.get("recommendation_sections", []),
+        discovery_films=data.get("discovery_films", {}),
         recent_additions=data.get("recent_additions", []),
     )
 
@@ -102,7 +110,8 @@ def save_state(path: Path, state: StateDoc) -> None:
         "last_run_at": state.last_run_at,
         "films": {slug: _film_to_dict(film) for slug, film in state.films.items()},
         "recent_watches": state.recent_watches,
-        "recent_watch_recommendations": state.recent_watch_recommendations,
+        "recommendation_sections": state.recommendation_sections,
+        "discovery_films": state.discovery_films,
         "recent_additions": state.recent_additions,
     }
 

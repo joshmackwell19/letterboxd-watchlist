@@ -50,6 +50,18 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
     films = fetch_watchlist(username)
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # Fetched early, before the ~600+ requests the main per-film loop below
+    # makes, so it isn't the one that happens to trip Letterboxd's rate
+    # limiting for this run.
+    diary_films = fetch_diary(username, limit=4)
+    recent_watches = []
+    for w in diary_films:
+        details = get_film_details_by_slug(w.slug)
+        recent_watches.append({
+            "slug": w.slug, "title": w.title, "year": w.year,
+            "director": details["director"], "starring": details["starring"],
+        })
+
     current_state = StateDoc(last_run_at=now_iso)
     for i, film in enumerate(films, start=1):
         if progress and i % 25 == 0:
@@ -75,16 +87,9 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
 
         current_state.films[film.slug] = film_state
 
-    diary_films = fetch_diary(username, limit=4)
-    for w in diary_films:
-        details = get_film_details_by_slug(w.slug)
-        current_state.recent_watches.append({
-            "slug": w.slug, "title": w.title, "year": w.year,
-            "director": details["director"], "starring": details["starring"],
-        })
+    current_state.recent_watches = recent_watches
     current_state.recent_watch_recommendations = (
-        recommend_from_recent_watches(current_state.recent_watches, current_state, limit=4)
-        if current_state.recent_watches else []
+        recommend_from_recent_watches(recent_watches, current_state, limit=4) if recent_watches else []
     )
 
     # A single day's diff is usually too small to fill a "recently added"

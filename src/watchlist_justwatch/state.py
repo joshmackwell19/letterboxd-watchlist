@@ -1,10 +1,7 @@
-import json
-import os
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .justwatch_client import CACHEABLE_CONFIDENCE
-from .models import FilmState, OfferRecord
+from .models import FilmState
 
 SCHEMA_VERSION = 1
 
@@ -35,96 +32,6 @@ class StateDoc:
     # per-entry watch dates (see fetch_watched_films), but enough to exclude
     # already-seen films from discovery and to power "worth a rewatch".
     diary: dict[str, dict] = field(default_factory=dict)
-
-
-def _offer_to_dict(offer: OfferRecord) -> dict:
-    return {
-        "country": offer.country,
-        "monetization_type": offer.monetization_type,
-        "package_technical_name": offer.package_technical_name,
-        "package_clear_name": offer.package_clear_name,
-        "package_id": offer.package_id,
-        "url": offer.url,
-    }
-
-
-def _offer_from_dict(data: dict) -> OfferRecord:
-    return OfferRecord(
-        country=data["country"],
-        monetization_type=data["monetization_type"],
-        package_technical_name=data["package_technical_name"],
-        package_clear_name=data["package_clear_name"],
-        package_id=data["package_id"],
-        url=data["url"],
-    )
-
-
-def _film_to_dict(film: FilmState) -> dict:
-    return {
-        "title": film.title,
-        "year": film.year,
-        "entry_id": film.entry_id,
-        "confidence": film.confidence,
-        "last_checked": film.last_checked,
-        "offers": [_offer_to_dict(o) for o in film.offers],
-        "rating": film.rating,
-        "poster_url": film.poster_url,
-        "director": film.director,
-        "starring": film.starring,
-        "synopsis": film.synopsis,
-    }
-
-
-def _film_from_dict(slug: str, data: dict) -> FilmState:
-    return FilmState(
-        slug=slug,
-        title=data["title"],
-        year=data["year"],
-        entry_id=data["entry_id"],
-        confidence=data["confidence"],
-        last_checked=data["last_checked"],
-        offers=[_offer_from_dict(o) for o in data.get("offers", [])],
-        rating=data.get("rating"),
-        poster_url=data.get("poster_url"),
-        director=data.get("director", []),
-        starring=data.get("starring", []),
-        synopsis=data.get("synopsis"),
-    )
-
-
-def load_state(path: Path) -> StateDoc:
-    if not path.exists():
-        return StateDoc()
-
-    data = json.loads(path.read_text())
-    films = {slug: _film_from_dict(slug, film_data) for slug, film_data in data.get("films", {}).items()}
-    return StateDoc(
-        schema_version=data.get("schema_version", SCHEMA_VERSION),
-        last_run_at=data.get("last_run_at"),
-        films=films,
-        recent_watches=data.get("recent_watches", []),
-        recommendation_sections=data.get("recommendation_sections", []),
-        discovery_films=data.get("discovery_films", {}),
-        recent_additions=data.get("recent_additions", []),
-        diary=data.get("diary", {}),
-    )
-
-
-def save_state(path: Path, state: StateDoc) -> None:
-    data = {
-        "schema_version": state.schema_version,
-        "last_run_at": state.last_run_at,
-        "films": {slug: _film_to_dict(film) for slug, film in state.films.items()},
-        "recent_watches": state.recent_watches,
-        "recommendation_sections": state.recommendation_sections,
-        "discovery_films": state.discovery_films,
-        "recent_additions": state.recent_additions,
-        "diary": state.diary,
-    }
-
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    os.replace(tmp_path, path)
 
 
 def get_cached_entry_id(state: StateDoc, slug: str) -> tuple[str | None, str | None]:

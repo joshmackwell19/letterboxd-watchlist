@@ -254,19 +254,25 @@ def _mini_card_from_lookup(entry: dict) -> dict:
     }
 
 
+def _section_from_cached(cached: dict, lookup: dict[str, dict], exclude: set[str],
+                          limit: int = RECOMMENDED_COUNT) -> dict:
+    chosen = [s for s in cached["slugs"] if s in lookup and s not in exclude][:limit]
+    return {"key": cached["key"], "header": cached["header"],
+            "films": [_mini_card_from_lookup(lookup[s]) for s in chosen]}
+
+
 def _cached_section(state: StateDoc, lookup: dict[str, dict], key: str, exclude: set[str],
                      limit: int = RECOMMENDED_COUNT) -> dict:
-    """because_you_watched/same_director/same_cast are correlated across all
-    of TMDB (not just the watchlist), which needs network calls — resolved
-    once during the real daily run and cached on state.recommendation_sections
-    (+ state.discovery_films for anything not already on the watchlist),
-    since this function itself must stay network-free to regenerate."""
+    """because_you_watched/by_genre/hidden_gems/popular_now/rewatch are
+    correlated across all of TMDB (not just the watchlist), which needs
+    network calls — resolved once during the real daily run and cached on
+    state.recommendation_sections (+ state.discovery_films for anything not
+    already on the watchlist), since this function itself must stay
+    network-free to regenerate."""
     cached = next((s for s in state.recommendation_sections if s["key"] == key), None)
     if cached is None:
         return {"key": key, "header": "", "films": []}
-
-    chosen = [s for s in cached["slugs"] if s in lookup and s not in exclude][:limit]
-    return {"key": key, "header": cached["header"], "films": [_mini_card_from_lookup(lookup[s]) for s in chosen]}
+    return _section_from_cached(cached, lookup, exclude, limit)
 
 
 def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12) -> dict:
@@ -290,22 +296,35 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
                           films_by_slug: dict[str, dict]) -> list[dict]:
     lookup = {**films_by_slug, **state.discovery_films}
     used: set[str] = set()
-    sections = []
-    for build in (
-        lambda ex: _top_rated_section(state, films_all_offers, ex),
-        lambda ex: _cached_section(state, lookup, "because_you_watched", ex),
-        lambda ex: _cached_section(state, lookup, "same_director", ex),
-        lambda ex: _cached_section(state, lookup, "same_cast", ex),
-        lambda ex: _cached_section(state, lookup, "by_genre", ex),
-        lambda ex: _cached_section(state, lookup, "hidden_gems", ex),
-        lambda ex: _cached_section(state, lookup, "popular_now", ex),
-        lambda ex: _cached_section(state, lookup, "rewatch", ex),
-        lambda ex: _recently_added_section(state, ex),
-    ):
-        section = build(used)
+    sections: list[dict] = []
+
+    def add(section: dict) -> None:
         if section["films"]:
             sections.append(section)
             used.update(f["slug"] for f in section["films"])
+
+    # Recent service additions first — the most immediately actionable
+    # ("this is now watchable") signal on the page.
+    add(_recently_added_section(state, used))
+
+    # One section per unique director/cast member from your last few
+    # watches — however many that turns out to be (see main.py) — right
+    # after recently-added, since these are the most personalized picks.
+    for prefix in ("director:", "cast:"):
+        for cached in state.recommendation_sections:
+            if cached["key"].startswith(prefix):
+                add(_section_from_cached(cached, lookup, used))
+
+    add(_cached_section(state, lookup, "popular_now", used))
+    add(_top_rated_section(state, films_all_offers, used))
+    add(_cached_section(state, lookup, "because_you_watched", used))
+    add(_cached_section(state, lookup, "rewatch", used))
+
+    # Longer-tail exploration at the bottom, on purpose — genre/hidden-gem
+    # picks are lower-confidence than the sections above.
+    add(_cached_section(state, lookup, "by_genre", used))
+    add(_cached_section(state, lookup, "hidden_gems", used))
+
     return sections
 
 

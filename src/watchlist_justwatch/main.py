@@ -69,33 +69,27 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
 
     recent_watch_films = fetch_recent_watches(username, limit=4)
     recent_watches = []
+    # The full watch-history backfill (see --backfill-diary) has to run
+    # locally — Letterboxd blocks anything under /username/films/ (diary
+    # included) from GitHub Actions' IP range. Once backfilled, this run
+    # just merges the last few watches in each day (already fetched above
+    # for recent_watches, so no extra requests), which keeps state.diary
+    # reasonably current between full backfills without ever touching the
+    # blocked endpoint from here.
+    current_state_diary = dict(previous_state.diary)
     for w in recent_watch_films:
         details = get_film_details_by_slug(w.slug)
         recent_watches.append({
             "slug": w.slug, "title": w.title, "year": w.year,
             "director": details["director"], "starring": details["starring"],
         })
-
-    # Full watched-film history — a one-time backfill the first time (no
-    # prior diary), then just the first few pages every day after, since
-    # newly logged films always sort to the front (see fetch_watched_films).
-    # Used to exclude already-seen films from discovery, and as the "worth a
-    # rewatch" candidate pool.
-    is_first_diary_run = not previous_state.diary
-    watched_films = fetch_watched_films(username, full=is_first_diary_run)
-    current_state_diary = dict(previous_state.diary)
-    new_watched_slugs = [f.slug for f in watched_films if f.slug not in current_state_diary]
-    for slug in new_watched_slugs:
-        film = next(f for f in watched_films if f.slug == slug)
-        details = get_film_details_by_slug(slug)
-        current_state_diary[slug] = {
-            "title": film.title, "year": film.year, "rating": details["rating"],
-            "poster_url": details["poster_url"],
-            "director": ", ".join(details["director"]) if details["director"] else None,
-            "starring": details["starring"], "synopsis": details["synopsis"],
-        }
-        if is_first_diary_run:
-            time.sleep(0.2)  # be polite across what can be 1000+ backfill requests in one go
+        if w.slug not in current_state_diary:
+            current_state_diary[w.slug] = {
+                "title": w.title, "year": w.year, "rating": details["rating"],
+                "poster_url": details["poster_url"],
+                "director": ", ".join(details["director"]) if details["director"] else None,
+                "starring": details["starring"], "synopsis": details["synopsis"],
+            }
 
     # Correlated across all of TMDB, not just the watchlist, so these can
     # surface films worth discovering rather than only re-surfacing what's
@@ -247,6 +241,11 @@ def main() -> None:
     parser.add_argument("--email-audit-by-country", action="store_true",
                          help="Same as --email-audit but organized into sections by VPN country, using "
                               "already-fetched state (no network calls), then exit")
+    parser.add_argument("--backfill-diary", action="store_true",
+                         help="One-time full watch-history backfill into state.diary — must be run "
+                              "locally, since Letterboxd blocks /username/films/ (diary included) from "
+                              "GitHub Actions' IP range. Commit the updated state file afterwards; the "
+                              "daily run keeps it current by merging in your last few watches each day.")
     args = parser.parse_args()
 
     if args.rank_services:
@@ -291,6 +290,31 @@ def main() -> None:
         sent = send_if_configured(f"Letterboxd Watchlist — {total_films} films not on a service you have, by country",
                                    text, html_body=html_body)
         print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
+        sys.exit(0)
+
+    if args.backfill_diary:
+        if not args.username:
+            parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
+        state = load_state(args.state)
+        watched_films = fetch_watched_films(args.username, full=True)
+        added = 0
+        for f in watched_films:
+            if f.slug in state.diary:
+                continue
+            details = get_film_details_by_slug(f.slug)
+            state.diary[f.slug] = {
+                "title": f.title, "year": f.year, "rating": details["rating"],
+                "poster_url": details["poster_url"],
+                "director": ", ".join(details["director"]) if details["director"] else None,
+                "starring": details["starring"], "synopsis": details["synopsis"],
+            }
+            added += 1
+            if added % 25 == 0:
+                print(f"...enriched {added} new watched films", file=sys.stderr)
+            time.sleep(0.2)
+        save_state(args.state, state)
+        print(f"Backfilled {added} new watched films (diary total: {len(state.diary)}).")
+        print(f"Commit and push {args.state} to finish — the daily run will keep it current from there.")
         sys.exit(0)
 
     if args.recommend_favorites:

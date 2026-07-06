@@ -303,6 +303,29 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     return sections
 
 
+def _settings_data(config: dict[str, CountryConfig], global_subscriptions: list[str]) -> dict:
+    """Read-only view of config/services.yaml for the settings page: the
+    global (VPN-portable) "have" list, plus each country's own subscriptions
+    and free-tier apps with the merged-in globals subtracted back out so
+    they don't show up duplicated under every country."""
+    countries = []
+    for code, country_config in config.items():
+        own_subscriptions = [s for s in country_config.subscriptions if s not in global_subscriptions]
+        if not own_subscriptions and not country_config.free_tier:
+            continue
+        countries.append({
+            "code": code, "name": country_name(code),
+            "subscriptions": own_subscriptions, "free_tier": country_config.free_tier,
+        })
+    countries.sort(key=lambda c: c["name"])
+
+    return {
+        "letterboxd_username": LETTERBOXD_USERNAME,
+        "global_subscriptions": global_subscriptions,
+        "countries": countries,
+    }
+
+
 def build_dashboard_data(
     state: StateDoc,
     favorites: set[tuple[str, str]],
@@ -332,6 +355,7 @@ def build_dashboard_data(
         "services": _service_rows(state, films_all_offers),
         "countries": _country_rows(state, films_all_offers),
         "films_by_slug": {**films_by_slug, **state.discovery_films},
+        "settings": _settings_data(config, global_subscriptions),
     }
 
 
@@ -380,6 +404,12 @@ _TEMPLATE = """<!DOCTYPE html>
     position: fixed; top: 0; left: 0; right: 0; height: env(safe-area-inset-top);
     background: var(--accent); z-index: 30;
   }
+  .ptr-indicator {
+    position: fixed; top: env(safe-area-inset-top); left: 50%; transform: translate(-50%, -60px);
+    background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--accent);
+    font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 999px;
+    box-shadow: var(--shadow); z-index: 40; pointer-events: none; white-space: nowrap;
+  }
   .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
   h1 { font-size: 20px; font-weight: 600; margin: 0 0 3px; letter-spacing: -0.01em; }
   .meta { color: var(--text-muted); font-size: 12.5px; }
@@ -388,6 +418,16 @@ _TEMPLATE = """<!DOCTYPE html>
     padding: 7px 14px; border: 1px solid var(--hairline-strong); border-radius: 999px; white-space: nowrap;
   }
   .watchlist-link:hover { background: var(--accent-soft); }
+  .header-actions { display: flex; align-items: center; gap: 8px; }
+  .icon-btn {
+    background: none; border: 1px solid var(--hairline-strong); color: var(--text-muted);
+    width: 34px; height: 34px; border-radius: 50%; cursor: pointer; font-size: 15px;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .icon-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  .settings-block { margin-bottom: 22px; }
+  .settings-service-group { margin-bottom: 14px; }
+  .settings-service-group h4 { font-size: 12.5px; font-weight: 600; margin: 0 0 6px; color: var(--text-muted); }
   .info-icon {
     position: relative; display: inline-flex; align-items: center; justify-content: center;
     color: var(--text-faint); cursor: pointer; font-size: 12.5px; margin-left: 4px;
@@ -562,7 +602,10 @@ _TEMPLATE = """<!DOCTYPE html>
     <h1>Watchlist streaming dashboard</h1>
     <div class="meta" id="meta"></div>
   </div>
-  <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
+  <div class="header-actions">
+    <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
+    <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
+  </div>
 </div>
 
 <div class="tabs">
@@ -618,6 +661,19 @@ _TEMPLATE = """<!DOCTYPE html>
   <button class="back-btn" id="backToServices">← Back to services</button>
   <h2 class="detail-title" id="serviceDetailTitle"></h2>
   <div id="serviceDetailCards"></div>
+</section>
+
+<section class="view" id="view-settings">
+  <button class="back-btn" id="backFromSettings">← Back</button>
+  <h2 class="detail-title">Settings</h2>
+  <div class="settings-block">
+    <h3 class="home-section-header">Letterboxd account</h3>
+    <p id="settingsAccount" class="detail-meta"></p>
+  </div>
+  <div class="settings-block">
+    <h3 class="home-section-header">Services marked "have"</h3>
+    <div id="settingsServices"></div>
+  </div>
 </section>
 
 <section class="view" id="view-films">
@@ -767,6 +823,34 @@ document.getElementById('nav-country').addEventListener('click', () => showView(
 document.getElementById('nav-services').addEventListener('click', () => showView('services'));
 document.getElementById('nav-films').addEventListener('click', () => showView('films'));
 document.getElementById('backToServices').addEventListener('click', () => showView('services'));
+document.getElementById('settingsBtn').addEventListener('click', () => { renderSettings(); showView('settings'); });
+document.getElementById('backFromSettings').addEventListener('click', () => showView('home'));
+
+function renderSettings() {
+  document.getElementById('settingsAccount').innerHTML =
+    '<a class="film-link" target="_blank" href="' + DATA.letterboxd_watchlist_url + '">' +
+    esc(DATA.settings.letterboxd_username) + '</a>';
+
+  const container = document.getElementById('settingsServices');
+  container.innerHTML = '';
+
+  const globalGroup = document.createElement('div');
+  globalGroup.className = 'settings-service-group';
+  globalGroup.innerHTML = '<h4>Global (any country via VPN)</h4>' +
+    (DATA.settings.global_subscriptions.length
+      ? DATA.settings.global_subscriptions.map(s => '<span class="badge badge-have">' + esc(s) + '</span>').join(' ')
+      : '<span class="muted">None configured</span>');
+  container.appendChild(globalGroup);
+
+  DATA.settings.countries.forEach(c => {
+    const group = document.createElement('div');
+    group.className = 'settings-service-group';
+    const subs = c.subscriptions.map(s => '<span class="badge badge-have">' + esc(s) + '</span>').join(' ');
+    const free = c.free_tier.map(s => '<span class="badge badge-free">' + esc(s) + '</span>').join(' ');
+    group.innerHTML = '<h4>' + esc(c.name) + '</h4>' + subs + (subs && free ? ' ' : '') + free;
+    container.appendChild(group);
+  });
+}
 
 function showView(name) {
   document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));
@@ -1473,6 +1557,53 @@ DATA.countries.forEach(c => { DATA.countryNames[c.code] = c.name; });
 
 renderHome();
 renderFilms();
+
+// ---------- Pull to refresh (mobile) ----------
+// Reload picks up whatever dashboard.html the last daily run deployed —
+// there's no live backend to re-fetch from, but this is still the fix for
+// "my phone has a stale cached copy from earlier today."
+(function initPullToRefresh() {
+  const THRESHOLD = 70;
+  let startY = null;
+  let currentDelta = 0;
+
+  const indicator = document.createElement('div');
+  indicator.className = 'ptr-indicator';
+  indicator.textContent = 'Pull to refresh ↓';
+  document.body.appendChild(indicator);
+
+  document.addEventListener('touchstart', event => {
+    startY = window.scrollY === 0 ? event.touches[0].clientY : null;
+    currentDelta = 0;
+    indicator.style.transition = 'none';
+  }, { passive: true });
+
+  document.addEventListener('touchmove', event => {
+    if (startY == null) return;
+    currentDelta = event.touches[0].clientY - startY;
+    if (currentDelta <= 0) {
+      indicator.style.transform = 'translate(-50%, -60px)';
+      return;
+    }
+    const clamped = Math.min(currentDelta, 120);
+    indicator.style.transform = 'translate(-50%, ' + clamped + 'px)';
+    indicator.textContent = clamped > THRESHOLD ? 'Release to refresh ↑' : 'Pull to refresh ↓';
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (startY == null) return;
+    indicator.style.transition = 'transform 0.2s';
+    if (currentDelta > THRESHOLD) {
+      indicator.textContent = 'Refreshing…';
+      indicator.style.transform = 'translate(-50%, 40px)';
+      window.location.reload();
+    } else {
+      indicator.style.transform = 'translate(-50%, -60px)';
+    }
+    startY = null;
+    currentDelta = 0;
+  });
+})();
 </script>
 </body>
 </html>

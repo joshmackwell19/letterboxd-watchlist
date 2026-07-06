@@ -9,6 +9,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "PyYAML>=6.0.3",
     "requests>=2.34.2",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.scripts]

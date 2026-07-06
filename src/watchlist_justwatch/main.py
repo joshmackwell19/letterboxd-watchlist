@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 import time
@@ -19,6 +20,7 @@ from .analysis import (
 )
 from .config import load_config, load_favorites, load_global_subscriptions, load_revisitable_services
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
+from .db import load_state, save_state
 from .diff import build_report
 from .html_email import (
     render_country_audit_html,
@@ -35,6 +37,7 @@ from .letterboxd import (
     fetch_watchlist,
     get_film_details_by_slug,
 )
+from .models import FilmState, OfferRecord
 from .notify import send_if_configured
 from .report import render_report
 from .similar import (
@@ -48,12 +51,11 @@ from .similar import (
     find_similar,
     render_similar,
 )
-from .state import StateDoc, get_cached_entry_id, load_state, save_state
+from .state import StateDoc, get_cached_entry_id
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
 DEFAULT_FAVORITES_PATH = Path("config/favorites.yaml")
 DEFAULT_REVISITABLE_PATH = Path("config/revisitable_services.yaml")
-DEFAULT_STATE_PATH = Path("data/state.json")
 DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
 # JustWatch offers are the slow, rate-limit-fragile part of each run (see
@@ -65,12 +67,12 @@ DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 STALE_BATCH_FRACTION = 0.20
 
 
-def run(username: str, config_path: Path, state_path: Path, *, progress: bool = True) -> int:
+def run(username: str, config_path: Path, database_url: str, *, progress: bool = True) -> int:
     config = load_config(config_path)
     global_subscriptions = load_global_subscriptions(config_path)
     favorites = load_favorites(DEFAULT_FAVORITES_PATH)
     revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
-    previous_state = load_state(state_path)
+    previous_state = load_state(database_url)
 
     films = fetch_watchlist(username)
     now_dt = datetime.now(timezone.utc)
@@ -269,7 +271,7 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
     else:
         print("No new availability changes.")
 
-    save_state(state_path, current_state)
+    save_state(database_url, current_state)
     dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable)
     DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
     return 0
@@ -282,7 +284,8 @@ def main() -> None:
     parser.add_argument("--username", default=os.getenv("LETTERBOXD_USERNAME"),
                          help="Letterboxd username (or set LETTERBOXD_USERNAME in .env)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH)
+    parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"),
+                         help="Postgres connection string (or set DATABASE_URL in .env)")
     parser.add_argument("--rank-services", action="store_true",
                          help="Print services you don't have ranked by watchlist coverage, using "
                               "already-fetched state (no network calls), then exit")
@@ -307,13 +310,45 @@ def main() -> None:
     parser.add_argument("--backfill-diary", action="store_true",
                          help="One-time full watch-history backfill into state.diary — must be run "
                               "locally, since Letterboxd blocks /username/films/ (diary included) from "
-                              "GitHub Actions' IP range. Commit the updated state file afterwards; the "
-                              "daily run keeps it current by merging in your last few watches each day.")
+                              "GitHub Actions' IP range. Written straight to the database; the daily run "
+                              "keeps it current by merging in your last few watches each day.")
+    parser.add_argument("--migrate-json-to-db", type=Path, metavar="STATE_JSON",
+                         help="One-time import of a legacy data/state.json file into the database "
+                              "at --database-url, then exit")
     args = parser.parse_args()
+
+    if not args.database_url:
+        parser.error("--database-url is required (or set DATABASE_URL in .env)")
+
+    if args.migrate_json_to_db:
+        raw = json.loads(args.migrate_json_to_db.read_text())
+        films = {}
+        for slug, f in raw.get("films", {}).items():
+            films[slug] = FilmState(
+                slug=slug, title=f["title"], year=f["year"], entry_id=f["entry_id"],
+                confidence=f["confidence"], last_checked=f["last_checked"],
+                offers=[OfferRecord(**o) for o in f.get("offers", [])],
+                rating=f.get("rating"), poster_url=f.get("poster_url"),
+                director=f.get("director", []), starring=f.get("starring", []),
+                synopsis=f.get("synopsis"),
+            )
+        state = StateDoc(
+            schema_version=raw.get("schema_version", 1),
+            last_run_at=raw.get("last_run_at"),
+            films=films,
+            recent_watches=raw.get("recent_watches", []),
+            recommendation_sections=raw.get("recommendation_sections", []),
+            discovery_films=raw.get("discovery_films", {}),
+            recent_additions=raw.get("recent_additions", []),
+            diary=raw.get("diary", {}),
+        )
+        save_state(args.database_url, state)
+        print(f"Migrated {len(films)} films and {len(state.diary)} diary entries into the database.")
+        sys.exit(0)
 
     if args.rank_services:
         config = load_config(args.config)
-        state = load_state(args.state)
+        state = load_state(args.database_url)
         print(render_ranking(rank_missing_services(state, config)))
         sys.exit(0)
 
@@ -322,7 +357,7 @@ def main() -> None:
         config = load_config(args.config)
         global_subscriptions = load_global_subscriptions(args.config)
         revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
-        state = load_state(args.state)
+        state = load_state(args.database_url)
         data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable)
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
@@ -332,7 +367,7 @@ def main() -> None:
         config = load_config(args.config)
         global_subscriptions = load_global_subscriptions(args.config)
         revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
-        state = load_state(args.state)
+        state = load_state(args.database_url)
         films = films_not_on_favorite(state, config, global_subscriptions)
         text = render_film_audit_text(films)
         html_body = render_film_audit_html(films, config, global_subscriptions, revisitable)
@@ -345,7 +380,7 @@ def main() -> None:
         config = load_config(args.config)
         global_subscriptions = load_global_subscriptions(args.config)
         revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
-        state = load_state(args.state)
+        state = load_state(args.database_url)
         countries = films_not_on_favorite_by_country(state, config, global_subscriptions, revisitable)
         text = render_country_audit_text(countries)
         html_body = render_country_audit_html(countries)
@@ -358,7 +393,7 @@ def main() -> None:
     if args.backfill_diary:
         if not args.username:
             parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
-        state = load_state(args.state)
+        state = load_state(args.database_url)
         watched_films = fetch_watched_films(args.username, full=True)
         added = 0
         for f in watched_films:
@@ -375,14 +410,13 @@ def main() -> None:
             if added % 25 == 0:
                 print(f"...enriched {added} new watched films", file=sys.stderr)
             time.sleep(0.2)
-        save_state(args.state, state)
-        print(f"Backfilled {added} new watched films (diary total: {len(state.diary)}).")
-        print(f"Commit and push {args.state} to finish — the daily run will keep it current from there.")
+        save_state(args.database_url, state)
+        print(f"Backfilled {added} new watched films (diary total: {len(state.diary)}), written to the database.")
         sys.exit(0)
 
     if args.recommend_favorites:
         favorites = load_favorites(args.favorites)
-        state = load_state(args.state)
+        state = load_state(args.database_url)
         print("New services worth adding as favourites (you don't have these anywhere yet):\n")
         print(render_favorite_recommendations(recommend_new_favorites(state, favorites)))
         print("\nServices you already favourite, but not in these countries (lower priority):\n")
@@ -391,7 +425,7 @@ def main() -> None:
 
     if args.similar_to:
         config = load_config(args.config)
-        state = load_state(args.state)
+        state = load_state(args.database_url)
         try:
             source, results = find_similar(args.similar_to, args.year, state=state, config=config, count=args.count)
         except ValueError as exc:
@@ -402,11 +436,11 @@ def main() -> None:
 
     if not args.username:
         parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
-
-    args.state.parent.mkdir(parents=True, exist_ok=True)
+    if not args.database_url:
+        parser.error("--database-url is required (or set DATABASE_URL in .env)")
 
     try:
-        exit_code = run(args.username, args.config, args.state)
+        exit_code = run(args.username, args.config, args.database_url)
     except LetterboxdFetchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         exit_code = 1

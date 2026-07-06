@@ -113,7 +113,7 @@ def _enrich_candidates(
     seen_slugs: set[str] = set()
 
     for movie in candidates:
-        if len(resolved) >= limit * 2:  # enough headroom for the availability check below to still hit `limit`
+        if len(resolved) >= limit + 5:  # enough headroom for the availability check below to still hit `limit`
             break
         if not _passes_quality_filter(movie):
             continue
@@ -237,7 +237,7 @@ def discover_rewatch(
         and info.get("rating") is not None and info["rating"] >= 3.5
     ]
     candidates.sort(key=lambda c: -c["rating"])
-    slugs, films = _enrich_resolved_candidates(candidates[:limit * 2], now_iso, config, global_subscriptions,
+    slugs, films = _enrich_resolved_candidates(candidates[:limit + 5], now_iso, config, global_subscriptions,
                                                 revisitable, exclude_slugs=exclude_slugs, limit=limit)
     return "Worth a rewatch", slugs, films
 

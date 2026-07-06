@@ -447,7 +447,11 @@ _TEMPLATE = """<!DOCTYPE html>
     white-space: nowrap; box-shadow: var(--shadow); border: 1px solid var(--hairline-strong); z-index: 10;
   }
   .info-icon:hover .info-tooltip, .info-icon.open .info-tooltip { display: block; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+  .tabs {
+    display: flex; gap: 6px; margin-bottom: 16px;
+    position: sticky; top: 0; z-index: 15; background: var(--bg);
+    padding: 10px 0; border-bottom: 1px solid var(--hairline);
+  }
   .tab-btn {
     padding: 7px 15px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
     cursor: pointer; font-size: 12.5px; font-weight: 500; transition: background 0.15s, color 0.15s;
@@ -1652,13 +1656,28 @@ renderFilms();
 // "my phone has a stale cached copy from earlier today."
 (function initPullToRefresh() {
   const THRESHOLD = 70;
+  const HIDDEN_TRANSFORM = 'translate(-50%, -60px)';
   let startY = null;
   let currentDelta = 0;
 
   const indicator = document.createElement('div');
   indicator.className = 'ptr-indicator';
-  indicator.textContent = 'Pull to refresh ↓';
   document.body.appendChild(indicator);
+
+  function reset() {
+    startY = null;
+    currentDelta = 0;
+    indicator.style.transition = 'none';
+    indicator.style.transform = HIDDEN_TRANSFORM;
+    indicator.textContent = 'Pull to refresh ↓';
+  }
+  reset();
+
+  // A reload can be served from the back/forward cache (bfcache) instead of
+  // re-running this script from scratch, which would otherwise leave the
+  // indicator stuck wherever the pull gesture left it — pageshow fires for
+  // both a fresh load and a bfcache restore, unlike DOMContentLoaded.
+  window.addEventListener('pageshow', reset);
 
   document.addEventListener('touchstart', event => {
     startY = window.scrollY === 0 ? event.touches[0].clientY : null;
@@ -1670,13 +1689,18 @@ renderFilms();
     if (startY == null) return;
     currentDelta = event.touches[0].clientY - startY;
     if (currentDelta <= 0) {
-      indicator.style.transform = 'translate(-50%, -60px)';
+      indicator.style.transform = HIDDEN_TRANSFORM;
       return;
     }
+    // Only take over the gesture once it's clearly a downward pull, so a
+    // normal upward scroll right at the top of the page isn't hijacked —
+    // and only then block the browser's own native pull-to-refresh, which
+    // would otherwise show its own spinner alongside this one.
+    if (event.cancelable) event.preventDefault();
     const clamped = Math.min(currentDelta, 120);
     indicator.style.transform = 'translate(-50%, ' + clamped + 'px)';
     indicator.textContent = clamped > THRESHOLD ? 'Release to refresh ↑' : 'Pull to refresh ↓';
-  }, { passive: true });
+  }, { passive: false });
 
   document.addEventListener('touchend', () => {
     if (startY == null) return;
@@ -1684,12 +1708,11 @@ renderFilms();
     if (currentDelta > THRESHOLD) {
       indicator.textContent = 'Refreshing…';
       indicator.style.transform = 'translate(-50%, 40px)';
+      startY = null;
       window.location.reload();
     } else {
-      indicator.style.transform = 'translate(-50%, -60px)';
+      reset();
     }
-    startY = null;
-    currentDelta = 0;
   });
 })();
 </script>

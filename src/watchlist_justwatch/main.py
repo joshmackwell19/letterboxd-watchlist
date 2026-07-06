@@ -95,29 +95,61 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
     # surface films worth discovering rather than only re-surfacing what's
     # already tracked. Done early (like the recent-watches fetch above),
     # before the per-film loop's ~600+ requests pile up.
+    #
+    # because_you_watched/same_director/same_cast/by_genre/rewatch are all
+    # seeded from recent_watches (+ the diary, which itself only grows when
+    # recent_watches does) — if neither changed since yesterday, recomputing
+    # them would just spend several minutes of TMDB/Letterboxd/JustWatch
+    # calls to land on the same films, so they're carried forward instead.
+    # hidden_gems/popular_now aren't seeded from recent_watches at all
+    # (trending/highly-rated-overall) and are genuinely time-varying, so
+    # those still run every time.
+    RECENT_WATCH_SEEDED_KEYS = {"because_you_watched", "same_director", "same_cast", "by_genre", "rewatch"}
+    recent_watches_unchanged = (
+        bool(recent_watches)
+        and [w["slug"] for w in recent_watches] == [w["slug"] for w in previous_state.recent_watches]
+    )
+
     recommendation_sections: list[dict] = []
     discovery_films: dict[str, dict] = {}
-    if recent_watches:
+    if not recent_watches:
+        # Fetch failed entirely — carry forward everything rather than lose
+        # the whole home page's discovery content for the day.
+        recommendation_sections = list(previous_state.recommendation_sections)
+        discovery_films = dict(previous_state.discovery_films)
+    else:
+        if recent_watches_unchanged:
+            for section in previous_state.recommendation_sections:
+                if section["key"] in RECENT_WATCH_SEEDED_KEYS:
+                    recommendation_sections.append(section)
+                    for slug in section["slugs"]:
+                        if slug in previous_state.discovery_films:
+                            discovery_films[slug] = previous_state.discovery_films[slug]
+
         already_seen = set(current_state_diary.keys())
-        exclude_slugs = {w["slug"] for w in recent_watches} | already_seen
+        exclude_slugs = {w["slug"] for w in recent_watches} | already_seen | set(discovery_films.keys())
 
         # Discoverers are called one at a time (not pre-built into a tuple)
         # so exclude_slugs.update() below actually takes effect between
         # them — otherwise every section would be computed against the same
         # starting exclusion set and could independently pick the same film.
-        discoverers = [
-            ("because_you_watched", lambda ex: discover_because_watched(
-                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
-            ("same_director", lambda ex: discover_same_director(
-                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
-            ("same_cast", lambda ex: discover_same_cast(
-                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+        discoverers = []
+        if not recent_watches_unchanged:
+            discoverers += [
+                ("because_you_watched", lambda ex: discover_because_watched(
+                    recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+                ("same_director", lambda ex: discover_same_director(
+                    recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+                ("same_cast", lambda ex: discover_same_cast(
+                    recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+                ("by_genre", lambda ex: discover_by_genre(
+                    recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+            ]
+        discoverers += [
             ("hidden_gems", lambda ex: discover_hidden_gems(
                 now_iso, config, global_subscriptions, revisitable, ex)),
             ("popular_now", lambda ex: discover_popular_now(
                 now_iso, config, global_subscriptions, revisitable, ex)),
-            ("by_genre", lambda ex: discover_by_genre(
-                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
         ]
         for key, discoverer in discoverers:
             # Each section is a nice-to-have on top of the core watchlist
@@ -134,20 +166,21 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
                 discovery_films.update(films_map)
                 exclude_slugs.update(slugs)
 
-        # Rewatch pulls FROM the diary on purpose, so it can't receive the
-        # full diary as an exclusion set like the sections above — only
-        # whatever they already claimed, so nothing shows twice on the page.
-        rewatch_exclude = exclude_slugs - already_seen
-        try:
-            header, slugs, films_map = discover_rewatch(
-                current_state_diary, recent_watches, now_iso, config, global_subscriptions, revisitable,
-                rewatch_exclude)
-        except Exception as exc:
-            print(f"warning: discovery section 'rewatch' failed, skipping it ({exc})", file=sys.stderr)
-            slugs = []
-        if slugs:
-            recommendation_sections.append({"key": "rewatch", "header": header, "slugs": slugs})
-            discovery_films.update(films_map)
+        if not recent_watches_unchanged:
+            # Rewatch pulls FROM the diary on purpose, so it can't receive
+            # the full diary as an exclusion set like the sections above —
+            # only whatever they already claimed, so nothing shows twice.
+            rewatch_exclude = exclude_slugs - already_seen
+            try:
+                header, slugs, films_map = discover_rewatch(
+                    current_state_diary, recent_watches, now_iso, config, global_subscriptions, revisitable,
+                    rewatch_exclude)
+            except Exception as exc:
+                print(f"warning: discovery section 'rewatch' failed, skipping it ({exc})", file=sys.stderr)
+                slugs = []
+            if slugs:
+                recommendation_sections.append({"key": "rewatch", "header": header, "slugs": slugs})
+                discovery_films.update(films_map)
 
     current_state = StateDoc(last_run_at=now_iso)
     for i, film in enumerate(films, start=1):

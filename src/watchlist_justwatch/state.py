@@ -30,6 +30,11 @@ class StateDoc:
     # Rolling log of newly-detected have/free offers, newest first, capped —
     # a single day's diff is often too small to fill a "recently added" list.
     recent_additions: list[dict] = field(default_factory=list)
+    # Every film ever logged as watched (slug -> title/year/rating/poster/
+    # director/starring/synopsis, enriched once and cached forever) — no
+    # per-entry watch dates (see fetch_watched_films), but enough to exclude
+    # already-seen films from discovery and to power "worth a rewatch".
+    diary: dict[str, dict] = field(default_factory=dict)
 
 
 def _offer_to_dict(offer: OfferRecord) -> dict:
@@ -101,6 +106,7 @@ def load_state(path: Path) -> StateDoc:
         recommendation_sections=data.get("recommendation_sections", []),
         discovery_films=data.get("discovery_films", {}),
         recent_additions=data.get("recent_additions", []),
+        diary=data.get("diary", {}),
     )
 
 
@@ -113,6 +119,7 @@ def save_state(path: Path, state: StateDoc) -> None:
         "recommendation_sections": state.recommendation_sections,
         "discovery_films": state.discovery_films,
         "recent_additions": state.recent_additions,
+        "diary": state.diary,
     }
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")

@@ -10,7 +10,7 @@ from .state import StateDoc
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
 FREE_TIER_COUNTRIES = {"AU", "GB", "US"}
 ALWAYS_MAIN_BRANDS = {"Netflix", "HBO Max"}
-RECOMMENDED_COUNT = 4
+RECOMMENDED_COUNT = 10
 LETTERBOXD_USERNAME = "Jmackwell"
 GITHUB_REPO = "joshmackwell19/letterboxd-watchlist"
 GITHUB_WORKFLOW_FILE = "daily.yml"
@@ -296,6 +296,10 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
         lambda ex: _cached_section(state, lookup, "because_you_watched", ex),
         lambda ex: _cached_section(state, lookup, "same_director", ex),
         lambda ex: _cached_section(state, lookup, "same_cast", ex),
+        lambda ex: _cached_section(state, lookup, "by_genre", ex),
+        lambda ex: _cached_section(state, lookup, "hidden_gems", ex),
+        lambda ex: _cached_section(state, lookup, "popular_now", ex),
+        lambda ex: _cached_section(state, lookup, "rewatch", ex),
         lambda ex: _recently_added_section(state, ex),
     ):
         section = build(used)

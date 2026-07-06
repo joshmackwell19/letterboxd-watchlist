@@ -261,3 +261,51 @@ def fetch_recent_watches(
         if len(result) >= limit:
             break
     return result
+
+
+def fetch_watched_films(
+    username: str,
+    *,
+    full: bool,
+    max_pages: int = 3,
+    max_full_pages: int = 60,
+    impersonate: str = "chrome124",
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+    request_timeout_seconds: float = 15.0,
+    page_delay_seconds: float = 0.3,
+) -> list[WatchlistFilm]:
+    """Every film logged as watched (letterboxd.com/{username}/films/) — used
+    to exclude already-seen films from discovery recommendations. This grid
+    doesn't carry per-entry watch dates (only the dated /films/diary/ page
+    does, and that one 403s from GitHub Actions' IP range specifically), so
+    the result is a "have you seen this at all" set, not a timeline.
+
+    Newly logged films always sort to the front of this grid, so a full
+    backfill (previous state has no watched films yet) pages through the
+    entire history once; every day after, only the first `max_pages` pages
+    are re-checked, keeping this fast regardless of how large the history
+    gets. Best-effort: any fetch failure just stops paging rather than
+    breaking the whole daily run.
+    """
+    session = curl_requests.Session()
+    all_films: dict[str, WatchlistFilm] = {}
+    limit = max_full_pages if full else max_pages
+
+    for page_num in range(1, limit + 1):
+        try:
+            response = _fetch_url(session, f"https://letterboxd.com/{username}/films/page/{page_num}/",
+                                   max_retries=max_retries, backoff_base_seconds=backoff_base_seconds,
+                                   request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
+        except LetterboxdFetchError as exc:
+            print(f"warning: watched-films fetch failed on page {page_num} ({exc})", file=sys.stderr)
+            break
+
+        films, _ = _parse_watchlist_page(response.text)
+        if not films:
+            break
+        for f in films:
+            all_films[f.slug] = f
+        time.sleep(page_delay_seconds)
+
+    return list(all_films.values())

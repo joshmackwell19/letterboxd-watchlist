@@ -155,7 +155,13 @@ def _enrich_resolved_candidates(
             continue
 
         temp_film = WatchlistFilm(slug=slug, title=candidate["title"], year=candidate.get("year"))
-        film_state = resolve_and_fetch(temp_film, None, None, now_iso=now_iso)
+        try:
+            film_state = resolve_and_fetch(temp_film, None, None, now_iso=now_iso)
+        except Exception:
+            # A JustWatch hiccup (rate limit, timeout) on one discovery
+            # candidate shouldn't be able to take down the whole daily run —
+            # skip it and keep going, same as an unmatched Letterboxd film.
+            continue
         if not film_state.offers:
             continue
         all_offers = _all_offers_for_film(film_state, config, global_subscriptions, revisitable)

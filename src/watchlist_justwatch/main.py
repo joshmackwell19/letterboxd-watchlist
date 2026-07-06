@@ -56,6 +56,14 @@ DEFAULT_REVISITABLE_PATH = Path("config/revisitable_services.yaml")
 DEFAULT_STATE_PATH = Path("data/state.json")
 DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
+# JustWatch offers are the slow, rate-limit-fragile part of each run (see
+# justwatch_client.resolve_and_fetch's mandatory pacing sleep) and rarely
+# change day to day, so most of the watchlist is checked on a rotation
+# instead of every film every day. 0.20 means a ~5-day full cycle, within
+# the 10-25%/day (4-10 day cycle) range that felt safe for how often a
+# watchlist film's availability actually shifts.
+STALE_BATCH_FRACTION = 0.20
+
 
 def run(username: str, config_path: Path, state_path: Path, *, progress: bool = True) -> int:
     config = load_config(config_path)
@@ -65,7 +73,8 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
     previous_state = load_state(state_path)
 
     films = fetch_watchlist(username)
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
 
     recent_watch_films = fetch_recent_watches(username, limit=4)
     recent_watches = []
@@ -182,15 +191,36 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
                 recommendation_sections.append({"key": "rewatch", "header": header, "slugs": slugs})
                 discovery_films.update(films_map)
 
+    # New watchlist additions have no cached offers yet, so they're always
+    # checked live; films dropped from the watchlist just aren't in `films`
+    # any more and fall out of current_state.films naturally. Everything
+    # else is checked on a stale-first rotation (see STALE_BATCH_FRACTION),
+    # except on the 1st of the month, when service libraries most often
+    # change, so the whole watchlist gets a live check regardless of how
+    # recently each film was last checked.
+    new_slugs = {film.slug for film in films if film.slug not in previous_state.films}
+    is_full_refresh_day = now_dt.day == 1
+    if is_full_refresh_day:
+        checked_today = {film.slug for film in films}
+    else:
+        existing = [film for film in films if film.slug not in new_slugs]
+        existing.sort(key=lambda film: previous_state.films[film.slug].last_checked)
+        batch_size = max(0, round(len(films) * STALE_BATCH_FRACTION) - len(new_slugs))
+        checked_today = new_slugs | {film.slug for film in existing[:batch_size]}
+
     current_state = StateDoc(last_run_at=now_iso)
     for i, film in enumerate(films, start=1):
         if progress and i % 25 == 0:
             print(f"...processed {i}/{len(films)} films", file=sys.stderr)
 
+        previous_film = previous_state.films.get(film.slug)
+        if film.slug not in checked_today and previous_film is not None:
+            current_state.films[film.slug] = previous_film
+            continue
+
         cached_entry_id, cached_confidence = get_cached_entry_id(previous_state, film.slug)
         film_state = resolve_and_fetch(film, cached_entry_id, cached_confidence, now_iso=now_iso)
 
-        previous_film = previous_state.films.get(film.slug)
         if previous_film is not None and previous_film.poster_url is not None:
             film_state.rating = previous_film.rating
             film_state.poster_url = previous_film.poster_url

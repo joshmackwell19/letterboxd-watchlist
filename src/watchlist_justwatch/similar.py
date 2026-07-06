@@ -42,6 +42,13 @@ _EXCLUDED_GENRE_IDS = {99, 10770}
 _MIN_VOTE_AVERAGE = 6.0
 _MIN_VOTE_COUNT = 150
 
+# Letterboxd members who've rated a film — a floor for discover_hidden_gems/
+# discover_by_genre, where TMDB's own vote-count filter alone still let some
+# fairly obscure titles through. Calibrated against real film pages: niche
+# but genuinely-known arthouse titles (Aniara, Shoplifters) sit at ~30-300k;
+# below that starts running into films barely anyone on Letterboxd has seen.
+_MIN_LETTERBOXD_RATING_COUNT = 20_000
+
 
 def _passes_quality_filter(movie: dict) -> bool:
     if any(g in _EXCLUDED_GENRE_IDS for g in movie.get("genre_ids", [])):
@@ -100,6 +107,7 @@ def _candidates_by_person(names: list[str], role: str, *, candidate_pool: int) -
 def _enrich_candidates(
     candidates: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
     revisitable: set[str], *, exclude_slugs: set[str], limit: int,
+    min_letterboxd_rating_count: int | None = None,
 ) -> tuple[list[str], dict[str, dict]]:
     """Resolves TMDB candidates to real Letterboxd + JustWatch data, stopping
     once `limit` films have real tracked availability. Over-fetches on
@@ -108,7 +116,12 @@ def _enrich_candidates(
     Letterboxd rating at all, and some won't currently have any tracked
     offer anywhere — silently skipping those is what lets a section reach
     `limit` films without ever padding with a "making of" featurette or an
-    unrated obscurity just to hit a number."""
+    unrated obscurity just to hit a number.
+
+    min_letterboxd_rating_count, when given (see discover_hidden_gems/
+    discover_by_genre), additionally requires at least that many Letterboxd
+    members to have rated the film — TMDB's vote-count filter alone still
+    let some fairly obscure titles through."""
     resolved: list[dict] = []
     seen_slugs: set[str] = set()
 
@@ -120,6 +133,8 @@ def _enrich_candidates(
 
         details = get_film_details_by_tmdb_id(movie["id"])
         if details is None or details["rating"] is None:
+            continue
+        if min_letterboxd_rating_count is not None and (details.get("rating_count") or 0) < min_letterboxd_rating_count:
             continue
         if details["slug"] in exclude_slugs or details["slug"] in seen_slugs:
             continue
@@ -184,43 +199,53 @@ def discover_because_watched(
     return "Recommended from your recent watches", slugs, films
 
 
-def discover_same_director(
+def discover_by_directors(
     recent_watches: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
     revisitable: set[str], exclude_slugs: set[str], *, limit: int = 10,
-) -> tuple[str, list[str], dict[str, dict]]:
+) -> list[tuple[str, str, list[str], dict[str, dict]]]:
+    """One section per unique director across your last few watches, rather
+    than one section combining all of them — a combined header couldn't say
+    which recommended film actually came from which director."""
     directors: list[str] = []
     for watched in recent_watches:
         for d in watched.get("director") or []:
             if d not in directors:
                 directors.append(d)
-    if not directors:
-        return "", [], {}
 
-    candidates = _candidates_by_person(directors, "director", candidate_pool=40)
-    slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
-                                       exclude_slugs=exclude_slugs, limit=limit)
-    return "More from " + " & ".join(directors[:2]), slugs, films
+    sections: list[tuple[str, str, list[str], dict[str, dict]]] = []
+    exclude = set(exclude_slugs)
+    for director in directors:
+        candidates = _candidates_by_person([director], "director", candidate_pool=40)
+        slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
+                                           exclude_slugs=exclude, limit=limit)
+        if slugs:
+            sections.append((f"director:{director}", f"More from {director}", slugs, films))
+            exclude |= set(slugs)
+    return sections
 
 
-def discover_same_cast(
+def discover_by_cast_members(
     recent_watches: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
-    revisitable: set[str], exclude_slugs: set[str], *, limit: int = 10,
-) -> tuple[str, list[str], dict[str, dict]]:
-    counts: Counter = Counter()
-    order: list[str] = []
+    revisitable: set[str], exclude_slugs: set[str], *, limit: int = 10, top_n_cast: int = 3,
+) -> list[tuple[str, str, list[str], dict[str, dict]]]:
+    """One section per unique top-billed cast member across your last few
+    watches (top `top_n_cast` per film) — same rationale as directors above."""
+    actors: list[str] = []
     for watched in recent_watches:
-        for actor in watched.get("starring") or []:
-            counts[actor] += 1
-            if actor not in order:
-                order.append(actor)
-    top_actors = sorted(order, key=lambda a: (-counts[a], order.index(a)))[:3]
-    if not top_actors:
-        return "", [], {}
+        for actor in (watched.get("starring") or [])[:top_n_cast]:
+            if actor not in actors:
+                actors.append(actor)
 
-    candidates = _candidates_by_person(top_actors, "cast", candidate_pool=40)
-    slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
-                                       exclude_slugs=exclude_slugs, limit=limit)
-    return "More starring " + ", ".join(top_actors), slugs, films
+    sections: list[tuple[str, str, list[str], dict[str, dict]]] = []
+    exclude = set(exclude_slugs)
+    for actor in actors:
+        candidates = _candidates_by_person([actor], "cast", candidate_pool=40)
+        slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
+                                           exclude_slugs=exclude, limit=limit)
+        if slugs:
+            sections.append((f"cast:{actor}", f"More starring {actor}", slugs, films))
+            exclude |= set(slugs)
+    return sections
 
 
 def discover_rewatch(
@@ -247,12 +272,17 @@ def discover_hidden_gems(
     exclude_slugs: set[str], *, limit: int = 10,
 ) -> tuple[str, list[str], dict[str, dict]]:
     """Well-rated but not blockbuster-popular — a narrower vote-count band
-    than the other sections, biased toward less mainstream picks."""
+    than the other sections, biased toward less mainstream picks. Still
+    required to clear _MIN_LETTERBOXD_RATING_COUNT (see _enrich_candidates)
+    so "less mainstream" doesn't drift into "nobody's heard of this" — pages
+    is higher than the other sections since that filter rejects a good
+    chunk of what TMDB's vote-count filter alone would have allowed through."""
     candidates = tmdb_client.discover_movies(
-        sort_by="vote_average.desc", vote_count_gte=300, vote_count_lte=3000, vote_average_gte=7.2, pages=3,
+        sort_by="vote_average.desc", vote_count_gte=300, vote_count_lte=3000, vote_average_gte=7.2, pages=5,
     )
     slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
-                                       exclude_slugs=exclude_slugs, limit=limit)
+                                       exclude_slugs=exclude_slugs, limit=limit,
+                                       min_letterboxd_rating_count=_MIN_LETTERBOXD_RATING_COUNT)
     return "Hidden gems on your services", slugs, films
 
 
@@ -272,7 +302,10 @@ def discover_by_genre(
 ) -> tuple[str, list[str], dict[str, dict]]:
     """Most-common genre across recent watches, then TMDB's best-rated in
     that genre — a different axis from the director/cast/similar sections
-    above (mood/theme rather than a specific person or "similar to X")."""
+    above (mood/theme rather than a specific person or "similar to X").
+    Also required to clear _MIN_LETTERBOXD_RATING_COUNT (see
+    _enrich_candidates) — TMDB's vote-count filter alone let some fairly
+    obscure titles through."""
     genre_counts: Counter = Counter()
     for watched in recent_watches:
         try:
@@ -289,10 +322,11 @@ def discover_by_genre(
     top_genre_id = genre_counts.most_common(1)[0][0]
     candidates = tmdb_client.discover_movies(
         sort_by="vote_average.desc", vote_count_gte=200, vote_average_gte=6.5,
-        with_genres=str(top_genre_id), pages=3,
+        with_genres=str(top_genre_id), pages=5,
     )
     slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
-                                       exclude_slugs=exclude_slugs, limit=limit)
+                                       exclude_slugs=exclude_slugs, limit=limit,
+                                       min_letterboxd_rating_count=_MIN_LETTERBOXD_RATING_COUNT)
     genre_name = tmdb_client.GENRE_NAMES.get(top_genre_id, "this genre")
     return "More " + genre_name, slugs, films
 

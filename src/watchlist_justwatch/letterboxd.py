@@ -90,7 +90,9 @@ def _parse_film_json_ld(html: str) -> dict | None:
         return None
 
 
-_EMPTY_FILM_DETAILS = {"rating": None, "poster_url": None, "director": [], "starring": [], "synopsis": None}
+_EMPTY_FILM_DETAILS = {
+    "rating": None, "rating_count": None, "poster_url": None, "director": [], "starring": [], "synopsis": None,
+}
 
 
 def _film_details_from_json_ld(html: str) -> dict:
@@ -98,9 +100,15 @@ def _film_details_from_json_ld(html: str) -> dict:
     if data is None:
         return dict(_EMPTY_FILM_DETAILS)
 
-    rating = data.get("aggregateRating", {}).get("ratingValue")
+    aggregate_rating = data.get("aggregateRating", {})
+    rating = aggregate_rating.get("ratingValue")
+    rating_count = aggregate_rating.get("ratingCount")
     return {
         "rating": float(rating) if rating is not None else None,
+        # Members who've rated the film on Letterboxd — a direct Letterboxd
+        # popularity/recognition signal (see discover_hidden_gems/
+        # discover_by_genre), not just a proxy via TMDB's own vote count.
+        "rating_count": int(rating_count) if rating_count is not None else None,
         "poster_url": data.get("image"),
         "director": [p["name"] for p in data.get("director", []) if p.get("name")],
         "starring": [p["name"] for p in data.get("actor", [])[:MAX_STARRING] if p.get("name")],

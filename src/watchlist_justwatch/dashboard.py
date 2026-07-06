@@ -12,6 +12,8 @@ FREE_TIER_COUNTRIES = {"AU", "GB", "US"}
 ALWAYS_MAIN_BRANDS = {"Netflix", "HBO Max"}
 RECOMMENDED_COUNT = 4
 LETTERBOXD_USERNAME = "Jmackwell"
+GITHUB_REPO = "joshmackwell19/letterboxd-watchlist"
+GITHUB_WORKFLOW_FILE = "daily.yml"
 
 
 def _classify(brand: str, country: str, monetization_types: set[str], config: dict[str, CountryConfig],
@@ -323,6 +325,8 @@ def _settings_data(config: dict[str, CountryConfig], global_subscriptions: list[
         "letterboxd_username": LETTERBOXD_USERNAME,
         "global_subscriptions": global_subscriptions,
         "countries": countries,
+        "github_repo": GITHUB_REPO,
+        "github_workflow_file": GITHUB_WORKFLOW_FILE,
     }
 
 
@@ -674,6 +678,29 @@ _TEMPLATE = """<!DOCTYPE html>
     <h3 class="home-section-header">Services marked "have"</h3>
     <div id="settingsServices"></div>
   </div>
+  <div class="settings-block">
+    <h3 class="home-section-header">Refresh dashboard data</h3>
+    <p class="muted">
+      Re-runs the daily check (watchlist, streaming availability, recommendations) and redeploys —
+      useful right after watching something or adding films to your watchlist. Takes about 5 minutes;
+      pull to refresh this page once it's done.
+    </p>
+    <p class="muted">
+      Needs a GitHub token scoped to only "Actions: Read and write" on this repo, stored just in this
+      browser. Create one at
+      <a class="film-link" href="https://github.com/settings/personal-access-tokens/new" target="_blank">github.com/settings/personal-access-tokens/new</a>
+      (repository access: only <strong id="settingsRepoName"></strong>).
+    </p>
+    <div class="search-wrap" style="margin-bottom: 10px;">
+      <input type="password" id="refreshTokenInput" placeholder="Paste GitHub token...">
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom: 10px;">
+      <button class="back-btn" id="saveRefreshToken" style="margin-bottom:0;">Save token</button>
+      <button class="back-btn" id="clearRefreshToken" style="margin-bottom:0;">Clear saved token</button>
+      <button class="back-btn" id="triggerRefresh" style="margin-bottom:0; color: var(--accent); border-color: var(--accent);">Refresh now</button>
+    </div>
+    <p class="muted" id="refreshStatus"></p>
+  </div>
 </section>
 
 <section class="view" id="view-films">
@@ -850,7 +877,64 @@ function renderSettings() {
     group.innerHTML = '<h4>' + esc(c.name) + '</h4>' + subs + (subs && free ? ' ' : '') + free;
     container.appendChild(group);
   });
+
+  document.getElementById('settingsRepoName').textContent = DATA.settings.github_repo;
+  const tokenInput = document.getElementById('refreshTokenInput');
+  const savedToken = localStorage.getItem('ghWorkflowToken');
+  tokenInput.value = savedToken || '';
+  document.getElementById('refreshStatus').textContent = savedToken ? 'Token saved in this browser.' : '';
 }
+
+const REFRESH_TOKEN_KEY = 'ghWorkflowToken';
+
+document.getElementById('saveRefreshToken').addEventListener('click', () => {
+  const value = document.getElementById('refreshTokenInput').value.trim();
+  const status = document.getElementById('refreshStatus');
+  if (!value) { status.textContent = 'Enter a token first.'; return; }
+  localStorage.setItem(REFRESH_TOKEN_KEY, value);
+  status.textContent = 'Token saved in this browser.';
+});
+
+document.getElementById('clearRefreshToken').addEventListener('click', () => {
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+  document.getElementById('refreshTokenInput').value = '';
+  document.getElementById('refreshStatus').textContent = 'Saved token cleared.';
+});
+
+document.getElementById('triggerRefresh').addEventListener('click', async () => {
+  const status = document.getElementById('refreshStatus');
+  const token = localStorage.getItem(REFRESH_TOKEN_KEY);
+  if (!token) { status.textContent = 'Save a token first.'; return; }
+
+  status.textContent = 'Triggering refresh...';
+  try {
+    const response = await fetch(
+      'https://api.github.com/repos/' + DATA.settings.github_repo + '/actions/workflows/' +
+      DATA.settings.github_workflow_file + '/dispatches',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        body: JSON.stringify({ ref: 'main' }),
+      }
+    );
+    if (response.status === 204) {
+      status.textContent = 'Refresh triggered — usually takes about 5 minutes. Pull to refresh this page once done.';
+    } else if (response.status === 401) {
+      status.textContent = 'Token rejected (401) — it may be invalid or expired.';
+    } else if (response.status === 404) {
+      status.textContent = 'Not found (404) — check the token has "Actions: Read and write" access to this repo.';
+    } else {
+      status.textContent = 'Unexpected response (' + response.status + ').';
+    }
+  } catch (error) {
+    status.textContent = 'Request failed: ' + error.message;
+  }
+});
 
 function showView(name) {
   document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));

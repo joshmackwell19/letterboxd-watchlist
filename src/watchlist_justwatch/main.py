@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,10 +28,26 @@ from .html_email import (
     render_report_html,
 )
 from .justwatch_client import resolve_and_fetch
-from .letterboxd import LetterboxdFetchError, fetch_recent_watches, fetch_watchlist, get_film_details_by_slug
+from .letterboxd import (
+    LetterboxdFetchError,
+    fetch_recent_watches,
+    fetch_watched_films,
+    fetch_watchlist,
+    get_film_details_by_slug,
+)
 from .notify import send_if_configured
 from .report import render_report
-from .similar import discover_because_watched, discover_same_cast, discover_same_director, find_similar, render_similar
+from .similar import (
+    discover_because_watched,
+    discover_by_genre,
+    discover_hidden_gems,
+    discover_popular_now,
+    discover_rewatch,
+    discover_same_cast,
+    discover_same_director,
+    find_similar,
+    render_similar,
+)
 from .state import StateDoc, get_cached_entry_id, load_state, save_state
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
@@ -59,6 +76,27 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
             "director": details["director"], "starring": details["starring"],
         })
 
+    # Full watched-film history — a one-time backfill the first time (no
+    # prior diary), then just the first few pages every day after, since
+    # newly logged films always sort to the front (see fetch_watched_films).
+    # Used to exclude already-seen films from discovery, and as the "worth a
+    # rewatch" candidate pool.
+    is_first_diary_run = not previous_state.diary
+    watched_films = fetch_watched_films(username, full=is_first_diary_run)
+    current_state_diary = dict(previous_state.diary)
+    new_watched_slugs = [f.slug for f in watched_films if f.slug not in current_state_diary]
+    for slug in new_watched_slugs:
+        film = next(f for f in watched_films if f.slug == slug)
+        details = get_film_details_by_slug(slug)
+        current_state_diary[slug] = {
+            "title": film.title, "year": film.year, "rating": details["rating"],
+            "poster_url": details["poster_url"],
+            "director": ", ".join(details["director"]) if details["director"] else None,
+            "starring": details["starring"], "synopsis": details["synopsis"],
+        }
+        if is_first_diary_run:
+            time.sleep(0.2)  # be polite across what can be 1000+ backfill requests in one go
+
     # Correlated across all of TMDB, not just the watchlist, so these can
     # surface films worth discovering rather than only re-surfacing what's
     # already tracked. Done early (like the recent-watches fetch above),
@@ -66,22 +104,43 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
     recommendation_sections: list[dict] = []
     discovery_films: dict[str, dict] = {}
     if recent_watches:
-        exclude_slugs = {w["slug"] for w in recent_watches}
-        for key, (header, slugs, films_map) in zip(
-            ("because_you_watched", "same_director", "same_cast"),
-            (
-                discover_because_watched(recent_watches, now_iso, config, global_subscriptions, revisitable,
-                                          exclude_slugs),
-                discover_same_director(recent_watches, now_iso, config, global_subscriptions, revisitable,
-                                       exclude_slugs),
-                discover_same_cast(recent_watches, now_iso, config, global_subscriptions, revisitable,
-                                    exclude_slugs),
-            ),
-        ):
+        already_seen = set(current_state_diary.keys())
+        exclude_slugs = {w["slug"] for w in recent_watches} | already_seen
+
+        # Discoverers are called one at a time (not pre-built into a tuple)
+        # so exclude_slugs.update() below actually takes effect between
+        # them — otherwise every section would be computed against the same
+        # starting exclusion set and could independently pick the same film.
+        discoverers = [
+            ("because_you_watched", lambda ex: discover_because_watched(
+                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+            ("same_director", lambda ex: discover_same_director(
+                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+            ("same_cast", lambda ex: discover_same_cast(
+                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+            ("hidden_gems", lambda ex: discover_hidden_gems(
+                now_iso, config, global_subscriptions, revisitable, ex)),
+            ("popular_now", lambda ex: discover_popular_now(
+                now_iso, config, global_subscriptions, revisitable, ex)),
+            ("by_genre", lambda ex: discover_by_genre(
+                recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
+        ]
+        for key, discoverer in discoverers:
+            header, slugs, films_map = discoverer(exclude_slugs)
             if slugs:
                 recommendation_sections.append({"key": key, "header": header, "slugs": slugs})
                 discovery_films.update(films_map)
                 exclude_slugs.update(slugs)
+
+        # Rewatch pulls FROM the diary on purpose, so it can't receive the
+        # full diary as an exclusion set like the sections above — only
+        # whatever they already claimed, so nothing shows twice on the page.
+        rewatch_exclude = exclude_slugs - already_seen
+        header, slugs, films_map = discover_rewatch(
+            current_state_diary, recent_watches, now_iso, config, global_subscriptions, revisitable, rewatch_exclude)
+        if slugs:
+            recommendation_sections.append({"key": "rewatch", "header": header, "slugs": slugs})
+            discovery_films.update(films_map)
 
     current_state = StateDoc(last_run_at=now_iso)
     for i, film in enumerate(films, start=1):
@@ -111,6 +170,7 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
     current_state.recent_watches = recent_watches
     current_state.recommendation_sections = recommendation_sections
     current_state.discovery_films = discovery_films
+    current_state.diary = current_state_diary
 
     # A single day's diff is usually too small to fill a "recently added"
     # section on its own, so newly-detected have/free offers accumulate into

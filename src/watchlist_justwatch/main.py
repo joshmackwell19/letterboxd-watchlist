@@ -126,7 +126,15 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
                 recent_watches, now_iso, config, global_subscriptions, revisitable, ex)),
         ]
         for key, discoverer in discoverers:
-            header, slugs, films_map = discoverer(exclude_slugs)
+            # Each section is a nice-to-have on top of the core watchlist
+            # refresh below, not essential to it — an API hiccup (TMDB rate
+            # limit, JustWatch timeout) in one section shouldn't cost the
+            # whole daily run, so it's skipped rather than left to crash out.
+            try:
+                header, slugs, films_map = discoverer(exclude_slugs)
+            except Exception as exc:
+                print(f"warning: discovery section {key!r} failed, skipping it ({exc})", file=sys.stderr)
+                continue
             if slugs:
                 recommendation_sections.append({"key": key, "header": header, "slugs": slugs})
                 discovery_films.update(films_map)
@@ -136,8 +144,13 @@ def run(username: str, config_path: Path, state_path: Path, *, progress: bool = 
         # full diary as an exclusion set like the sections above — only
         # whatever they already claimed, so nothing shows twice on the page.
         rewatch_exclude = exclude_slugs - already_seen
-        header, slugs, films_map = discover_rewatch(
-            current_state_diary, recent_watches, now_iso, config, global_subscriptions, revisitable, rewatch_exclude)
+        try:
+            header, slugs, films_map = discover_rewatch(
+                current_state_diary, recent_watches, now_iso, config, global_subscriptions, revisitable,
+                rewatch_exclude)
+        except Exception as exc:
+            print(f"warning: discovery section 'rewatch' failed, skipping it ({exc})", file=sys.stderr)
+            slugs = []
         if slugs:
             recommendation_sections.append({"key": "rewatch", "header": header, "slugs": slugs})
             discovery_films.update(films_map)

@@ -80,7 +80,7 @@ def resolve_and_fetch(
     cached_confidence: str | None,
     *,
     now_iso: str,
-    request_delay_seconds: float = 0.3,
+    request_delay_seconds: float = 0.6,
 ) -> FilmState:
     match = resolve_film(film, cached_entry_id, cached_confidence)
 

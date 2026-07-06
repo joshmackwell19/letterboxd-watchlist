@@ -97,6 +97,7 @@ def load_state(database_url: str) -> StateDoc:
     return StateDoc(
         schema_version=meta.get("schema_version", SCHEMA_VERSION),
         last_run_at=meta.get("last_run_at"),
+        last_justwatch_check_date=meta.get("last_justwatch_check_date"),
         films=films,
         recent_watches=meta.get("recent_watches", []),
         recommendation_sections=recommendation_sections,
@@ -157,6 +158,7 @@ def save_state(database_url: str, state: StateDoc) -> None:
             [
                 ("schema_version", Jsonb(state.schema_version)),
                 ("last_run_at", Jsonb(state.last_run_at)),
+                ("last_justwatch_check_date", Jsonb(state.last_justwatch_check_date)),
                 ("recent_watches", Jsonb(state.recent_watches)),
                 ("recent_additions", Jsonb(state.recent_additions)),
             ],

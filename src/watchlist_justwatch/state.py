@@ -10,6 +10,10 @@ SCHEMA_VERSION = 1
 class StateDoc:
     schema_version: int = SCHEMA_VERSION
     last_run_at: str | None = None
+    # Date (YYYY-MM-DD) the stale-rotation JustWatch batch last actually ran —
+    # caps that batch to once per calendar day regardless of how many times
+    # the workflow is triggered that day (see main.py).
+    last_justwatch_check_date: str | None = None
     films: dict[str, FilmState] = field(default_factory=dict)
     # Last few watched films (from the Letterboxd profile) plus their
     # director/cast, used to correlate home-page recommendations — refreshed

@@ -200,9 +200,18 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
     # except on the 1st of the month, when service libraries most often
     # change, so the whole watchlist gets a live check regardless of how
     # recently each film was last checked.
+    #
+    # That rotation is capped to once per calendar day regardless of how
+    # many times the workflow actually runs that day — re-triggering
+    # manually to test something (a dashboard tweak, the pipeline itself)
+    # shouldn't repeat several minutes of JustWatch checks that already
+    # happened earlier the same day.
+    today_str = now_dt.date().isoformat()
+    already_refreshed_today = previous_state.last_justwatch_check_date == today_str
     new_slugs = {film.slug for film in films if film.slug not in previous_state.films}
-    is_full_refresh_day = now_dt.day == 1
-    if is_full_refresh_day:
+    if already_refreshed_today:
+        checked_today = new_slugs
+    elif now_dt.day == 1:
         checked_today = {film.slug for film in films}
     else:
         existing = [film for film in films if film.slug not in new_slugs]
@@ -210,7 +219,7 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
         batch_size = max(0, round(len(films) * STALE_BATCH_FRACTION) - len(new_slugs))
         checked_today = new_slugs | {film.slug for film in existing[:batch_size]}
 
-    current_state = StateDoc(last_run_at=now_iso)
+    current_state = StateDoc(last_run_at=now_iso, last_justwatch_check_date=today_str)
     for i, film in enumerate(films, start=1):
         if progress and i % 25 == 0:
             print(f"...processed {i}/{len(films)} films", file=sys.stderr)

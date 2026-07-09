@@ -97,7 +97,7 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
             other_services.append({"brand": offer["brand"], "country": offer["country"]})
 
     for entries in main_availability.values():
-        entries.sort(key=lambda e: (e["classification"] != "have", e["country"]))
+        entries.sort(key=lambda e: (_CLASSIFICATION_PRIORITY[e["classification"]], e["country"]))
     other_services.sort(key=lambda o: (o["brand"], o["country"]))
 
     return {
@@ -116,7 +116,11 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
     }
 
 
-_CLASSIFICATION_PRIORITY = {"have": 0, "could_get_again": 1, "free": 2, "subscription": 3}
+# have > free > could_get_again > subscription, always — must match the JS
+# CLASSIFICATION_PRIORITY constant exactly, since this same order needs to
+# be consistent whether a badge list was pre-sorted here (server-side) or
+# sorted client-side (e.g. buildFilmDetailCard's "other services" section).
+_CLASSIFICATION_PRIORITY = {"have": 0, "free": 1, "could_get_again": 2, "subscription": 3}
 
 
 def _service_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
@@ -171,7 +175,7 @@ def _country_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> l
             country_services[offer["country"]].append({"brand": offer["brand"], "classification": offer["classification"]})
 
         for country, services in country_services.items():
-            services.sort(key=lambda s: (s["classification"] != "have", s["brand"]))
+            services.sort(key=lambda s: (_CLASSIFICATION_PRIORITY[s["classification"]], s["brand"]))
             by_country[country].append({
                 "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
                 "poster_url": film.poster_url,
@@ -436,7 +440,15 @@ _TEMPLATE = """<!DOCTYPE html>
     background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--accent);
     font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 999px;
     box-shadow: var(--shadow); z-index: 40; pointer-events: none; white-space: nowrap;
+    /* The transform above is the primary hide mechanism, but on devices with
+       a large safe-area-inset-top (Dynamic Island/notch phones) "-60px" isn't
+       always enough headroom to clear the indicator's own height, and in
+       standalone/home-screen mode there's no browser chrome to mask a stray
+       peeking edge the way Safari's own UI does in a normal tab. Opacity is
+       the real hide mechanism; the transform is just where it un-hides to. */
+    opacity: 0; transition: opacity 0.15s ease;
   }
+  .ptr-indicator.visible { opacity: 1; }
   .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
   h1 { font-size: 20px; font-weight: 600; margin: 0 0 3px; letter-spacing: -0.01em; }
   .meta { color: var(--text-muted); font-size: 12.5px; }
@@ -606,7 +618,12 @@ _TEMPLATE = """<!DOCTYPE html>
     h1 { font-size: 17px; }
     .tabs { display: none; }
     .controls { gap: 7px; }
+    /* iOS Safari zooms the whole page in on focus of any input/select whose
+       computed font-size is under 16px, and doesn't reliably zoom back out
+       on blur — 16px here is what stops the zoom from happening at all. */
+    input[type=text], input[type=password], select { font-size: 16px; }
     .controls input[type=text], .controls select, .controls .search-wrap { width: auto; flex: 1 1 120px; }
+    .controls .search-wrap { flex-basis: 100%; }
     .controls .search-wrap input[type=text] { width: 100%; }
     .film-cards, .service-cards { grid-template-columns: 1fr; }
     .bottom-nav {
@@ -821,7 +838,7 @@ document.getElementById('watchlistLink').href = DATA.letterboxd_watchlist_url;
 // have > free > could_get_again > subscription, always — used to order the
 // "where to watch" badges on quick-look and service-detail cards.
 const CLASSIFICATION_PRIORITY = { have: 0, free: 1, could_get_again: 2, subscription: 3 };
-const CLASSIFICATIONS = ['have', 'could_get_again', 'free', 'subscription'];
+const CLASSIFICATIONS = ['have', 'free', 'could_get_again', 'subscription'];
 const CLASSIFICATION_LABELS = { have: 'have', could_get_again: 'could get again', free: 'free', subscription: 'subscription needed' };
 
 // Shared pill-toggle filter row (Country and Services tabs) for the four
@@ -1004,9 +1021,13 @@ function filmCardShell(row, servicesHtml) {
   return div;
 }
 
+function countryLabel(code) {
+  return (DATA.countryNames && DATA.countryNames[code]) || code;
+}
+
 function badgeHtml(entries, brandLabel) {
   return entries.map(e => {
-    const label = brandLabel ? brandLabel : e.country;
+    const label = brandLabel ? brandLabel : esc(countryLabel(e.country));
     return '<span class="badge badge-' + e.classification + '" data-country="' + e.country + '">' + label + '</span>';
   }).join(' ');
 }
@@ -1059,7 +1080,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     .slice()
     .sort((a, b) => CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification]);
   const otherHtml = others.length
-    ? others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(o.country) + '</i></span>').join(' ')
+    ? others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i></span>').join(' ')
     : '<span class="muted">Not available anywhere else tracked</span>';
 
   const otherLabel = excludeBrand ? 'Other services' : 'Where to watch';
@@ -1311,7 +1332,7 @@ function renderFilmCards(processed, columnBrands, showOtherServices) {
       servicesHtml += '<div class="service-group">' +
         '<span class="service-group-name">Other</span>' +
         visibleOther.map(o =>
-          '<span class="badge badge-subscription" data-country="' + o.country + '">' + esc(o.brand) + ' (' + o.country + ')</span>'
+          '<span class="badge badge-subscription" data-country="' + o.country + '">' + esc(o.brand) + ' (' + esc(countryLabel(o.country)) + ')</span>'
         ).join(' ') +
       '</div>';
     }
@@ -1347,12 +1368,35 @@ const serviceFilterState = { have: true, could_get_again: true, free: true, subs
 let serviceSortKey = 'film_count', serviceSortDir = -1;
 
 function populateServiceSelects() {
+  // Services you have/could get again, plus any free service in your three
+  // home markets, are what you'd actually reach for — surfaced in their own
+  // group above the long tail of everything else this film happens to be on.
+  const topBrands = new Set(
+    DATA.services
+      .filter(r => r.classification === 'have' || r.classification === 'could_get_again' ||
+                   (r.classification === 'free' && ['AU', 'GB', 'US'].includes(r.country)))
+      .map(r => r.brand)
+  );
   const serviceNames = [...new Set(DATA.services.map(r => r.brand))].sort((a, b) => a.localeCompare(b));
+  const topNames = serviceNames.filter(n => topBrands.has(n));
+  const restNames = serviceNames.filter(n => !topBrands.has(n));
   const countryNames = [...new Set(DATA.services.map(r => r.country_name))].sort((a, b) => a.localeCompare(b));
 
+  const buildOptions = names => names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
   const serviceSelect = document.getElementById('serviceSelect');
-  serviceSelect.innerHTML = '<option value="">All services</option>' +
-    serviceNames.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+  serviceSelect.innerHTML = '<option value="">All services</option>';
+  if (topNames.length) {
+    const topGroup = document.createElement('optgroup');
+    topGroup.label = 'Have or can get';
+    topGroup.innerHTML = buildOptions(topNames);
+    serviceSelect.appendChild(topGroup);
+  }
+  if (restNames.length) {
+    const restGroup = document.createElement('optgroup');
+    restGroup.label = 'Other services';
+    restGroup.innerHTML = buildOptions(restNames);
+    serviceSelect.appendChild(restGroup);
+  }
 
   const countrySelect = document.getElementById('serviceCountrySelect');
   countrySelect.innerHTML = '<option value="">All countries</option>' +
@@ -1688,6 +1732,7 @@ renderFilms();
     currentDelta = 0;
     indicator.style.transition = 'none';
     indicator.style.transform = HIDDEN_TRANSFORM;
+    indicator.classList.remove('visible');
     indicator.textContent = 'Pull to refresh ↓';
   }
   reset();
@@ -1709,6 +1754,7 @@ renderFilms();
     currentDelta = event.touches[0].clientY - startY;
     if (currentDelta <= 0) {
       indicator.style.transform = HIDDEN_TRANSFORM;
+      indicator.classList.remove('visible');
       return;
     }
     // Only take over the gesture once it's clearly a downward pull, so a
@@ -1718,6 +1764,7 @@ renderFilms();
     if (event.cancelable) event.preventDefault();
     const clamped = Math.min(currentDelta, 120);
     indicator.style.transform = 'translate(-50%, ' + clamped + 'px)';
+    indicator.classList.add('visible');
     indicator.textContent = clamped > THRESHOLD ? 'Release to refresh ↑' : 'Pull to refresh ↓';
   }, { passive: false });
 

@@ -32,6 +32,7 @@ from .html_email import (
 from .justwatch_client import resolve_and_fetch
 from .letterboxd import (
     LetterboxdFetchError,
+    fetch_latest_diary_guid,
     fetch_recent_watches,
     fetch_watched_films,
     fetch_watchlist,
@@ -231,7 +232,8 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
         batch_size = max(0, round(len(films) * STALE_BATCH_FRACTION) - len(new_slugs))
         checked_today = new_slugs | {film.slug for film in existing[:batch_size]}
 
-    current_state = StateDoc(last_run_at=now_iso, last_justwatch_check_date=today_str)
+    current_state = StateDoc(last_run_at=now_iso, last_justwatch_check_date=today_str,
+                              last_seen_diary_guid=previous_state.last_seen_diary_guid)
     for i, film in enumerate(films, start=1):
         if progress and i % 25 == 0:
             print(f"...processed {i}/{len(films)} films", file=sys.stderr)
@@ -336,6 +338,11 @@ def main() -> None:
     parser.add_argument("--migrate-json-to-db", type=Path, metavar="STATE_JSON",
                          help="One-time import of a legacy data/state.json file into the database "
                               "at --database-url, then exit")
+    parser.add_argument("--check-for-new-log", action="store_true",
+                         help="Check the Letterboxd RSS feed for a log entry newer than the last check "
+                              "(one cheap request, no watchlist/JustWatch calls). Prints 'new_log=true' "
+                              "or 'new_log=false' to stdout for a GitHub Actions step to read via "
+                              "$GITHUB_OUTPUT, then exits.")
     args = parser.parse_args()
 
     if not args.database_url:
@@ -365,6 +372,19 @@ def main() -> None:
         )
         save_state(args.database_url, state)
         print(f"Migrated {len(films)} films and {len(state.diary)} diary entries into the database.")
+        sys.exit(0)
+
+    if args.check_for_new_log:
+        if not args.username:
+            parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
+        state = load_state(args.database_url)
+        latest_guid = fetch_latest_diary_guid(args.username)
+        if latest_guid is not None and latest_guid != state.last_seen_diary_guid:
+            state.last_seen_diary_guid = latest_guid
+            save_state(args.database_url, state)
+            print("new_log=true")
+        else:
+            print("new_log=false")
         sys.exit(0)
 
     if args.rank_services:

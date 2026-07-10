@@ -14,6 +14,10 @@ class StateDoc:
     # caps that batch to once per calendar day regardless of how many times
     # the workflow is triggered that day (see main.py).
     last_justwatch_check_date: str | None = None
+    # <guid> of the most recent Letterboxd RSS entry as of the last
+    # --check-for-new-log run — lets that check tell "a new film was
+    # logged" apart from "nothing's changed" (see check-for-new-log.yml).
+    last_seen_diary_guid: str | None = None
     films: dict[str, FilmState] = field(default_factory=dict)
     # Last few watched films (from the Letterboxd profile) plus their
     # director/cast, used to correlate home-page recommendations — refreshed

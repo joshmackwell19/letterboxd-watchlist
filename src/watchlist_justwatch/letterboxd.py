@@ -15,6 +15,7 @@ TITLE_YEAR_RE = re.compile(r"^(?P<title>.+) \((?P<year>\d{4})\)$")
 RATING_RE = re.compile(r'name="twitter:data2" content="([\d.]+) out of 5"')
 JSON_LD_RE = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.DOTALL)
 RECENT_ACTIVITY_RE = re.compile(r'<section id="recent-activity".*?</section>', re.DOTALL)
+DIARY_GUID_RE = re.compile(r"<guid[^>]*>([^<]+)</guid>")
 MAX_STARRING = 5
 
 
@@ -317,3 +318,29 @@ def fetch_watched_films(
         time.sleep(page_delay_seconds)
 
     return list(all_films.values())
+
+
+def fetch_latest_diary_guid(
+    username: str,
+    *,
+    impersonate: str = "chrome124",
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+    request_timeout_seconds: float = 15.0,
+) -> str | None:
+    """The <guid> of the most recent entry in the user's Letterboxd RSS feed
+    (/username/rss/) — updates the instant a new film is logged, no
+    per-page pagination needed. Used to cheaply detect "has anything
+    changed since the last check" (see --check-for-new-log) before paying
+    for the full daily pipeline. Returns None on any fetch failure so a
+    transient hiccup just skips that check rather than raising."""
+    session = curl_requests.Session()
+    try:
+        response = _fetch_url(session, f"https://letterboxd.com/{username}/rss/", max_retries=max_retries,
+                               backoff_base_seconds=backoff_base_seconds,
+                               request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
+    except LetterboxdFetchError:
+        return None
+
+    match = DIARY_GUID_RE.search(response.text)
+    return match.group(1) if match else None

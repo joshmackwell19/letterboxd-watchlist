@@ -1,0 +1,38 @@
+name: Check for new Letterboxd log
+
+on:
+  schedule:
+    # RSS-only check, one cheap request — safe to run often. The full daily
+    # pipeline only actually runs when this detects something new.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Check for a new Letterboxd log entry
+        id: check
+        env:
+          LETTERBOXD_USERNAME: ${{ secrets.LETTERBOXD_USERNAME }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m watchlist_justwatch.main --check-for-new-log >> "$GITHUB_OUTPUT"
+
+      # A workflow triggered by the default GITHUB_TOKEN can't itself trigger
+      # another workflow run (GitHub's loop-prevention rule) — needs a real
+      # PAT instead, same one used for the dashboard's "Refresh now" button.
+      - name: Trigger the daily pipeline
+        if: steps.check.outputs.new_log == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_DISPATCH_TOKEN }}
+        run: gh workflow run daily.yml

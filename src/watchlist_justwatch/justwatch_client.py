@@ -19,7 +19,14 @@ def _with_retry(fn, *, max_retries: int = 5, backoff_base_seconds: float = 2.0):
             time.sleep(backoff_base_seconds * (2 ** attempt))
 
 
-def search_film(title: str, year: int | None, *, country: str = "US", count: int = 5) -> MatchResult:
+def search_film(title: str, year: int | None, *, country: str = "US", count: int = 20) -> MatchResult:
+    # A too-narrow count silently breaks common titles: "Obsession" (1976,
+    # Brian De Palma) fell out of the top 5 the moment JustWatch indexed an
+    # unrelated newer title with the same name, so the year-match loops below
+    # never saw it and fell all the way back to an arbitrary top result.
+    # 20 gives real headroom for title collisions without meaningfully
+    # slower requests (JustWatch's response time is dominated by round-trip,
+    # not result count).
     results = _with_retry(lambda: search(title, country=country, language="en", count=count))
 
     if not results:
@@ -34,6 +41,16 @@ def search_film(title: str, year: int | None, *, country: str = "US", count: int
             if r.release_year is not None and abs(r.release_year - year) <= 1:
                 return MatchResult(slug="", entry_id=r.entry_id, matched_title=r.title,
                                     matched_year=r.release_year, confidence="year_tolerant")
+
+        # Still nothing close — prefer whichever result's year is nearest
+        # the one we're looking for, rather than trusting JustWatch's own
+        # result ordering (which favours new/popular titles, not the
+        # specific year of an ambiguous, commonly-reused title like this).
+        with_year = [r for r in results if r.release_year is not None]
+        if with_year:
+            closest = min(with_year, key=lambda r: abs(r.release_year - year))
+            return MatchResult(slug="", entry_id=closest.entry_id, matched_title=closest.title,
+                                matched_year=closest.release_year, confidence="low_confidence")
 
     top = results[0]
     return MatchResult(slug="", entry_id=top.entry_id, matched_title=top.title,

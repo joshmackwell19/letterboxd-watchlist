@@ -348,10 +348,10 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     # ("this is now watchable") signal on the page.
     add(_recently_added_section(state, used))
 
-    # The two broadest-appeal sections next — general discovery, not tied
-    # to a specific person — so they're not buried under however many
-    # per-director/per-cast sections happen to exist this run.
-    add(_cached_section(state, lookup, "popular_now", used))
+    # Recommended-from-recent-watches and top-rated next — general
+    # discovery, not tied to a specific person — so they're not buried
+    # under however many per-director/per-cast sections exist this run.
+    add(_cached_section(state, lookup, "because_you_watched", used))
     add(_top_rated_section(state, films_all_offers, used))
 
     # One section per unique director/cast member from your last few
@@ -362,7 +362,10 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
             if cached["key"].startswith(prefix):
                 add(_section_from_cached(cached, lookup, used))
 
-    add(_cached_section(state, lookup, "because_you_watched", used))
+    # Popular right now moved below the director/cast sections — general
+    # trending picks are lower priority than either the sections above or
+    # the personalized ones just above it.
+    add(_cached_section(state, lookup, "popular_now", used))
     add(_cached_section(state, lookup, "rewatch", used))
 
     # Longer-tail exploration at the bottom, on purpose — genre/hidden-gem

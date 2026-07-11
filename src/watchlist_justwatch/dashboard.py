@@ -11,6 +11,7 @@ FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
 FREE_TIER_COUNTRIES = {"AU", "GB", "US"}
 ALWAYS_MAIN_BRANDS = {"Netflix", "HBO Max"}
 RECOMMENDED_COUNT = 10
+CARD_DIRECTOR_CAP = 2
 LETTERBOXD_USERNAME = "Jmackwell"
 # Cloudflare Worker proxy for the settings-page "Refresh now" button — holds
 # the real GitHub PAT server-side so the browser never sees it. TRIGGER_SECRET
@@ -18,6 +19,21 @@ LETTERBOXD_USERNAME = "Jmackwell"
 # boundary since it's necessarily embedded in this public page anyway.
 REFRESH_WORKER_URL = "https://letterboxd-refresh-trigger.joshmackwell19.workers.dev"
 REFRESH_TRIGGER_SECRET = "c873bf14292aecf07b61b66c61a6d540"
+
+
+def _truncate_joined(value: str | None, max_shown: int = CARD_DIRECTOR_CAP) -> str | None:
+    """Shortens an already-comma-joined "A, B, C, D" string to "A, B +2 more"
+    for card contexts — an anthology film's full 13-director credit list is
+    fine in quick-look/service-detail (films_by_slug/discovery_films keep the
+    untruncated string; quick-look reads from there directly, not from this),
+    but blows out card height and breaks the grid when every card is
+    supposed to be roughly the same size."""
+    if not value:
+        return value
+    parts = value.split(", ")
+    if len(parts) <= max_shown:
+        return value
+    return ", ".join(parts[:max_shown]) + f" +{len(parts) - max_shown} more"
 
 
 def _classify(brand: str, country: str, monetization_types: set[str], config: dict[str, CountryConfig],
@@ -98,11 +114,12 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
                 {"country": offer["country"], "classification": offer["classification"]}
             )
         else:
-            other_services.append({"brand": offer["brand"], "country": offer["country"]})
+            other_services.append({"brand": offer["brand"], "country": offer["country"],
+                                    "classification": offer["classification"]})
 
     for entries in main_availability.values():
         entries.sort(key=lambda e: (_CLASSIFICATION_PRIORITY[e["classification"]], e["country"]))
-    other_services.sort(key=lambda o: (o["brand"], o["country"]))
+    other_services.sort(key=lambda o: (_CLASSIFICATION_PRIORITY[o["classification"]], o["brand"], o["country"]))
 
     return {
         "title": film.title,
@@ -110,7 +127,7 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
         "slug": film.slug,
         "rating": film.rating,
         "poster_url": film.poster_url,
-        "director": ", ".join(film.director) if film.director else None,
+        "director": _truncate_joined(", ".join(film.director) if film.director else None),
         "starring": ", ".join(film.starring) if film.starring else None,
         "any_service": bool(all_offers),
         "have_service": any_have,
@@ -183,7 +200,7 @@ def _country_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> l
             by_country[country].append({
                 "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
                 "poster_url": film.poster_url,
-                "director": ", ".join(film.director) if film.director else None,
+                "director": _truncate_joined(", ".join(film.director) if film.director else None),
                 "starring": ", ".join(film.starring) if film.starring else None,
                 "services": services,
                 "has_have": any(s["classification"] == "have" for s in services),
@@ -225,7 +242,7 @@ def _mini_card(film) -> dict:
         "year": film.year,
         "rating": film.rating,
         "poster_url": film.poster_url,
-        "director": ", ".join(film.director) if film.director else None,
+        "director": _truncate_joined(", ".join(film.director) if film.director else None),
     }
 
 
@@ -255,10 +272,14 @@ def _top_rated_section(state: StateDoc, films_all_offers: dict[str, list[dict]],
 
 def _mini_card_from_lookup(entry: dict) -> dict:
     """Same shape as _mini_card, but from a films_by_slug-shaped dict (either
-    a watchlist film or a discovered one — see _build_home_sections)."""
+    a watchlist film or a discovered one — see _build_home_sections). The
+    full director string stays intact on films_by_slug/discovery_films
+    itself (quick-look reads from there directly) — only this card-shaped
+    copy gets truncated."""
     return {
         "slug": entry["slug"], "title": entry["title"], "year": entry["year"],
-        "rating": entry["rating"], "poster_url": entry["poster_url"], "director": entry["director"],
+        "rating": entry["rating"], "poster_url": entry["poster_url"],
+        "director": _truncate_joined(entry["director"]),
     }
 
 
@@ -286,17 +307,29 @@ def _cached_section(state: StateDoc, lookup: dict[str, dict], key: str, exclude:
 def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12) -> dict:
     seen: set[str] = set()
     chosen: list[str] = []
+    added_service_by_slug: dict[str, str] = {}
     for entry in state.recent_additions:  # already newest-first, capped rolling log
         slug = entry["slug"]
         if slug in seen or slug in exclude or slug not in state.films:
             continue
         seen.add(slug)
         chosen.append(slug)
+        added_service_by_slug[slug] = f'{entry["brand"]} ({country_name(entry["country"])})'
         if len(chosen) >= limit:
             break
+
+    films = []
+    for s in chosen:
+        card = _mini_card(state.films[s])
+        # Which service/country actually triggered this addition — the
+        # whole point of the section is "this just became watchable", so
+        # naming where saves a click into quick-look to find out.
+        card["added_service"] = added_service_by_slug[s]
+        films.append(card)
+
     return {
         "key": "recently_added", "header": "Recently added to your services",
-        "films": [_mini_card(state.films[s]) for s in chosen],
+        "films": films,
     }
 
 
@@ -315,16 +348,20 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     # ("this is now watchable") signal on the page.
     add(_recently_added_section(state, used))
 
+    # The two broadest-appeal sections next — general discovery, not tied
+    # to a specific person — so they're not buried under however many
+    # per-director/per-cast sections happen to exist this run.
+    add(_cached_section(state, lookup, "popular_now", used))
+    add(_top_rated_section(state, films_all_offers, used))
+
     # One section per unique director/cast member from your last few
-    # watches — however many that turns out to be (see main.py) — right
-    # after recently-added, since these are the most personalized picks.
+    # watches — however many that turns out to be (see main.py) — the most
+    # personalized picks, but narrower-appeal than the two above.
     for prefix in ("director:", "cast:"):
         for cached in state.recommendation_sections:
             if cached["key"].startswith(prefix):
                 add(_section_from_cached(cached, lookup, used))
 
-    add(_cached_section(state, lookup, "popular_now", used))
-    add(_top_rated_section(state, films_all_offers, used))
     add(_cached_section(state, lookup, "because_you_watched", used))
     add(_cached_section(state, lookup, "rewatch", used))
 
@@ -528,6 +565,12 @@ _TEMPLATE = """<!DOCTYPE html>
   .badge-could_get_again { background: rgba(192, 132, 252, 0.14); color: #c084fc; }
   .badge-free { background: rgba(96, 165, 250, 0.14); color: #60a5fa; }
   .badge-subscription { background: rgba(255, 255, 255, 0.07); color: var(--text-muted); }
+  .badge-more-btn {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 500;
+    margin: 1px 4px 1px 0; white-space: nowrap; cursor: pointer;
+    background: none; border: 1px solid var(--hairline-strong); color: var(--text-muted);
+  }
+  .badge-more-btn:hover { color: var(--text); border-color: var(--text-muted); }
   .filter-toggle { cursor: pointer; border: 1.5px solid transparent; transition: opacity 0.15s; }
   .filter-toggle.off { opacity: 0.3; }
   .quick-country {
@@ -595,11 +638,17 @@ _TEMPLATE = """<!DOCTYPE html>
     box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start;
   }
   .film-card .poster-thumb, .film-card .poster-placeholder { width: 56px; height: 82px; }
+  .skeleton-card {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; height: 110px;
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes skeleton-pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 0.9; } }
   .film-card-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
   .film-card-title-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
   .film-card-title { font-weight: 600; font-size: 13.5px; }
   .film-card-rating { font-size: 12px; color: #4ade80; font-weight: 600; white-space: nowrap; }
   .film-card-director { font-size: 11.5px; color: var(--text-muted); }
+  .film-card-added-service { font-size: 11px; color: var(--accent); font-weight: 500; margin-top: 2px; }
   .service-group { margin-top: 7px; }
   .service-group-name {
     font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
@@ -668,7 +717,14 @@ _TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <section class="view active" id="view-home">
-  <div id="homeSections"></div>
+  <div id="homeSections">
+    <div class="film-cards">
+      <div class="skeleton-card"></div>
+      <div class="skeleton-card"></div>
+      <div class="skeleton-card"></div>
+      <div class="skeleton-card"></div>
+    </div>
+  </div>
 </section>
 
 <section class="view" id="view-country">
@@ -864,6 +920,18 @@ function searchHaystack(row) {
   return [row.title, row.year, row.director, starring].filter(Boolean).join(' ').toLowerCase();
 }
 
+// A filter/search combination with zero matches otherwise leaves a blank
+// grid — indistinguishable from something being broken. Call after
+// populating a grid container to fill that gap.
+function ensureNotEmpty(container, message) {
+  if (container.children.length) return;
+  const p = document.createElement('p');
+  p.className = 'muted';
+  p.style.padding = '8px 0 24px';
+  p.textContent = message;
+  container.appendChild(p);
+}
+
 function wireSearchClear(inputId, clearId, rerender) {
   const input = document.getElementById(inputId);
   const btn = document.getElementById(clearId);
@@ -965,6 +1033,8 @@ function filmCardShell(row, servicesHtml) {
     ? '<img class="poster-thumb" loading="lazy" src="' + row.poster_url + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
     : '<div class="poster-placeholder"></div>';
   const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
+  const addedService = row.added_service
+    ? '<div class="film-card-added-service">Added to ' + esc(row.added_service) + '</div>' : '';
   const div = document.createElement('div');
   div.className = 'film-card';
   div.dataset.slug = row.slug;
@@ -975,7 +1045,7 @@ function filmCardShell(row, servicesHtml) {
           esc(row.title) + year + '</a>' +
         '<span class="film-card-rating">' + rating + '</span>' +
       '</div>' +
-      director + servicesHtml +
+      director + addedService + servicesHtml +
     '</div>';
   return div;
 }
@@ -984,11 +1054,37 @@ function countryLabel(code) {
   return (DATA.countryNames && DATA.countryNames[code]) || code;
 }
 
+// A service on every VPN-reachable country (or a film with a dozen credited
+// directors) turns one card into a wall of badges and breaks the grid's
+// height rhythm — cap the inline list and let a "+N more" reveal the rest
+// on demand instead of dropping the data entirely.
+const BADGE_CAP = 8;
+
+function capBadges(badgeParts, cap) {
+  if (badgeParts.length <= cap) return badgeParts.join(' ');
+  const id = 'more-' + Math.random().toString(36).slice(2, 9);
+  return badgeParts.slice(0, cap).join(' ') +
+    ' <span class="badge-more-wrap">' +
+      '<span class="badges-hidden" id="' + id + '" hidden>' + badgeParts.slice(cap).join(' ') + '</span>' +
+      '<button type="button" class="badge-more-btn" data-target="' + id + '">+' + (badgeParts.length - cap) + ' more</button>' +
+    '</span>';
+}
+
+document.addEventListener('click', event => {
+  const btn = event.target.closest('.badge-more-btn');
+  if (!btn) return;
+  event.stopPropagation();
+  const target = document.getElementById(btn.getAttribute('data-target'));
+  if (target) target.hidden = false;
+  btn.remove();
+});
+
 function badgeHtml(entries, brandLabel) {
-  return entries.map(e => {
+  const parts = entries.map(e => {
     const label = brandLabel ? brandLabel : esc(countryLabel(e.country));
     return '<span class="badge badge-' + e.classification + '" data-country="' + e.country + '">' + label + '</span>';
-  }).join(' ');
+  });
+  return capBadges(parts, BADGE_CAP);
 }
 
 // ---------- Home ----------
@@ -1039,7 +1135,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     .slice()
     .sort((a, b) => CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification]);
   const otherHtml = others.length
-    ? others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i></span>').join(' ')
+    ? capBadges(others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i></span>'), BADGE_CAP)
     : '<span class="muted">Not available anywhere else tracked</span>';
 
   const otherLabel = excludeBrand ? 'Other services' : 'Where to watch';
@@ -1288,17 +1384,19 @@ function renderFilmCards(processed, columnBrands, showOtherServices) {
     });
 
     if (showOtherServices && visibleOther.length) {
+      const otherBadges = visibleOther.map(o =>
+        '<span class="badge badge-' + o.classification + '" data-country="' + o.country + '">' + esc(o.brand) + ' (' + esc(countryLabel(o.country)) + ')</span>'
+      );
       servicesHtml += '<div class="service-group">' +
         '<span class="service-group-name">Other</span>' +
-        visibleOther.map(o =>
-          '<span class="badge badge-subscription" data-country="' + o.country + '">' + esc(o.brand) + ' (' + esc(countryLabel(o.country)) + ')</span>'
-        ).join(' ') +
+        capBadges(otherBadges, BADGE_CAP) +
       '</div>';
     }
 
     frag.appendChild(filmCardShell(row, servicesHtml));
   });
   container.appendChild(frag);
+  ensureNotEmpty(container, 'No films match your search and filters.');
 }
 
 document.getElementById('search').addEventListener('input', renderFilms);
@@ -1436,12 +1534,16 @@ function renderServicesRows() {
 
   let rows = DATA.services.slice();
   const col = serviceCols.find(c => c.key === serviceSortKey);
-  if (col && col.sort) {
-    rows.sort((a, b) => {
-      const av = col.sort(a), bv = col.sort(b);
-      return av < bv ? -serviceSortDir : av > bv ? serviceSortDir : 0;
-    });
-  }
+  // Services you have/can-get-again always lead, regardless of the chosen
+  // sort column — otherwise a big subscription-needed catalog in a market
+  // you don't use can outrank what you actually have, just on film count.
+  rows.sort((a, b) => {
+    const clsDiff = CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification];
+    if (clsDiff !== 0) return clsDiff;
+    if (!col || !col.sort) return 0;
+    const av = col.sort(a), bv = col.sort(b);
+    return av < bv ? -serviceSortDir : av > bv ? serviceSortDir : 0;
+  });
 
   const frag = document.createDocumentFragment();
   rows.forEach(row => {
@@ -1462,6 +1564,7 @@ function renderServicesRows() {
     frag.appendChild(card);
   });
   container.appendChild(frag);
+  ensureNotEmpty(container, 'No services match your search and filters.');
 }
 
 function openServiceDetail(brand, country, countryName) {
@@ -1624,14 +1727,14 @@ function renderCountryRows() {
     const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
     if (!visibleServices.length) return;
 
-    const servicesHtml = '<div class="service-group">' +
-      visibleServices.map(s =>
-        '<span class="badge badge-' + s.classification + '" data-brand="' + esc(s.brand) + '">' + esc(s.brand) + '</span>'
-      ).join(' ') +
-    '</div>';
+    const serviceBadges = visibleServices.map(s =>
+      '<span class="badge badge-' + s.classification + '" data-brand="' + esc(s.brand) + '">' + esc(s.brand) + '</span>'
+    );
+    const servicesHtml = '<div class="service-group">' + capBadges(serviceBadges, BADGE_CAP) + '</div>';
     frag.appendChild(filmCardShell(row, servicesHtml));
   });
   container.appendChild(frag);
+  ensureNotEmpty(container, 'No films match your search and filters.');
 }
 
 function onCountryCardClick(event) {

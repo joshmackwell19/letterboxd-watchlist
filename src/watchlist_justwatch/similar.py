@@ -49,6 +49,11 @@ _MIN_VOTE_COUNT = 150
 # below that starts running into films barely anyone on Letterboxd has seen.
 _MIN_LETTERBOXD_RATING_COUNT = 20_000
 
+# Below this, a per-director/per-cast-member section reads as thin clutter
+# rather than a real recommendation — better to skip it and let a later
+# section (a different person) have first claim on those candidate slugs.
+_MIN_DYNAMIC_SECTION_FILMS = 3
+
 
 def _passes_quality_filter(movie: dict) -> bool:
     if any(g in _EXCLUDED_GENRE_IDS for g in movie.get("genre_ids", [])):
@@ -218,7 +223,7 @@ def discover_by_directors(
         candidates = _candidates_by_person([director], "director", candidate_pool=40)
         slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
                                            exclude_slugs=exclude, limit=limit)
-        if slugs:
+        if len(slugs) >= _MIN_DYNAMIC_SECTION_FILMS:
             sections.append((f"director:{director}", f"More from {director}", slugs, films))
             exclude |= set(slugs)
     return sections
@@ -242,7 +247,7 @@ def discover_by_cast_members(
         candidates = _candidates_by_person([actor], "cast", candidate_pool=40)
         slugs, films = _enrich_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
                                            exclude_slugs=exclude, limit=limit)
-        if slugs:
+        if len(slugs) >= _MIN_DYNAMIC_SECTION_FILMS:
             sections.append((f"cast:{actor}", f"More starring {actor}", slugs, films))
             exclude |= set(slugs)
     return sections

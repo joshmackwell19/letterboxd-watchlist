@@ -1,14 +1,5 @@
-# Your actual current subscriptions — this is the PRIMARY "have" signal used
-# by the emails and reports. Edit freely as subscriptions change.
-#
-# "global" = subscriptions you access across many countries via VPN (Apple
-#            TV) — counts as "have" no matter which country's catalog the
-#            offer appears under.
-# "countries" = single-region services (their catalogs only ever exist under
-#               one country anyway) that you access there, keyed by ISO
-#               3166-1 alpha-2 code (JustWatch uses these, not "uk").
-#               "free_tier" = free ad-supported apps, kept separate from
-#               "subscriptions" for clarity, but both count as "have".
+# Managed from the dashboard's Settings page — hand-edits here get
+# overwritten next time someone saves from there.
 global:
   subscriptions:
     - "Amazon Prime Video"
@@ -16,14 +7,7 @@ global:
     - "Disney Plus"
 
 countries:
-  gb:
-    subscriptions:
-      - "BBC iPlayer"
-      - "ITVX"
-      - "Channel 4"
-      - "Channel 5"
-    free_tier: []
-  au:
+  AU:
     subscriptions:
       - "Stan"
       - "ABC iview"
@@ -31,7 +15,13 @@ countries:
       - "7plus"
       - "9Now"
       - "SBS On Demand"
-    free_tier: []
-  us:
-    subscriptions: []
-    free_tier: []
+    free_tier:
+      []
+  GB:
+    subscriptions:
+      - "BBC iPlayer"
+      - "ITVX"
+      - "Channel 4"
+      - "Channel 5"
+    free_tier:
+      []

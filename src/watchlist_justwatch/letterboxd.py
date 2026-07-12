@@ -3,6 +3,7 @@ import math
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 
 from curl_cffi import requests as curl_requests
 
@@ -16,6 +17,11 @@ RATING_RE = re.compile(r'name="twitter:data2" content="([\d.]+) out of 5"')
 JSON_LD_RE = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.DOTALL)
 RECENT_ACTIVITY_RE = re.compile(r'<section id="recent-activity".*?</section>', re.DOTALL)
 DIARY_GUID_RE = re.compile(r"<guid[^>]*>([^<]+)</guid>")
+DIARY_ROW_RE = re.compile(r'<tr class="diary-entry-row.*?</tr>\s*(?=<tr|</tbody>)', re.DOTALL)
+DIARY_RATING_RE = re.compile(r'class="rateit-field diary-rating-\d+"[^>]*value="(\d+)"')
+DIARY_REWATCH_RE = re.compile(r'js-td-rewatch icon-status-(on|off)')
+DIARY_DATE_RE = re.compile(r"/diary/films/for/(\d{4})/(\d{2})/(\d{2})/")
+_RSS_NS = {"letterboxd": "https://letterboxd.com"}
 MAX_STARRING = 5
 
 
@@ -320,27 +326,123 @@ def fetch_watched_films(
     return list(all_films.values())
 
 
-def fetch_latest_diary_guid(
+def fetch_new_diary_entries(
     username: str,
+    since_guid: str | None,
     *,
     impersonate: str = "chrome124",
     max_retries: int = 3,
     backoff_base_seconds: float = 2.0,
     request_timeout_seconds: float = 15.0,
-) -> str | None:
-    """The <guid> of the most recent entry in the user's Letterboxd RSS feed
-    (/username/rss/) — updates the instant a new film is logged, no
-    per-page pagination needed. Used to cheaply detect "has anything
-    changed since the last check" (see --check-for-new-log) before paying
-    for the full daily pipeline. Returns None on any fetch failure so a
-    transient hiccup just skips that check rather than raising."""
+) -> list[dict]:
+    """Entries newer than since_guid (exclusive) from the user's Letterboxd
+    RSS feed (/username/rss/, newest first, only 50 max — there's no
+    pagination on this feed). Used both to detect "has anything changed"
+    (see --check-for-new-log) and, since the feed already carries your own
+    rating/like/rewatch per entry, to keep state.diary's personal-taste
+    fields current without a second fetch. Returns [] on any fetch/parse
+    failure so a transient hiccup just skips that check rather than raising.
+
+    since_guid=None (first run, or the stored guid has scrolled off the
+    50-entry window) returns every entry on the page."""
     session = curl_requests.Session()
     try:
         response = _fetch_url(session, f"https://letterboxd.com/{username}/rss/", max_retries=max_retries,
                                backoff_base_seconds=backoff_base_seconds,
                                request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
     except LetterboxdFetchError:
-        return None
+        return []
 
-    match = DIARY_GUID_RE.search(response.text)
-    return match.group(1) if match else None
+    try:
+        root = ET.fromstring(response.text)
+    except ET.ParseError:
+        return []
+
+    entries = []
+    for item in root.findall(".//item"):
+        guid = item.findtext("guid")
+        if guid == since_guid:
+            break
+        link = item.findtext("link") or ""
+        slug_match = re.search(r"/film/([^/]+)/", link)
+        if guid is None or not slug_match:
+            continue
+        rating_text = item.findtext("letterboxd:memberRating", namespaces=_RSS_NS)
+        year_text = item.findtext("letterboxd:filmYear", namespaces=_RSS_NS)
+        entries.append({
+            "guid": guid,
+            "slug": slug_match.group(1),
+            "title": item.findtext("letterboxd:filmTitle", namespaces=_RSS_NS),
+            "year": int(year_text) if year_text else None,
+            "watched_date": item.findtext("letterboxd:watchedDate", namespaces=_RSS_NS),
+            "is_rewatch": item.findtext("letterboxd:rewatch", namespaces=_RSS_NS) == "Yes",
+            "personal_rating": float(rating_text) if rating_text else None,
+            "liked": item.findtext("letterboxd:memberLike", namespaces=_RSS_NS) == "Yes",
+        })
+    return entries
+
+
+def fetch_diary_ratings(
+    username: str,
+    *,
+    max_pages: int = 60,
+    impersonate: str = "chrome124",
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+    request_timeout_seconds: float = 15.0,
+    page_delay_seconds: float = 0.3,
+) -> dict[str, dict]:
+    """One-time historical backfill of personal_rating/is_rewatch/watched_date
+    (slug -> dict) from the dated diary pages — must run locally, same as
+    fetch_watched_films, since Letterboxd blocks /username/films/ (diary
+    included) from GitHub Actions' IP range. The RSS feed only covers the
+    last ~50 entries; this covers everything older.
+
+    "liked" isn't included — the diary page's like indicator is hydrated by
+    a client-side API call this static fetch never makes, so it's just not
+    reliably scrapable here. Only the RSS-fed path (fetch_new_diary_entries)
+    can capture likes, going forward from whenever this app started polling.
+
+    A rewatched film has multiple diary rows for the same slug; the first
+    one encountered (newest first) wins, so this reflects your most recent
+    viewing rather than being overwritten by an older one."""
+    session = curl_requests.Session()
+    result: dict[str, dict] = {}
+
+    for page_num in range(1, max_pages + 1):
+        try:
+            response = _fetch_url(session, f"https://letterboxd.com/{username}/films/diary/page/{page_num}/",
+                                   max_retries=max_retries, backoff_base_seconds=backoff_base_seconds,
+                                   request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
+        except LetterboxdFetchError as exc:
+            print(f"warning: diary-ratings fetch failed on page {page_num} ({exc})", file=sys.stderr)
+            break
+
+        rows = DIARY_ROW_RE.findall(response.text)
+        if not rows:
+            break
+
+        for row in rows:
+            slug_match = ITEM_SLUG_RE.search(row)
+            if not slug_match:
+                continue
+            slug = slug_match.group(1)
+            if slug in result:
+                continue
+
+            entry: dict = {}
+            rating_match = DIARY_RATING_RE.search(row)
+            if rating_match:
+                entry["personal_rating"] = int(rating_match.group(1)) / 2
+            rewatch_match = DIARY_REWATCH_RE.search(row)
+            if rewatch_match:
+                entry["is_rewatch"] = rewatch_match.group(1) == "on"
+            date_match = DIARY_DATE_RE.search(row)
+            if date_match:
+                entry["watched_date"] = "-".join(date_match.groups())
+            if entry:
+                result[slug] = entry
+
+        time.sleep(page_delay_seconds)
+
+    return result

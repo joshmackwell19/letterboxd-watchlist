@@ -253,20 +253,37 @@ def discover_by_cast_members(
     return sections
 
 
+def _rewatch_qualifies(info: dict) -> bool:
+    if info.get("personal_rating") is not None:
+        return info["personal_rating"] >= 4.0 or info.get("liked") is True
+    return info.get("rating") is not None and info["rating"] >= 3.5
+
+
+def _rewatch_sort_key(info: dict) -> float:
+    if info.get("personal_rating") is not None:
+        return -info["personal_rating"]
+    return -info["rating"]
+
+
 def discover_rewatch(
     diary: dict[str, dict], recent_watches: list[dict], now_iso: str, config: dict[str, CountryConfig],
     global_subscriptions: list[str], revisitable: set[str], exclude_slugs: set[str], *, limit: int = 10,
 ) -> tuple[str, list[str], dict[str, dict]]:
     """Highly-rated films you've already logged, minus your last few
     watches — not true watch-date recency (see fetch_watched_films), just
-    "not one of the ones you just watched"."""
+    "not one of the ones you just watched". Prefers your own personal
+    rating/like (from the RSS-fed diary — see main.py's --check-for-new-log
+    and --backfill-diary-ratings) over Letterboxd's community rating when
+    it's known: a film you personally loved is a better rewatch candidate
+    than one the crowd rated well but you were lukewarm on, and vice versa.
+    Falls back to the community rating for diary entries backfilled before
+    personal ratings were captured."""
     just_watched = {w["slug"] for w in recent_watches}
     candidates = [
         {**info, "slug": slug} for slug, info in diary.items()
-        if slug not in just_watched and slug not in exclude_slugs
-        and info.get("rating") is not None and info["rating"] >= 3.5
+        if slug not in just_watched and slug not in exclude_slugs and _rewatch_qualifies(info)
     ]
-    candidates.sort(key=lambda c: -c["rating"])
+    candidates.sort(key=_rewatch_sort_key)
     slugs, films = _enrich_resolved_candidates(candidates[:limit + 5], now_iso, config, global_subscriptions,
                                                 revisitable, exclude_slugs=exclude_slugs, limit=limit)
     return "Worth a rewatch", slugs, films

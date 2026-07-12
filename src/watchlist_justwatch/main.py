@@ -32,7 +32,8 @@ from .html_email import (
 from .justwatch_client import resolve_and_fetch
 from .letterboxd import (
     LetterboxdFetchError,
-    fetch_latest_diary_guid,
+    fetch_diary_ratings,
+    fetch_new_diary_entries,
     fetch_recent_watches,
     fetch_watched_films,
     fetch_watchlist,
@@ -350,6 +351,13 @@ def main() -> None:
                               "locally, since Letterboxd blocks /username/films/ (diary included) from "
                               "GitHub Actions' IP range. Written straight to the database; the daily run "
                               "keeps it current by merging in your last few watches each day.")
+    parser.add_argument("--backfill-diary-ratings", action="store_true",
+                         help="One-time backfill of personal_rating/is_rewatch/watched_date into "
+                              "state.diary from the dated diary pages (locally only, same IP block as "
+                              "--backfill-diary). The RSS feed only covers your last ~50 entries; this "
+                              "covers everything older. Doesn't include 'liked' — not reliably scrapable "
+                              "from the static diary page — only --check-for-new-log captures that, "
+                              "going forward.")
     parser.add_argument("--migrate-json-to-db", type=Path, metavar="STATE_JSON",
                          help="One-time import of a legacy data/state.json file into the database "
                               "at --database-url, then exit")
@@ -393,9 +401,19 @@ def main() -> None:
         if not args.username:
             parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
         state = load_state(args.database_url)
-        latest_guid = fetch_latest_diary_guid(args.username)
-        if latest_guid is not None and latest_guid != state.last_seen_diary_guid:
-            state.last_seen_diary_guid = latest_guid
+        new_entries = fetch_new_diary_entries(args.username, state.last_seen_diary_guid)
+        if new_entries:
+            # Newest first — entries[0] is the latest guid seen this check.
+            state.last_seen_diary_guid = new_entries[0]["guid"]
+            for entry in new_entries:
+                diary_entry = state.diary.setdefault(entry["slug"], {
+                    "title": entry["title"], "year": entry["year"], "rating": None,
+                    "poster_url": None, "director": None, "starring": [], "synopsis": None,
+                })
+                diary_entry["personal_rating"] = entry["personal_rating"]
+                diary_entry["liked"] = entry["liked"]
+                diary_entry["is_rewatch"] = entry["is_rewatch"]
+                diary_entry["watched_date"] = entry["watched_date"]
             save_state(args.database_url, state)
             print("new_log=true")
         else:
@@ -468,6 +486,22 @@ def main() -> None:
             time.sleep(0.2)
         save_state(args.database_url, state)
         print(f"Backfilled {added} new watched films (diary total: {len(state.diary)}), written to the database.")
+        sys.exit(0)
+
+    if args.backfill_diary_ratings:
+        if not args.username:
+            parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
+        state = load_state(args.database_url)
+        ratings_by_slug = fetch_diary_ratings(args.username)
+        updated = 0
+        for slug, fields in ratings_by_slug.items():
+            if slug not in state.diary:
+                continue
+            state.diary[slug].update(fields)
+            updated += 1
+        save_state(args.database_url, state)
+        print(f"Backfilled ratings for {updated}/{len(ratings_by_slug)} diary entries "
+              f"({len(ratings_by_slug) - updated} scraped but not already in state.diary, skipped).")
         sys.exit(0)
 
     if args.recommend_favorites:

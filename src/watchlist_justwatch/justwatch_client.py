@@ -77,6 +77,7 @@ def fetch_offers(entry_id: str, *, countries: frozenset[str] = ALL_JUSTWATCH_COU
                 package_clear_name=offer.package.name,
                 package_id=offer.package.package_id,
                 url=offer.url,
+                available_to=offer.available_to,
             ))
     return records
 

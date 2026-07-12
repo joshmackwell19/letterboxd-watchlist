@@ -25,6 +25,11 @@ class OfferRecord:
     package_clear_name: str
     package_id: int
     url: str
+    # Date (YYYY-MM-DD) this specific offer expires, when JustWatch knows
+    # one — usually only set for rentals/licensed windows, not open-ended
+    # subscription flatrate offers, so this is often None even for
+    # something you have. Powers the "leaving soon" home section.
+    available_to: str | None = None
 
     def diff_key(self) -> tuple[str, str, str]:
         return (self.country, self.package_technical_name, self.monetization_type)

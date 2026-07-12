@@ -574,15 +574,55 @@ _TEMPLATE = """<!DOCTYPE html>
   }
   .icon-btn:hover { color: var(--text); border-color: var(--text-muted); }
   .settings-block { margin-bottom: 22px; }
-  .settings-service-group { margin-bottom: 14px; }
-  .settings-service-group h4 { font-size: 12.5px; font-weight: 600; margin: 0 0 6px; color: var(--text-muted); }
-  .settings-textarea {
-    width: 100%; max-width: 420px; padding: 8px 12px; border: 1px solid var(--hairline-strong);
-    border-radius: 10px; font-size: 12.5px; background: var(--surface); color: var(--text);
-    outline: none; transition: border-color 0.15s; resize: vertical; font-family: inherit; line-height: 1.5;
+  .settings-service-group { margin-bottom: 18px; }
+  .settings-service-group > h4 {
+    font-size: 12.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-muted);
   }
-  .settings-textarea::placeholder { color: var(--text-faint); }
-  .settings-textarea:focus { border-color: var(--accent); }
+  .settings-country-group {
+    margin-bottom: 20px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--hairline);
+    border-radius: 12px;
+  }
+  .settings-country-name { font-size: 13.5px; font-weight: 600; margin: 0 0 12px; color: var(--text); }
+  .settings-subgroup { margin-bottom: 14px; }
+  .settings-subgroup:last-child { margin-bottom: 0; }
+  .settings-subgroup-label {
+    display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-faint); margin-bottom: 7px;
+  }
+  .service-pills { display: flex; flex-wrap: wrap; gap: 6px; min-height: 26px; margin-bottom: 8px; }
+  .service-pill {
+    display: inline-flex; align-items: center; gap: 5px; padding: 4px 6px 4px 12px; border-radius: 999px;
+    font-size: 12px; font-weight: 500; white-space: nowrap; animation: pill-in 0.12s ease-out;
+  }
+  @keyframes pill-in { from { opacity: 0; transform: scale(0.85); } to { opacity: 1; transform: scale(1); } }
+  .service-pill.pill-have { background: rgba(74, 222, 128, 0.14); color: #4ade80; }
+  .service-pill.pill-free { background: rgba(96, 165, 250, 0.14); color: #60a5fa; }
+  .service-pill-remove {
+    display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+    border-radius: 50%; cursor: pointer; opacity: 0.65; font-size: 11px; line-height: 1; flex-shrink: 0;
+  }
+  .service-pill-remove:hover { opacity: 1; background: rgba(255, 255, 255, 0.18); }
+  .service-add-wrap { position: relative; max-width: 300px; }
+  .service-add-input {
+    width: 100%; padding: 7px 12px; border: 1px dashed var(--hairline-strong); border-radius: 999px;
+    font-size: 12.5px; background: transparent; color: var(--text); outline: none; transition: border-color 0.15s;
+  }
+  .service-add-input::placeholder { color: var(--text-faint); }
+  .service-add-input:focus { border-color: var(--accent); border-style: solid; }
+  .service-suggestions {
+    position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+    background: var(--surface-2); border: 1px solid var(--hairline-strong); border-radius: 10px;
+    box-shadow: var(--shadow); max-height: 210px; overflow-y: auto; padding: 4px;
+  }
+  .service-suggestions.hidden { display: none; }
+  .service-suggestion { padding: 7px 10px; font-size: 12.5px; cursor: pointer; border-radius: 7px; }
+  .service-suggestion:hover, .service-suggestion.active { background: var(--hairline); }
+  .service-suggestion.add-new { color: var(--accent); }
+  #saveServices { transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s; }
+  #saveServices:disabled { opacity: 0.45; cursor: not-allowed; }
+  #saveServices.has-changes {
+    background: var(--accent); color: #06201d; border-color: var(--accent); font-weight: 600;
+  }
   .info-icon {
     position: relative; display: inline-flex; align-items: center; justify-content: center;
     color: var(--text-faint); cursor: pointer; font-size: 12.5px; margin-left: 4px;
@@ -859,10 +899,10 @@ _TEMPLATE = """<!DOCTYPE html>
   </div>
   <div class="settings-block">
     <h3 class="home-section-header">Services marked "have"</h3>
-    <p class="muted">One service per line. Global services count as "have" everywhere (via VPN); a country's own list only counts there.</p>
+    <p class="muted">Global services count as "have" everywhere (via VPN); a country's own list only counts there.</p>
     <div id="settingsServices"></div>
-    <div style="display:flex; gap:8px; flex-wrap:wrap; margin: 4px 0 10px;">
-      <button class="back-btn" id="saveServices" style="margin-bottom:0; color: var(--accent); border-color: var(--accent);">Save changes</button>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin: 4px 0 10px;">
+      <button class="back-btn" id="saveServices" disabled style="margin-bottom:0;">No changes to save</button>
     </div>
     <p class="muted" id="servicesSaveStatus"></p>
   </div>
@@ -1054,6 +1094,146 @@ document.getElementById('backToServices').addEventListener('click', () => showVi
 document.getElementById('settingsBtn').addEventListener('click', () => { renderSettings(); showView('settings'); });
 document.getElementById('backFromSettings').addEventListener('click', () => showView('home'));
 
+// Every brand this watchlist has ever seen on JustWatch — the "entire
+// domain" the settings-page autocomplete offers, since DATA.services
+// (already loaded for the By-service tab) already has one row per
+// (brand, country) pair.
+const ALL_KNOWN_SERVICES = [...new Set(DATA.services.map(r => r.brand))].sort((a, b) => a.localeCompare(b));
+
+let servicesBaseline = null;
+
+function currentServicesState() {
+  const global = [];
+  const countries = {};
+  document.querySelectorAll('.service-pills').forEach(el => {
+    const key = el.dataset.key;
+    const values = [...el.querySelectorAll('.service-pill')].map(p => p.dataset.value);
+    if (key === 'global') {
+      global.push(...values);
+      return;
+    }
+    const [, code, field] = key.split(':');
+    countries[code] = countries[code] || { subscriptions: [], free_tier: [] };
+    countries[code][field] = values;
+  });
+  return { global, countries };
+}
+
+function updateSaveButtonState() {
+  const btn = document.getElementById('saveServices');
+  const changed = JSON.stringify(currentServicesState()) !== servicesBaseline;
+  btn.disabled = !changed;
+  btn.classList.toggle('has-changes', changed);
+  btn.textContent = changed ? 'Save changes' : 'No changes to save';
+}
+
+function renderPills(container, values, pillClass) {
+  container.innerHTML = '';
+  values.forEach(value => {
+    const pill = document.createElement('span');
+    pill.className = 'service-pill pill-' + pillClass;
+    pill.dataset.value = value;
+    pill.innerHTML = esc(value) + ' <span class="service-pill-remove">✕</span>';
+    pill.querySelector('.service-pill-remove').addEventListener('click', () => {
+      pill.remove();
+      updateSaveButtonState();
+    });
+    container.appendChild(pill);
+  });
+}
+
+function addServicePill(container, value, pillClass) {
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  const values = [...container.querySelectorAll('.service-pill')].map(p => p.dataset.value);
+  if (values.some(v => v.toLowerCase() === trimmed.toLowerCase())) return;
+  values.push(trimmed);
+  renderPills(container, values, pillClass);
+  updateSaveButtonState();
+}
+
+function wireServiceAdd(wrap, pillsEl, pillClass) {
+  const input = wrap.querySelector('.service-add-input');
+  const suggestionsEl = wrap.querySelector('.service-suggestions');
+  let activeIndex = -1;
+
+  function selectValue(value) {
+    addServicePill(pillsEl, value, pillClass);
+    input.value = '';
+    suggestionsEl.classList.add('hidden');
+    input.focus();
+  }
+
+  function renderSuggestions() {
+    const query = input.value.trim().toLowerCase();
+    const existing = new Set([...pillsEl.querySelectorAll('.service-pill')].map(p => p.dataset.value.toLowerCase()));
+    const matches = query
+      ? ALL_KNOWN_SERVICES.filter(s => s.toLowerCase().includes(query) && !existing.has(s.toLowerCase())).slice(0, 8)
+      : [];
+    activeIndex = -1;
+    suggestionsEl.innerHTML = '';
+    matches.forEach(match => {
+      const div = document.createElement('div');
+      div.className = 'service-suggestion';
+      div.textContent = match;
+      div.dataset.value = match;
+      div.addEventListener('mousedown', event => { event.preventDefault(); selectValue(match); });
+      suggestionsEl.appendChild(div);
+    });
+    const trimmed = input.value.trim();
+    if (trimmed && !ALL_KNOWN_SERVICES.some(s => s.toLowerCase() === trimmed.toLowerCase())) {
+      const div = document.createElement('div');
+      div.className = 'service-suggestion add-new';
+      div.textContent = 'Add "' + trimmed + '"';
+      div.dataset.value = trimmed;
+      div.addEventListener('mousedown', event => { event.preventDefault(); selectValue(trimmed); });
+      suggestionsEl.appendChild(div);
+    }
+    suggestionsEl.classList.toggle('hidden', suggestionsEl.children.length === 0);
+  }
+
+  input.addEventListener('input', renderSuggestions);
+  input.addEventListener('focus', renderSuggestions);
+  input.addEventListener('blur', () => setTimeout(() => suggestionsEl.classList.add('hidden'), 120));
+  input.addEventListener('keydown', event => {
+    const items = [...suggestionsEl.querySelectorAll('.service-suggestion')];
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, items.length - 1);
+      items.forEach((item, i) => item.classList.toggle('active', i === activeIndex));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, 0);
+      items.forEach((item, i) => item.classList.toggle('active', i === activeIndex));
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (activeIndex >= 0 && items[activeIndex]) {
+        selectValue(items[activeIndex].dataset.value);
+      } else if (input.value.trim()) {
+        selectValue(input.value);
+      }
+    } else if (event.key === 'Escape') {
+      suggestionsEl.classList.add('hidden');
+    }
+  });
+}
+
+function buildServiceEditor(label, key, values, pillClass) {
+  const wrap = document.createElement('div');
+  wrap.innerHTML =
+    '<span class="settings-subgroup-label">' + esc(label) + '</span>' +
+    '<div class="service-pills" data-key="' + esc(key) + '"></div>' +
+    '<div class="service-add-wrap">' +
+      '<input type="text" class="service-add-input" placeholder="Add a service..." autocomplete="off">' +
+      '<div class="service-suggestions hidden"></div>' +
+    '</div>';
+  wrap.className = 'settings-subgroup';
+  const pillsEl = wrap.querySelector('.service-pills');
+  renderPills(pillsEl, values, pillClass);
+  wireServiceAdd(wrap.querySelector('.service-add-wrap'), pillsEl, pillClass);
+  return wrap;
+}
+
 function renderSettings() {
   document.getElementById('settingsAccount').innerHTML =
     '<a class="film-link" target="_blank" href="' + DATA.letterboxd_watchlist_url + '">' +
@@ -1063,37 +1243,33 @@ function renderSettings() {
   container.innerHTML = '';
   document.getElementById('servicesSaveStatus').textContent = '';
 
-  const makeGroup = (label, key, values) => {
-    const group = document.createElement('div');
-    group.className = 'settings-service-group';
-    group.innerHTML = '<h4>' + esc(label) + '</h4>' +
-      '<textarea class="settings-textarea" data-key="' + esc(key) + '" rows="3" ' +
-      'placeholder="One service per line">' + esc(values.join('\\n')) + '</textarea>';
-    container.appendChild(group);
-  };
+  const globalGroup = document.createElement('div');
+  globalGroup.className = 'settings-service-group';
+  const globalHeading = document.createElement('h4');
+  globalHeading.textContent = 'Global (any country via VPN)';
+  globalGroup.appendChild(globalHeading);
+  globalGroup.appendChild(buildServiceEditor('Subscriptions', 'global', DATA.settings.global_subscriptions, 'have'));
+  container.appendChild(globalGroup);
 
-  makeGroup('Global (any country via VPN)', 'global', DATA.settings.global_subscriptions);
   DATA.settings.countries.forEach(c => {
-    makeGroup(c.name + ' — subscriptions', 'country:' + c.code + ':subscriptions', c.subscriptions);
-    makeGroup(c.name + ' — free tier', 'country:' + c.code + ':free_tier', c.free_tier);
+    const group = document.createElement('div');
+    group.className = 'settings-country-group';
+    const heading = document.createElement('h4');
+    heading.className = 'settings-country-name';
+    heading.textContent = c.name;
+    group.appendChild(heading);
+    group.appendChild(buildServiceEditor('Subscriptions', 'country:' + c.code + ':subscriptions', c.subscriptions, 'have'));
+    group.appendChild(buildServiceEditor('Free tier', 'country:' + c.code + ':free_tier', c.free_tier, 'free'));
+    container.appendChild(group);
   });
+
+  servicesBaseline = JSON.stringify(currentServicesState());
+  updateSaveButtonState();
 }
 
 document.getElementById('saveServices').addEventListener('click', async () => {
   const status = document.getElementById('servicesSaveStatus');
-  const global = [];
-  const countries = {};
-  document.querySelectorAll('#settingsServices .settings-textarea').forEach(t => {
-    const lines = t.value.split('\\n').map(s => s.trim()).filter(Boolean);
-    const key = t.dataset.key;
-    if (key === 'global') {
-      global.push(...lines);
-      return;
-    }
-    const [, code, field] = key.split(':');
-    countries[code] = countries[code] || { subscriptions: [], free_tier: [] };
-    countries[code][field] = lines;
-  });
+  const payload = currentServicesState();
 
   status.textContent = 'Saving...';
   try {
@@ -1103,11 +1279,13 @@ document.getElementById('saveServices').addEventListener('click', async () => {
         'X-Trigger-Secret': DATA.settings.refresh_trigger_secret,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ global, countries }),
+      body: JSON.stringify(payload),
     });
     const body = await response.json().catch(() => null);
     if (response.ok && body && body.ok) {
       status.textContent = 'Saved — refreshing with the new config now, usually takes about 5 minutes.';
+      servicesBaseline = JSON.stringify(currentServicesState());
+      updateSaveButtonState();
     } else {
       const detail = body && body.error ? ': ' + body.error : '';
       status.textContent = 'Unexpected response (' + response.status + detail + ').';

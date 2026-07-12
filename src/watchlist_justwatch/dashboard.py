@@ -576,6 +576,13 @@ _TEMPLATE = """<!DOCTYPE html>
   .settings-block { margin-bottom: 22px; }
   .settings-service-group { margin-bottom: 14px; }
   .settings-service-group h4 { font-size: 12.5px; font-weight: 600; margin: 0 0 6px; color: var(--text-muted); }
+  .settings-textarea {
+    width: 100%; max-width: 420px; padding: 8px 12px; border: 1px solid var(--hairline-strong);
+    border-radius: 10px; font-size: 12.5px; background: var(--surface); color: var(--text);
+    outline: none; transition: border-color 0.15s; resize: vertical; font-family: inherit; line-height: 1.5;
+  }
+  .settings-textarea::placeholder { color: var(--text-faint); }
+  .settings-textarea:focus { border-color: var(--accent); }
   .info-icon {
     position: relative; display: inline-flex; align-items: center; justify-content: center;
     color: var(--text-faint); cursor: pointer; font-size: 12.5px; margin-left: 4px;
@@ -852,7 +859,12 @@ _TEMPLATE = """<!DOCTYPE html>
   </div>
   <div class="settings-block">
     <h3 class="home-section-header">Services marked "have"</h3>
+    <p class="muted">One service per line. Global services count as "have" everywhere (via VPN); a country's own list only counts there.</p>
     <div id="settingsServices"></div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin: 4px 0 10px;">
+      <button class="back-btn" id="saveServices" style="margin-bottom:0; color: var(--accent); border-color: var(--accent);">Save changes</button>
+    </div>
+    <p class="muted" id="servicesSaveStatus"></p>
   </div>
   <div class="settings-block">
     <h3 class="home-section-header">Refresh dashboard data</h3>
@@ -1049,25 +1061,61 @@ function renderSettings() {
 
   const container = document.getElementById('settingsServices');
   container.innerHTML = '';
+  document.getElementById('servicesSaveStatus').textContent = '';
 
-  const globalGroup = document.createElement('div');
-  globalGroup.className = 'settings-service-group';
-  globalGroup.innerHTML = '<h4>Global (any country via VPN)</h4>' +
-    (DATA.settings.global_subscriptions.length
-      ? DATA.settings.global_subscriptions.map(s => '<span class="badge badge-have">' + esc(s) + '</span>').join(' ')
-      : '<span class="muted">None configured</span>');
-  container.appendChild(globalGroup);
-
-  DATA.settings.countries.forEach(c => {
+  const makeGroup = (label, key, values) => {
     const group = document.createElement('div');
     group.className = 'settings-service-group';
-    const subs = c.subscriptions.map(s => '<span class="badge badge-have">' + esc(s) + '</span>').join(' ');
-    const free = c.free_tier.map(s => '<span class="badge badge-free">' + esc(s) + '</span>').join(' ');
-    group.innerHTML = '<h4>' + esc(c.name) + '</h4>' + subs + (subs && free ? ' ' : '') + free;
+    group.innerHTML = '<h4>' + esc(label) + '</h4>' +
+      '<textarea class="settings-textarea" data-key="' + esc(key) + '" rows="3" ' +
+      'placeholder="One service per line">' + esc(values.join('\\n')) + '</textarea>';
     container.appendChild(group);
+  };
+
+  makeGroup('Global (any country via VPN)', 'global', DATA.settings.global_subscriptions);
+  DATA.settings.countries.forEach(c => {
+    makeGroup(c.name + ' — subscriptions', 'country:' + c.code + ':subscriptions', c.subscriptions);
+    makeGroup(c.name + ' — free tier', 'country:' + c.code + ':free_tier', c.free_tier);
+  });
+}
+
+document.getElementById('saveServices').addEventListener('click', async () => {
+  const status = document.getElementById('servicesSaveStatus');
+  const global = [];
+  const countries = {};
+  document.querySelectorAll('#settingsServices .settings-textarea').forEach(t => {
+    const lines = t.value.split('\\n').map(s => s.trim()).filter(Boolean);
+    const key = t.dataset.key;
+    if (key === 'global') {
+      global.push(...lines);
+      return;
+    }
+    const [, code, field] = key.split(':');
+    countries[code] = countries[code] || { subscriptions: [], free_tier: [] };
+    countries[code][field] = lines;
   });
 
-}
+  status.textContent = 'Saving...';
+  try {
+    const response = await fetch(DATA.settings.refresh_worker_url + '/update-services', {
+      method: 'POST',
+      headers: {
+        'X-Trigger-Secret': DATA.settings.refresh_trigger_secret,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ global, countries }),
+    });
+    const body = await response.json().catch(() => null);
+    if (response.ok && body && body.ok) {
+      status.textContent = 'Saved — refreshing with the new config now, usually takes about 5 minutes.';
+    } else {
+      const detail = body && body.error ? ': ' + body.error : '';
+      status.textContent = 'Unexpected response (' + response.status + detail + ').';
+    }
+  } catch (error) {
+    status.textContent = 'Request failed: ' + error.message;
+  }
+});
 
 document.getElementById('triggerRefresh').addEventListener('click', async () => {
   const status = document.getElementById('refreshStatus');

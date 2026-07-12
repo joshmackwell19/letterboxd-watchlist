@@ -173,7 +173,6 @@ def _render_classified_section(heading: str, entries: list[ReportEntry]) -> str:
     for film, offers in _group_by_film(_dedupe_by_film_country(entries)):
         section += render_new_offer_card_html(film, offers, "Newly available:")
     return section
-    return f'<h3 style="font-size:15px;">{heading}</h3>{lines}'
 
 
 def render_film_audit_html(films: list, config: dict[str, CountryConfig], global_subscriptions: list[str],

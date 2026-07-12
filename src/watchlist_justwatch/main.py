@@ -243,22 +243,33 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
             current_state.films[film.slug] = previous_film
             continue
 
-        cached_entry_id, cached_confidence = get_cached_entry_id(previous_state, film.slug)
-        film_state = resolve_and_fetch(film, cached_entry_id, cached_confidence, now_iso=now_iso)
+        # A JustWatch/Letterboxd hiccup on one film shouldn't cost the whole
+        # day's refresh — carry forward its previous state (same as an
+        # unchecked-today film above) rather than let the exception escape
+        # and abandon every other film's already-completed work along with
+        # it (nothing gets saved until the end of this loop).
+        try:
+            cached_entry_id, cached_confidence = get_cached_entry_id(previous_state, film.slug)
+            film_state = resolve_and_fetch(film, cached_entry_id, cached_confidence, now_iso=now_iso)
 
-        if previous_film is not None and previous_film.poster_url is not None:
-            film_state.rating = previous_film.rating
-            film_state.poster_url = previous_film.poster_url
-            film_state.director = previous_film.director
-            film_state.starring = previous_film.starring
-            film_state.synopsis = previous_film.synopsis
-        else:
-            details = get_film_details_by_slug(film.slug)
-            film_state.rating = details["rating"]
-            film_state.poster_url = details["poster_url"]
-            film_state.director = details["director"]
-            film_state.starring = details["starring"]
-            film_state.synopsis = details["synopsis"]
+            if previous_film is not None and previous_film.poster_url is not None:
+                film_state.rating = previous_film.rating
+                film_state.poster_url = previous_film.poster_url
+                film_state.director = previous_film.director
+                film_state.starring = previous_film.starring
+                film_state.synopsis = previous_film.synopsis
+            else:
+                details = get_film_details_by_slug(film.slug)
+                film_state.rating = details["rating"]
+                film_state.poster_url = details["poster_url"]
+                film_state.director = details["director"]
+                film_state.starring = details["starring"]
+                film_state.synopsis = details["synopsis"]
+        except Exception as exc:
+            print(f"warning: failed to check {film.slug!r}, skipping it this run ({exc})", file=sys.stderr)
+            if previous_film is not None:
+                current_state.films[film.slug] = previous_film
+            continue
 
         current_state.films[film.slug] = film_state
 
@@ -287,6 +298,13 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
     report = build_report(previous_state, current_state, config)
     text = render_report(report, config, global_subscriptions, revisitable)
 
+    # Persist before emailing — everything the day's run actually computed
+    # (JustWatch refresh, discovery, diary) shouldn't be lost just because
+    # Resend is having an outage; the email is a nice-to-have on top.
+    save_state(database_url, current_state)
+    dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable)
+    DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
+
     if text:
         print(text)
         html_body = render_report_html(report, config, global_subscriptions, revisitable)
@@ -294,9 +312,6 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
     else:
         print("No new availability changes.")
 
-    save_state(database_url, current_state)
-    dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable)
-    DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
     return 0
 
 

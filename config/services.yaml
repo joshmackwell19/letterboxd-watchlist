@@ -5,6 +5,9 @@ global:
     - "Amazon Prime Video"
     - "MUBI"
     - "Disney Plus"
+    - "Tubi TV"
+    - "YouTube"
+    - "Kanopy"
 
 countries:
   AU:

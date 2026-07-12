@@ -48,31 +48,42 @@ def _classify(brand: str, country: str, monetization_types: set[str], config: di
     return "free"
 
 
+_MONETIZATION_PRIORITY = {"FLATRATE": 0, "FREE": 1, "ADS": 2}
+
+
 def _all_offers_for_film(
     film, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
 ) -> list[dict]:
     """Every (brand, country) this film has a qualifying offer for, each
     classified — the single source of truth other views bucket/filter.
 
-    available_to (soonest expiry seen for that brand/country, if any) rides
-    along here rather than needing a second pass over film.offers later —
+    available_to (soonest expiry seen for that brand/country, if any) and
+    url (a deep link to actually watch it there) both ride along here
+    rather than needing a second pass over film.offers later —
     group_offers_by_brand_and_country only tracks monetization types, so
-    this is the one place with access to the raw per-offer dates."""
+    this is the one place with access to the raw per-offer dates/urls. When
+    a (brand, country) has multiple qualifying offers (e.g. a free ad tier
+    and a full subscription), the url from the most-watchable one wins."""
     soonest_expiry: dict[tuple[str, str], str] = {}
+    best_url: dict[tuple[str, str], tuple[int, str]] = {}
     for offer in film.offers:
-        if not offer.available_to:
-            continue
         key = (canonical_brand_name(offer.package_clear_name), offer.country)
-        if key not in soonest_expiry or offer.available_to < soonest_expiry[key]:
+        if offer.available_to and (key not in soonest_expiry or offer.available_to < soonest_expiry[key]):
             soonest_expiry[key] = offer.available_to
+        rank = _MONETIZATION_PRIORITY.get(offer.monetization_type, 9)
+        if offer.url and (key not in best_url or rank < best_url[key][0]):
+            best_url[key] = (rank, offer.url)
 
     result = []
     for brand, by_country in group_offers_by_brand_and_country(film.offers).items():
         for country, monetization_types in by_country.items():
             classification = _classify(brand, country, monetization_types, config, global_subscriptions, revisitable)
+            key = (brand, country)
+            url_entry = best_url.get(key)
             result.append({
                 "brand": brand, "country": country, "classification": classification,
-                "available_to": soonest_expiry.get((brand, country)),
+                "available_to": soonest_expiry.get(key),
+                "url": url_entry[1] if url_entry else None,
             })
     return result
 
@@ -686,6 +697,11 @@ _TEMPLATE = """<!DOCTYPE html>
     background: none; border: 1px solid var(--hairline-strong); color: var(--text-muted);
   }
   .badge-more-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  a.badge-link { text-decoration: none; transition: filter 0.15s; }
+  a.badge-link:hover { filter: brightness(1.35); }
+  .watch-now-btn {
+    font-size: 13px; font-weight: 600; padding: 7px 16px; margin: 6px 0 2px;
+  }
   .filter-toggle { cursor: pointer; border: 1.5px solid transparent; transition: opacity 0.15s; }
   .filter-toggle.off { opacity: 0.3; }
   .quick-country {
@@ -712,6 +728,12 @@ _TEMPLATE = """<!DOCTYPE html>
     border-radius: 999px; cursor: pointer; font-size: 12.5px; margin-bottom: 16px;
   }
   .back-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  .surprise-bar { margin-bottom: 18px; }
+  .surprise-btn {
+    background: none; border: 1.5px solid var(--accent); color: var(--accent); padding: 9px 18px;
+    border-radius: 999px; cursor: pointer; font-size: 13.5px; font-weight: 600;
+  }
+  .surprise-btn:hover { background: var(--accent); color: var(--bg); }
   .detail-title { font-size: 17px; font-weight: 600; margin: 0 0 16px; }
   .detail-title i { color: var(--text-faint); font-style: italic; font-weight: 400; }
   .detail-card {
@@ -836,6 +858,9 @@ _TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <section class="view active" id="view-home">
+  <div class="surprise-bar">
+    <button class="surprise-btn" id="surpriseMeBtn">🎲 Surprise me</button>
+  </div>
   <div id="homeSections">
     <div class="film-cards">
       <div class="skeleton-card"></div>
@@ -986,6 +1011,10 @@ const TABS = ['home', 'country', 'services', 'films'];
 function esc(text) {
   if (text == null) return '';
   return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escAttr(text) {
+  return esc(text).replace(/"/g, '&quot;');
 }
 
 function formatLastChecked(iso) {
@@ -1427,6 +1456,31 @@ document.getElementById('homeSections').addEventListener('click', event => {
   if (card) openQuickLook(card.dataset.slug);
 });
 
+// Decision paralysis, not lack of options, is the actual problem with 354
+// films — pick one at random from a "good enough right now" pool rather
+// than showing yet another ranked list. Prefers films you actually have on
+// a service, rated 3.5+; widens the pool only if that's empty so it can
+// never come up blank.
+const SURPRISE_RATING_FLOOR = 3.5;
+
+function surprisePool() {
+  const rated = r => r.rating != null && r.rating >= SURPRISE_RATING_FLOOR;
+  let pool = DATA.films.filter(r => r.have_service && rated(r));
+  if (!pool.length) pool = DATA.films.filter(r => r.have_service);
+  if (!pool.length) pool = DATA.films.filter(r => r.any_service && rated(r));
+  if (!pool.length) pool = DATA.films.filter(r => r.any_service);
+  if (!pool.length) pool = DATA.films;
+  return pool;
+}
+
+document.getElementById('surpriseMeBtn').addEventListener('click', () => {
+  const pool = surprisePool();
+  if (!pool.length) return;
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  showView('home');
+  openQuickLook(pick.slug);
+});
+
 // ---------- Film detail card (shared: quick look + service detail) ----------
 
 function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
@@ -1442,12 +1496,30 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
   const synopsis = film.synopsis ? '<p class="detail-synopsis">' + esc(film.synopsis) + '</p>' : '';
 
+  // Offers a real JustWatch url turn into an actual link (badge-link) that
+  // opens straight into the streaming service — otherwise it's just a
+  // static label, same as before.
+  function offerBadgeHtml(o, extraClass) {
+    const label = esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i>';
+    const cls = 'badge badge-' + o.classification + (extraClass ? ' ' + extraClass : '');
+    if (!o.url) return '<span class="' + cls + '">' + label + '</span>';
+    return '<a class="' + cls + ' badge-link" href="' + escAttr(o.url) +
+      '" target="_blank" rel="noopener">' + label + ' ↗</a>';
+  }
+
+  const primaryOffer = excludeBrand
+    ? film.all_offers.find(o => o.brand === excludeBrand && o.country === excludeCountry)
+    : null;
+  const primaryHtml = (primaryOffer && primaryOffer.url)
+    ? '<p class="detail-meta">' + offerBadgeHtml(primaryOffer, 'watch-now-btn') + '</p>'
+    : '';
+
   const others = film.all_offers
     .filter(o => !(o.brand === excludeBrand && o.country === excludeCountry))
     .slice()
     .sort((a, b) => CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification]);
   const otherHtml = others.length
-    ? capBadges(others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i></span>'), BADGE_CAP)
+    ? capBadges(others.map(offerBadgeHtml), BADGE_CAP)
     : '<span class="muted">Not available anywhere else tracked</span>';
 
   // Computed against the viewer's own clock (not baked in at generation
@@ -1472,7 +1544,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     '<div class="detail-body">' +
       '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
       '<p class="detail-rating">' + rating + '</p>' +
-      director + starring + synopsis +
+      director + starring + synopsis + primaryHtml +
       '<div class="other-services-section">' +
         '<p class="detail-meta"><strong>' + otherLabel + '</strong></p>' +
         '<div class="badge-wrap">' + otherHtml + '</div>' +
@@ -1483,7 +1555,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
   if (collapsible) {
     div.classList.add('collapsible');
     div.addEventListener('click', event => {
-      if (event.target.closest('a.film-link')) return;
+      if (event.target.closest('a.film-link') || event.target.closest('a.badge-link')) return;
       div.classList.toggle('expanded');
     });
   }

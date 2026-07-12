@@ -1,4 +1,5 @@
 import os
+from itertools import zip_longest
 
 import requests
 
@@ -42,9 +43,14 @@ def similar_and_recommended(tmdb_id: int, *, limit: int = 15) -> list[dict]:
     seen: set[int] = set()
     merged: list[dict] = []
     # Interleave so recommendations (behavior-based) and similar (content-based)
-    # both get a fair shot rather than one list dominating the cap.
-    for a, b in zip(recommended, similar):
+    # both get a fair shot rather than one list dominating the cap. zip_longest
+    # (not zip) so a short list — these two endpoints often return very
+    # different counts — doesn't silently cap the whole merge to its length
+    # once the shorter list runs out, the longer one keeps contributing.
+    for a, b in zip_longest(recommended, similar):
         for movie in (a, b):
+            if movie is None:
+                continue
             if movie["id"] not in seen:
                 seen.add(movie["id"])
                 merged.append(movie)

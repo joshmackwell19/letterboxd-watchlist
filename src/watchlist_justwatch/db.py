@@ -51,6 +51,7 @@ def _offer_to_dict(offer: OfferRecord) -> dict:
         "package_clear_name": offer.package_clear_name,
         "package_id": offer.package_id,
         "url": offer.url,
+        "available_to": offer.available_to,
     }
 
 
@@ -62,6 +63,7 @@ def _offer_from_dict(data: dict) -> OfferRecord:
         package_clear_name=data["package_clear_name"],
         package_id=data["package_id"],
         url=data["url"],
+        available_to=data.get("available_to"),
     )
 
 

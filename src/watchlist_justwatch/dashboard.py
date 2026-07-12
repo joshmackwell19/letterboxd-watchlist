@@ -1,8 +1,9 @@
 import html
 import json
 from collections import defaultdict
+from datetime import date
 
-from .brands import group_offers_by_brand_and_country, is_major_brand
+from .brands import canonical_brand_name, group_offers_by_brand_and_country, is_major_brand
 from .config import CountryConfig, is_have_anywhere
 from .countries import country_name
 from .state import StateDoc
@@ -51,12 +52,28 @@ def _all_offers_for_film(
     film, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
 ) -> list[dict]:
     """Every (brand, country) this film has a qualifying offer for, each
-    classified — the single source of truth other views bucket/filter."""
+    classified — the single source of truth other views bucket/filter.
+
+    available_to (soonest expiry seen for that brand/country, if any) rides
+    along here rather than needing a second pass over film.offers later —
+    group_offers_by_brand_and_country only tracks monetization types, so
+    this is the one place with access to the raw per-offer dates."""
+    soonest_expiry: dict[tuple[str, str], str] = {}
+    for offer in film.offers:
+        if not offer.available_to:
+            continue
+        key = (canonical_brand_name(offer.package_clear_name), offer.country)
+        if key not in soonest_expiry or offer.available_to < soonest_expiry[key]:
+            soonest_expiry[key] = offer.available_to
+
     result = []
     for brand, by_country in group_offers_by_brand_and_country(film.offers).items():
         for country, monetization_types in by_country.items():
             classification = _classify(brand, country, monetization_types, config, global_subscriptions, revisitable)
-            result.append({"brand": brand, "country": country, "classification": classification})
+            result.append({
+                "brand": brand, "country": country, "classification": classification,
+                "available_to": soonest_expiry.get((brand, country)),
+            })
     return result
 
 
@@ -333,6 +350,50 @@ def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12)
     }
 
 
+LEAVING_SOON_WINDOW_DAYS = 30
+
+
+def _leaving_soon_section(state: StateDoc, films_all_offers: dict[str, list[dict]], exclude: set[str],
+                           limit: int = RECOMMENDED_COUNT) -> dict:
+    """Films with a have/free offer that actually expires within the window
+    — most offers have no available_to at all (open-ended subscription
+    flatrate), so this is inherently small/occasional, not a guaranteed
+    everyday section. Only have/free count: losing a could_get_again offer
+    isn't "you're about to lose access", since you don't currently have it
+    via that route anyway."""
+    today = date.today()
+    candidates = []  # (days_left, slug, brand, country)
+
+    for slug, offers in films_all_offers.items():
+        if slug in exclude:
+            continue
+        soonest = None
+        for offer in offers:
+            if offer["classification"] not in ("have", "free") or not offer["available_to"]:
+                continue
+            try:
+                days_left = (date.fromisoformat(offer["available_to"]) - today).days
+            except ValueError:
+                continue
+            if days_left < 0 or days_left > LEAVING_SOON_WINDOW_DAYS:
+                continue
+            if soonest is None or days_left < soonest[0]:
+                soonest = (days_left, offer["brand"], offer["country"])
+        if soonest is not None:
+            candidates.append((soonest[0], slug, soonest[1], soonest[2]))
+
+    candidates.sort(key=lambda c: c[0])
+
+    films = []
+    for days_left, slug, brand, country in candidates[:limit]:
+        when = "today" if days_left == 0 else "tomorrow" if days_left == 1 else f"in {days_left} days"
+        card = _mini_card(state.films[slug])
+        card["leaving_note"] = f"Leaving {brand} ({country_name(country)}) {when}"
+        films.append(card)
+
+    return {"key": "leaving_soon", "header": "Leaving soon", "films": films}
+
+
 def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
                           films_by_slug: dict[str, dict]) -> list[dict]:
     lookup = {**films_by_slug, **state.discovery_films}
@@ -344,8 +405,11 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
             sections.append(section)
             used.update(f["slug"] for f in section["films"])
 
-    # Recent service additions first — the most immediately actionable
-    # ("this is now watchable") signal on the page.
+    # Leaving soon leads — losing access to something you already know you
+    # want is a bigger deal than a delayed discovery, so it outranks even
+    # recently-added. Recent service additions next — the most immediately
+    # actionable ("this is now watchable") signal after that.
+    add(_leaving_soon_section(state, films_all_offers, used))
     add(_recently_added_section(state, used))
 
     # Recommended-from-recent-watches and top-rated next — general
@@ -614,6 +678,9 @@ _TEMPLATE = """<!DOCTYPE html>
   .detail-meta strong { color: var(--text); font-weight: 600; }
   .detail-synopsis { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin: 4px 0 8px; }
   .badge-wrap { display: flex; flex-wrap: wrap; gap: 2px; }
+  .expiring-notes { margin-top: 8px; }
+  .expiring-note { font-size: 11.5px; color: #fbbf24; font-weight: 500; margin: 0 0 3px; }
+  .expiring-note i { color: #fbbf24; font-style: italic; opacity: 0.85; }
   .muted { color: var(--text-faint); font-size: 12px; }
   .detail-card.collapsible { cursor: pointer; }
   .detail-card.collapsible .other-services-section { display: none; }
@@ -653,6 +720,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-card-rating { font-size: 12px; color: #4ade80; font-weight: 600; white-space: nowrap; }
   .film-card-director { font-size: 11.5px; color: var(--text-muted); }
   .film-card-added-service { font-size: 11px; color: var(--accent); font-weight: 500; margin-top: 2px; }
+  .film-card-leaving-note { font-size: 11px; color: #fbbf24; font-weight: 500; margin-top: 2px; }
   .service-group { margin-top: 7px; }
   .service-group-name {
     font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
@@ -894,6 +962,18 @@ const CLASSIFICATION_PRIORITY = { have: 0, free: 1, could_get_again: 2, subscrip
 const CLASSIFICATIONS = ['have', 'free', 'could_get_again', 'subscription'];
 const CLASSIFICATION_LABELS = { have: 'have', could_get_again: 'could get again', free: 'free', subscription: 'subscription needed' };
 
+// Matches LEAVING_SOON_WINDOW_DAYS in dashboard.py — quick-look computes its
+// own countdown against the viewer's clock rather than reusing the home
+// section's server-baked one, so it stays accurate even days after the
+// last refresh.
+const LEAVING_SOON_WINDOW_DAYS = 30;
+function daysUntil(dateStr) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(dateStr + 'T00:00:00');
+  return Math.round((target - today) / 86400000);
+}
+
 // Shared pill-toggle filter row (Country and Services tabs) for the four
 // have/could_get_again/free/subscription classifications.
 function renderClassificationToggles(containerId, filterState, onChange) {
@@ -1039,6 +1119,8 @@ function filmCardShell(row, servicesHtml) {
   const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
   const addedService = row.added_service
     ? '<div class="film-card-added-service">Added to ' + esc(row.added_service) + '</div>' : '';
+  const leavingNote = row.leaving_note
+    ? '<div class="film-card-leaving-note">' + esc(row.leaving_note) + '</div>' : '';
   const div = document.createElement('div');
   div.className = 'film-card';
   div.dataset.slug = row.slug;
@@ -1049,7 +1131,7 @@ function filmCardShell(row, servicesHtml) {
           esc(row.title) + year + '</a>' +
         '<span class="film-card-rating">' + rating + '</span>' +
       '</div>' +
-      director + addedService + servicesHtml +
+      director + addedService + leavingNote + servicesHtml +
     '</div>';
   return div;
 }
@@ -1142,6 +1224,22 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     ? capBadges(others.map(o => '<span class="badge badge-' + o.classification + '">' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i></span>'), BADGE_CAP)
     : '<span class="muted">Not available anywhere else tracked</span>';
 
+  // Computed against the viewer's own clock (not baked in at generation
+  // time) so the countdown is still accurate days after the last refresh.
+  // have/free only — losing a could_get_again offer isn't "you're about to
+  // lose access", since you don't currently have it via that route anyway.
+  const expiring = film.all_offers
+    .filter(o => (o.classification === 'have' || o.classification === 'free') && o.available_to)
+    .map(o => ({ ...o, daysLeft: daysUntil(o.available_to) }))
+    .filter(o => o.daysLeft >= 0 && o.daysLeft <= LEAVING_SOON_WINDOW_DAYS)
+    .sort((a, b) => a.daysLeft - b.daysLeft);
+  const expiringHtml = expiring.length
+    ? '<div class="expiring-notes">' + expiring.map(o => {
+        const when = o.daysLeft === 0 ? 'today' : o.daysLeft === 1 ? 'tomorrow' : 'in ' + o.daysLeft + ' days';
+        return '<p class="expiring-note">Leaving ' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i> ' + when + '</p>';
+      }).join('') + '</div>'
+    : '';
+
   const otherLabel = excludeBrand ? 'Other services' : 'Where to watch';
   div.innerHTML =
     '<div style="flex-shrink:0;">' + poster + '</div>' +
@@ -1152,6 +1250,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
       '<div class="other-services-section">' +
         '<p class="detail-meta"><strong>' + otherLabel + '</strong></p>' +
         '<div class="badge-wrap">' + otherHtml + '</div>' +
+        expiringHtml +
       '</div>' +
     '</div>';
 

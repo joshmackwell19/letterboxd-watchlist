@@ -579,7 +579,22 @@ _TEMPLATE = """<!DOCTYPE html>
     opacity: 0; transition: opacity 0.15s ease;
   }
   .ptr-indicator.visible { opacity: 1; }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  .app-bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 25;
+    background: var(--bg); border-bottom: 1px solid var(--hairline);
+    padding: 0 32px;
+  }
+  .app-bar-top {
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    padding: calc(14px + env(safe-area-inset-top)) 0 12px; flex-wrap: wrap;
+  }
+  /* The title/film-count text traded away its spot for the nav+filters bar
+     it used to sit above — still rendered (and still what mobile shows,
+     where there's no sticky-bar problem to solve), just not on desktop. */
+  .app-bar-title { display: none; }
+  .app-bar-controls { padding: 0 0 12px; }
+  .app-bar-controls.empty { display: none; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
   h1 { font-size: 20px; font-weight: 600; margin: 0 0 3px; letter-spacing: -0.01em; }
   .meta { color: var(--text-muted); font-size: 12.5px; }
   .watchlist-link {
@@ -655,11 +670,7 @@ _TEMPLATE = """<!DOCTYPE html>
     white-space: nowrap; box-shadow: var(--shadow); border: 1px solid var(--hairline-strong); z-index: 10;
   }
   .info-icon:hover .info-tooltip, .info-icon.open .info-tooltip { display: block; }
-  .tabs {
-    display: flex; gap: 6px; margin-bottom: 16px;
-    position: sticky; top: 0; z-index: 15; background: var(--bg);
-    padding: 10px 0; border-bottom: 1px solid var(--hairline);
-  }
+  .tabs { display: flex; gap: 6px; }
   .tab-btn {
     display: inline-flex; align-items: center; gap: 7px;
     padding: 7px 15px 7px 12px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
@@ -668,7 +679,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .tab-btn svg { width: 16px; height: 16px; stroke: currentColor; flex-shrink: 0; }
   .tab-btn:hover { background: var(--hairline); }
   .tab-btn.active { background: var(--text); color: var(--bg); }
-  .controls { display: flex; gap: 9px; align-items: center; margin-bottom: 11px; flex-wrap: wrap; font-size: 12.5px; }
+  .controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
   .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
   .quick-filters .hint { color: var(--text-faint); font-size: 11.5px; margin-right: 2px; }
   input[type=text] {
@@ -757,6 +768,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .detail-rating { font-size: 12.5px; color: #4ade80; font-weight: 600; margin: 0 0 6px; }
   .detail-meta { font-size: 12px; color: var(--text-muted); margin: 0 0 5px; }
   .detail-meta strong { color: var(--text); font-weight: 600; }
+  .detail-genre { color: #c98a7d; }
   .detail-synopsis { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin: 4px 0 8px; }
   .badge-wrap { display: flex; flex-wrap: wrap; gap: 2px; }
   .expiring-notes { margin-top: 8px; }
@@ -822,7 +834,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-card-title { font-weight: 600; font-size: 13.5px; }
   .film-card-rating { font-size: 12px; color: #4ade80; font-weight: 600; white-space: nowrap; }
   .film-card-director { font-size: 11.5px; color: var(--text-muted); }
-  .film-card-genre { font-size: 11px; color: var(--text-faint); }
+  .film-card-genre { font-size: 11px; color: #c98a7d; }
   .film-card-added-service { font-size: 11px; color: var(--accent); font-weight: 500; margin-top: 2px; }
   .film-card-leaving-note { font-size: 11px; color: #fbbf24; font-weight: 500; margin-top: 2px; }
   .service-group { margin-top: 7px; }
@@ -845,6 +857,14 @@ _TEMPLATE = """<!DOCTYPE html>
   @media (max-width: 700px) {
     body { padding: calc(16px + env(safe-area-inset-top)) 12px 16px; }
     h1 { font-size: 17px; }
+    /* The fixed/icon-nav treatment is a desktop-only fix (that's the only
+       place the sticky bar was disappearing on scroll) — mobile already has
+       its own always-visible fixed bottom-nav, so the top bar just goes back
+       to being normal in-flow content here, same as before that change. */
+    .app-bar { position: static; padding: 0; border-bottom: none; }
+    .app-bar-top { padding: 0; margin-bottom: 18px; }
+    .app-bar-title { display: block; }
+    .app-bar-controls { padding: 0; margin-bottom: 11px; }
     .tabs { display: none; }
     .controls { gap: 7px; }
     /* iOS Safari zooms the whole page in on focus of any input/select whose
@@ -874,54 +894,100 @@ _TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <div class="status-bar-fill"></div>
-<div class="header">
-  <div>
-    <h1>Watchlist streaming dashboard</h1>
-    <div class="meta" id="meta"></div>
+<div class="app-bar" id="appBar">
+  <div class="app-bar-top">
+    <div class="app-bar-title">
+      <h1>Watchlist streaming dashboard</h1>
+      <div class="meta" id="meta"></div>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn active" id="tab-home">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path>
+        </svg>
+        Home<span class="new-badge home-new-badge hidden"></span>
+      </button>
+      <button class="tab-btn" id="tab-country">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
+        </svg>
+        By VPN country
+      </button>
+      <button class="tab-btn" id="tab-services">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
+          <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"></path>
+          <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path>
+        </svg>
+        By service
+      </button>
+      <button class="tab-btn" id="tab-films">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+          <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+          <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+          <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+        </svg>
+        By film
+      </button>
+    </div>
+    <div class="header-actions">
+      <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
+      <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
+    </div>
   </div>
-  <div class="header-actions">
-    <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
-    <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
+  <div class="app-bar-controls" id="appBarControls">
+    <div class="surprise-bar" data-view="home" id="controls-home">
+      <button class="surprise-btn" id="surpriseMeBtn">🎲 Surprise me</button>
+    </div>
+    <div class="controls" data-view="country" id="controls-country">
+      <select id="countrySelect"></select>
+      <select id="countryServiceSelect"></select>
+      <div class="search-wrap">
+        <input type="text" id="countryFilmSearch" placeholder="Search title, year, director, cast...">
+        <span class="search-clear hidden" id="countryFilmSearchClear">✕</span>
+      </div>
+      <select id="countrySortSelect">
+        <option value="rating">Sort: Rating (highest)</option>
+        <option value="title">Sort: Title (A–Z)</option>
+        <option value="year">Sort: Year (newest)</option>
+      </select>
+      <span id="countryFilterToggles"></span>
+    </div>
+    <div class="controls" data-view="services" id="controls-services">
+      <select id="serviceSelect"></select>
+      <select id="serviceCountrySelect"></select>
+      <div class="search-wrap">
+        <input type="text" id="serviceFilmSearch" placeholder="Search title, year, director, cast...">
+        <span class="search-clear hidden" id="serviceFilmSearchClear">✕</span>
+      </div>
+      <select id="servicesSortSelect">
+        <option value="film_count">Sort: # films (most)</option>
+        <option value="brand">Sort: Service (A–Z)</option>
+        <option value="unique_film_count">Sort: # unique (most)</option>
+      </select>
+      <span id="serviceFilterToggles"></span>
+    </div>
+    <div class="controls" data-view="films" id="controls-films">
+      <div class="search-wrap">
+        <input type="text" id="search" placeholder="Search title, year, director, cast...">
+        <span class="search-clear hidden" id="searchClear">✕</span>
+      </div>
+      <select id="filmsCountrySelect"></select>
+      <select id="filmsGenreSelect"></select>
+      <select id="filmsSortSelect">
+        <option value="title">Sort: Title (A–Z)</option>
+        <option value="year">Sort: Year (newest)</option>
+        <option value="rating">Sort: Rating (highest)</option>
+        <option value="coverage_countries">Sort: Most countries</option>
+      </select>
+      <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
+    </div>
   </div>
-</div>
-
-<div class="tabs">
-  <button class="tab-btn active" id="tab-home">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path>
-    </svg>
-    Home<span class="new-badge home-new-badge hidden"></span>
-  </button>
-  <button class="tab-btn" id="tab-country">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="9"></circle>
-      <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
-    </svg>
-    By VPN country
-  </button>
-  <button class="tab-btn" id="tab-services">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
-      <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"></path>
-      <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path>
-    </svg>
-    By service
-  </button>
-  <button class="tab-btn" id="tab-films">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
-      <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
-      <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
-      <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
-    </svg>
-    By film
-  </button>
 </div>
 
 <section class="view active" id="view-home">
-  <div class="surprise-bar">
-    <button class="surprise-btn" id="surpriseMeBtn">🎲 Surprise me</button>
-  </div>
   <div id="homeSections">
     <div class="film-cards">
       <div class="skeleton-card"></div>
@@ -933,39 +999,11 @@ _TEMPLATE = """<!DOCTYPE html>
 </section>
 
 <section class="view" id="view-country">
-  <div class="controls">
-    <select id="countrySelect"></select>
-    <select id="countryServiceSelect"></select>
-    <div class="search-wrap">
-      <input type="text" id="countryFilmSearch" placeholder="Search title, year, director, cast...">
-      <span class="search-clear hidden" id="countryFilmSearchClear">✕</span>
-    </div>
-    <select id="countrySortSelect">
-      <option value="rating">Sort: Rating (highest)</option>
-      <option value="title">Sort: Title (A–Z)</option>
-      <option value="year">Sort: Year (newest)</option>
-    </select>
-    <span id="countryFilterToggles"></span>
-  </div>
   <div class="active-filters" id="activeCountryFilters"></div>
   <div id="countryGrid" class="film-cards"></div>
 </section>
 
 <section class="view" id="view-services">
-  <div class="controls">
-    <select id="serviceSelect"></select>
-    <select id="serviceCountrySelect"></select>
-    <div class="search-wrap">
-      <input type="text" id="serviceFilmSearch" placeholder="Search title, year, director, cast...">
-      <span class="search-clear hidden" id="serviceFilmSearchClear">✕</span>
-    </div>
-    <select id="servicesSortSelect">
-      <option value="film_count">Sort: # films (most)</option>
-      <option value="brand">Sort: Service (A–Z)</option>
-      <option value="unique_film_count">Sort: # unique (most)</option>
-    </select>
-    <span id="serviceFilterToggles"></span>
-  </div>
   <div class="active-filters" id="activeServiceFilters"></div>
   <div id="servicesGrid" class="service-cards"></div>
 </section>
@@ -1007,21 +1045,6 @@ _TEMPLATE = """<!DOCTYPE html>
 </section>
 
 <section class="view" id="view-films">
-  <div class="controls">
-    <div class="search-wrap">
-      <input type="text" id="search" placeholder="Search title, year, director, cast...">
-      <span class="search-clear hidden" id="searchClear">✕</span>
-    </div>
-    <select id="filmsCountrySelect"></select>
-    <select id="filmsGenreSelect"></select>
-    <select id="filmsSortSelect">
-      <option value="title">Sort: Title (A–Z)</option>
-      <option value="year">Sort: Year (newest)</option>
-      <option value="rating">Sort: Rating (highest)</option>
-      <option value="coverage_countries">Sort: Most countries</option>
-    </select>
-    <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
-  </div>
   <div class="active-filters" id="activeFilmFilters"></div>
   <div id="filmsGrid" class="film-cards"></div>
 </section>
@@ -1418,10 +1441,25 @@ function showView(name) {
     document.getElementById('tab-' + n).classList.toggle('active', isActive);
     document.getElementById('nav-' + n).classList.toggle('active', isActive);
   });
+
+  // The fixed bar's second row holds each tab's own search/sort/filter
+  // controls (moved up out of the scrolling content so they never scroll
+  // out of reach) — exactly one is shown at a time, matched strictly by
+  // view name. service-detail/settings have no controls of their own (they
+  // never did — service-detail is a drill-down with just a back button), so
+  // the whole row collapses away rather than showing a stale/wrong one.
+  const controlsSlot = document.getElementById('appBarControls');
+  const matchingControls = controlsSlot.querySelector('[data-view="' + name + '"]');
+  controlsSlot.querySelectorAll('[data-view]').forEach(el => {
+    el.style.display = (el === matchingControls) ? '' : 'none';
+  });
+  controlsSlot.classList.toggle('empty', !matchingControls);
+
   // All tabs share one page-level scroll (only one section is visible at a
   // time), so switching tabs without resetting scroll left whatever the
   // previous tab was scrolled to still in effect on the new one.
   window.scrollTo(0, 0);
+  updateAppBarOffset();
 }
 
 // Shared tile-card shell for the Films and Country tabs — poster + title/year/
@@ -1622,7 +1660,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
   const starring = (film.starring && film.starring.length)
     ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
   const genreLine = (film.genre && film.genre.length)
-    ? '<p class="detail-meta"><strong>Genre:</strong> ' + esc(film.genre.join(', ')) + '</p>' : '';
+    ? '<p class="detail-meta detail-genre"><strong>Genre:</strong> ' + esc(film.genre.join(', ')) + '</p>' : '';
   const synopsis = film.synopsis ? '<p class="detail-synopsis">' + esc(film.synopsis) + '</p>' : '';
 
   // Offers a real JustWatch url turn into an actual link (badge-link) that
@@ -2342,8 +2380,30 @@ renderCountryRows();
 DATA.countryNames = {};
 DATA.countries.forEach(c => { DATA.countryNames[c.code] = c.name; });
 
+// Desktop: the fixed bar needs the page content pushed down by exactly its
+// own height (which varies — each tab's controls row is a different
+// height) — measured directly rather than guessed, so it's correct at any
+// width/font-scale, and recomputed on resize since text can wrap
+// differently at different widths. Mobile reverts to a plain in-flow bar
+// (see the max-width:700px CSS), so no inline override should linger there.
+function updateAppBarOffset() {
+  const isDesktop = window.matchMedia('(min-width: 701px)').matches;
+  if (!isDesktop) {
+    document.body.style.paddingTop = '';
+    return;
+  }
+  const barHeight = document.getElementById('appBar').offsetHeight;
+  document.body.style.paddingTop = (barHeight + 20) + 'px';
+}
+window.addEventListener('resize', updateAppBarOffset);
+
 renderHome();
 renderFilms();
+// The static HTML has all four controls blocks visible at once (no JS has
+// run yet to hide the non-active ones) — showView('home') both fixes that
+// and measures the now-correct bar height, rather than duplicating that
+// hide/measure logic here.
+showView('home');
 
 // ---------- New-since-last-viewed indicator ----------
 

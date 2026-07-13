@@ -49,3 +49,4 @@ class FilmState:
     director: list[str] = field(default_factory=list)
     starring: list[str] = field(default_factory=list)
     synopsis: str | None = None
+    genre: list[str] = field(default_factory=list)

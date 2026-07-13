@@ -1,0 +1,9 @@
+# Slugs marked "not interested" from a home-page recommendation card
+# (settings page → "Not interested" button, written via the Cloudflare
+# Worker same as services.yaml) — excluded from every discovery section
+# going forward so a disliked pick doesn't keep resurfacing. Only applies to
+# films that aren't already on your Letterboxd watchlist; watchlist films
+# (leaving soon / recently added / top rated) reflect the watchlist itself
+# and aren't dismissable here.
+dismissed:
+  []

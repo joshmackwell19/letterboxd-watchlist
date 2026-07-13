@@ -149,7 +149,7 @@ def _enrich_candidates(
             "slug": details["slug"], "title": movie.get("title") or "", "year": tmdb_client.release_year(movie),
             "rating": details["rating"], "poster_url": details["poster_url"],
             "director": ", ".join(details["director"]) if details["director"] else None,
-            "starring": details["starring"], "synopsis": details["synopsis"],
+            "starring": details["starring"], "synopsis": details["synopsis"], "genre": details["genre"],
         })
 
     return _enrich_resolved_candidates(resolved, now_iso, config, global_subscriptions, revisitable,

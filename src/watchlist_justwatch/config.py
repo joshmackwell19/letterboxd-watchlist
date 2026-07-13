@@ -123,3 +123,11 @@ def load_revisitable_services(path: Path) -> set[str]:
     family, resubscribing) — config/revisitable_services.yaml."""
     raw = yaml.safe_load(path.read_text())
     return {canonical_brand_name(name) for name in raw.get("services", [])}
+
+
+def load_dismissed_recommendations(path: Path) -> set[str]:
+    """Slugs marked "not interested" from a home-page recommendation card —
+    config/dismissed_recommendations.yaml, editable from Settings via the
+    same Worker-write pattern as services.yaml."""
+    raw = yaml.safe_load(path.read_text())
+    return set(raw.get("dismissed", []) or [])

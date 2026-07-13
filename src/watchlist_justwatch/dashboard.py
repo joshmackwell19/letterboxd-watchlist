@@ -1470,9 +1470,12 @@ function badgeHtml(entries, brandLabel) {
 // "Not interested" only ever applies to a pure discovery pick — a film not
 // already on the watchlist — since a real watchlist film's presence in
 // leaving_soon/recently_added/top_rated reflects the watchlist itself, not
-// a recommendation choice.
+// a recommendation choice. DATA.films_by_slug is the *merged* watchlist +
+// discovery lookup (quick-look needs both in one place), so it can't tell
+// the two apart — DATA.films is watchlist-only, which can.
+const WATCHLIST_SLUGS = new Set(DATA.films.map(f => f.slug));
 function isDiscoveryOnly(slug) {
-  return !(slug in DATA.films_by_slug);
+  return !WATCHLIST_SLUGS.has(slug);
 }
 
 let toastTimer = null;

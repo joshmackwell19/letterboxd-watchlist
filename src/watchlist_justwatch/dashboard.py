@@ -1,4 +1,3 @@
-import html
 import json
 from collections import defaultdict
 from datetime import date
@@ -521,7 +520,7 @@ def build_dashboard_data(
 
 def render_dashboard_html(data: dict) -> str:
     payload = json.dumps(data, ensure_ascii=False)
-    return _TEMPLATE.replace("__DATA__", payload).replace("__TITLE__", html.escape(f"{len(data['films'])} films"))
+    return _TEMPLATE.replace("__DATA__", payload)
 
 
 _TEMPLATE = """<!DOCTYPE html>
@@ -1001,6 +1000,7 @@ _TEMPLATE = """<!DOCTYPE html>
     <div class="controls" data-view="country" id="controls-country">
       <select id="countrySelect"></select>
       <select id="countryServiceSelect"></select>
+      <select id="countryGenreSelect"></select>
       <div class="search-wrap">
         <input type="text" id="countryFilmSearch" placeholder="Search title, year, director, cast...">
         <span class="search-clear hidden" id="countryFilmSearchClear">✕</span>
@@ -1015,6 +1015,7 @@ _TEMPLATE = """<!DOCTYPE html>
     <div class="controls" data-view="services" id="controls-services">
       <select id="serviceSelect"></select>
       <select id="serviceCountrySelect"></select>
+      <select id="serviceGenreSelect"></select>
       <div class="search-wrap">
         <input type="text" id="serviceFilmSearch" placeholder="Search title, year, director, cast...">
         <span class="search-clear hidden" id="serviceFilmSearchClear">✕</span>
@@ -2165,6 +2166,14 @@ function populateServiceSelects() {
   const countrySelect = document.getElementById('serviceCountrySelect');
   countrySelect.innerHTML = '<option value="">All countries</option>' +
     countryNames.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+
+  // Services rows aren't per-film, so unlike Films/Country there's no
+  // per-context genre list to narrow to — just every genre across the
+  // whole watchlist, same set Films would show with no other filter active.
+  const genreSelect = document.getElementById('serviceGenreSelect');
+  const genres = [...new Set(DATA.films.flatMap(f => f.genre || []))].sort((a, b) => a.localeCompare(b));
+  genreSelect.innerHTML = '<option value="">Focus on a genre...</option>' +
+    genres.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
 }
 
 function renderActiveServiceFilters() {
@@ -2172,10 +2181,18 @@ function renderActiveServiceFilters() {
   container.innerHTML = '';
   const serviceQ = document.getElementById('serviceSelect').value;
   const countryQ = document.getElementById('serviceCountrySelect').value;
+  const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim();
   const anyToggleOff = CLASSIFICATIONS.some(k => !serviceFilterState[k]);
-  if (!serviceQ && !countryQ && !filmQ && !anyToggleOff) return;
+  if (!serviceQ && !countryQ && !genreQ && !filmQ && !anyToggleOff) return;
 
+  if (genreQ) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = genreQ + ' ✕';
+    chip.addEventListener('click', () => { document.getElementById('serviceGenreSelect').value = ''; renderServicesRows(); });
+    container.appendChild(chip);
+  }
   if (serviceQ) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
@@ -2218,6 +2235,7 @@ function renderActiveServiceFilters() {
   clearAll.addEventListener('click', () => {
     document.getElementById('serviceSelect').value = '';
     document.getElementById('serviceCountrySelect').value = '';
+    document.getElementById('serviceGenreSelect').value = '';
     document.getElementById('serviceFilmSearch').value = '';
     document.getElementById('serviceFilmSearchClear').classList.add('hidden');
     CLASSIFICATIONS.forEach(k => { serviceFilterState[k] = true; });
@@ -2236,10 +2254,26 @@ function renderServicesRows() {
   container.innerHTML = '';
   const serviceQ = document.getElementById('serviceSelect').value;
   const countryQ = document.getElementById('serviceCountrySelect').value;
+  const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
   renderActiveServiceFilters();
 
-  let rows = DATA.services.slice();
+  // Service rows aren't per-film, so a genre filter here means "narrow each
+  // service's own film list down to that genre" — recomputing film_count/
+  // unique_film_count from the narrowed list (rather than just hiding
+  // non-matching services outright) so the counts on screen always match
+  // what's actually being counted. openServiceDetail re-reads the row
+  // straight from DATA.services, so drilling in still shows everything —
+  // scoped to keep this a top-level-grid filter, not a deeper feature.
+  let rows = DATA.services.map(row => {
+    if (!genreQ) return row;
+    const uniqueSet = new Set(row.unique_slugs);
+    const matchingSlugs = row.slugs.filter(s => (DATA.films_by_slug[s]?.genre || []).includes(genreQ));
+    const matchingUniqueCount = matchingSlugs.filter(s => uniqueSet.has(s)).length;
+    return { ...row, slugs: matchingSlugs, film_count: matchingSlugs.length, unique_film_count: matchingUniqueCount };
+  });
+  if (genreQ) rows = rows.filter(row => row.film_count > 0);
+
   const col = serviceCols.find(c => c.key === serviceSortKey);
   // Services you have/can-get-again always lead, regardless of the chosen
   // sort column — otherwise a big subscription-needed catalog in a market
@@ -2288,6 +2322,7 @@ function openServiceDetail(brand, country, countryName) {
 
 document.getElementById('serviceSelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceCountrySelect').addEventListener('change', renderServicesRows);
+document.getElementById('serviceGenreSelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
 wireSearchClear('serviceFilmSearch', 'serviceFilmSearchClear', renderServicesRows);
 document.getElementById('servicesSortSelect').addEventListener('change', e => {
@@ -2348,6 +2383,18 @@ function populateCountryServiceSelect() {
   if (services.includes(previous)) select.value = previous;
 }
 
+function populateCountryGenreSelect() {
+  const country = currentCountry();
+  const select = document.getElementById('countryGenreSelect');
+  const previous = select.value;
+  const genres = country
+    ? [...new Set(country.films.flatMap(f => f.genre || []))].sort((a, b) => a.localeCompare(b))
+    : [];
+  select.innerHTML = '<option value="">Focus on a genre...</option>' +
+    genres.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
+  if (genres.includes(previous)) select.value = previous;
+}
+
 function renderCountryFilterToggles() {
   renderClassificationToggles('countryFilterToggles', countryFilterState, renderCountryRows);
 }
@@ -2362,9 +2409,17 @@ function renderActiveCountryFilters() {
   container.innerHTML = '';
   const q = document.getElementById('countryFilmSearch').value.trim();
   const serviceQ = document.getElementById('countryServiceSelect').value;
+  const genreQ = document.getElementById('countryGenreSelect').value;
   const anyToggleOff = CLASSIFICATIONS.some(k => !countryFilterState[k]);
-  if (!q && !serviceQ && !anyToggleOff) return;
+  if (!q && !serviceQ && !genreQ && !anyToggleOff) return;
 
+  if (genreQ) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = genreQ + ' ✕';
+    chip.addEventListener('click', () => { document.getElementById('countryGenreSelect').value = ''; renderCountryRows(); });
+    container.appendChild(chip);
+  }
   if (q) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
@@ -2401,6 +2456,7 @@ function renderActiveCountryFilters() {
     document.getElementById('countryFilmSearch').value = '';
     document.getElementById('countryFilmSearchClear').classList.add('hidden');
     document.getElementById('countryServiceSelect').value = '';
+    document.getElementById('countryGenreSelect').value = '';
     CLASSIFICATIONS.forEach(k => { countryFilterState[k] = true; });
     renderCountryFilterToggles();
     renderCountryRows();
@@ -2417,6 +2473,7 @@ function renderCountryRows() {
 
   const q = document.getElementById('countryFilmSearch').value.trim().toLowerCase();
   const serviceQ = document.getElementById('countryServiceSelect').value;
+  const genreQ = document.getElementById('countryGenreSelect').value;
 
   let rows = country.films.slice();
   const col = countryCols.find(c => c.key === countrySortKey);
@@ -2431,6 +2488,7 @@ function renderCountryRows() {
   rows.forEach(row => {
     if (q && !searchHaystack(row).includes(q)) return;
     if (serviceQ && !row.services.some(s => s.brand === serviceQ)) return;
+    if (genreQ && !(row.genre || []).includes(genreQ)) return;
     const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
     if (!visibleServices.length) return;
 
@@ -2459,8 +2517,13 @@ function onCountryCardClick(event) {
 }
 document.getElementById('countryGrid').addEventListener('click', onCountryCardClick);
 
-document.getElementById('countrySelect').addEventListener('change', () => { populateCountryServiceSelect(); renderCountryRows(); });
+document.getElementById('countrySelect').addEventListener('change', () => {
+  populateCountryServiceSelect();
+  populateCountryGenreSelect();
+  renderCountryRows();
+});
 document.getElementById('countryServiceSelect').addEventListener('change', renderCountryRows);
+document.getElementById('countryGenreSelect').addEventListener('change', renderCountryRows);
 document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
 wireSearchClear('countryFilmSearch', 'countryFilmSearchClear', renderCountryRows);
 document.getElementById('countrySortSelect').addEventListener('change', e => {
@@ -2471,6 +2534,7 @@ document.getElementById('countrySortSelect').addEventListener('change', e => {
 
 populateCountrySelect();
 populateCountryServiceSelect();
+populateCountryGenreSelect();
 renderCountryFilterToggles();
 renderCountryRows();
 

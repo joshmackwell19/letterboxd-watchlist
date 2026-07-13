@@ -51,7 +51,7 @@ def _film_header_html(film) -> tuple[str, str]:
     starring = f'<p style="{_STYLE_META}">Starring {_esc(", ".join(film.starring))}</p>' if film.starring else ""
     synopsis = f'<p style="{_STYLE_SYNOPSIS}">{_esc(film.synopsis)}</p>' if film.synopsis else ""
     title_html = (
-        f'<p style="{_STYLE_TITLE}"><a href="https://letterboxd.com/film/{film.slug}/" '
+        f'<p style="{_STYLE_TITLE}"><a href="https://letterboxd.com/film/{_esc(film.slug)}/" '
         f'style="color:#111; text-decoration:none;">{_esc(film.title)}{year}</a>{rating}</p>'
         f"{director}{starring}{synopsis}"
     )
@@ -254,7 +254,7 @@ def render_country_audit_html(countries: list[dict]) -> str:
             rating = f" — {film['rating']:.2f}★" if film["rating"] is not None else ""
             body += (
                 f'<p style="{_STYLE_BUCKET_LINE}">'
-                f'<a href="https://letterboxd.com/film/{film["slug"]}/" style="color:#111;">{_esc(film["title"])}</a>'
+                f'<a href="https://letterboxd.com/film/{_esc(film["slug"])}/" style="color:#111;">{_esc(film["title"])}</a>'
                 f'{year}{rating} — {_film_service_summary_html(film["services"])}</p>'
             )
     return _wrap_document(body)

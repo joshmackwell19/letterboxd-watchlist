@@ -10,11 +10,16 @@ CACHEABLE_CONFIDENCE = {"exact", "year_tolerant"}
 
 
 def _with_retry(fn, *, max_retries: int = 5, backoff_base_seconds: float = 2.0):
+    # simplejustwatchapi wraps every underlying httpx failure — rate limits,
+    # but also plain timeouts and connection resets, which are far more
+    # common — into this same JustWatchHttpError class, so retrying only on
+    # "429" left the more frequent transient failures with zero retries
+    # (unlike letterboxd.py's _fetch_url, which retries any exception).
     for attempt in range(max_retries + 1):
         try:
             return fn()
-        except JustWatchHttpError as exc:
-            if "429" not in str(exc) or attempt == max_retries:
+        except JustWatchHttpError:
+            if attempt == max_retries:
                 raise
             time.sleep(backoff_base_seconds * (2 ** attempt))
 

@@ -10,6 +10,7 @@ dependencies = [
     "PyYAML>=6.0.3",
     "requests>=2.34.2",
     "psycopg[binary]>=3.2",
+    "defusedxml>=0.7.1",
 ]
 
 [project.scripts]

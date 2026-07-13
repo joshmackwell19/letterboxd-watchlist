@@ -6,6 +6,15 @@ on:
     - cron: "0 7 * * *"
   workflow_dispatch: {}
 
+# The dashboard's "Refresh data" button and check-for-new-log.yml can both
+# trigger this on top of the daily cron — without this, two overlapping runs
+# would race on the "Commit updated dashboard" step's git push. Queue instead
+# of canceling, since an in-progress run may already be partway through
+# writing state to the database.
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest

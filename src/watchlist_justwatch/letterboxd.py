@@ -3,8 +3,8 @@ import math
 import re
 import sys
 import time
-import xml.etree.ElementTree as ET
 
+import defusedxml.ElementTree as ET
 from curl_cffi import requests as curl_requests
 
 from .models import WatchlistFilm
@@ -79,7 +79,8 @@ def get_rating_by_tmdb_id(
         response = _fetch_url(session, f"https://letterboxd.com/tmdb/{tmdb_id}/", max_retries=max_retries,
                                backoff_base_seconds=backoff_base_seconds,
                                request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
-    except LetterboxdFetchError:
+    except LetterboxdFetchError as exc:
+        print(f"warning: rating fetch failed for tmdb_id={tmdb_id} ({exc})", file=sys.stderr)
         return None
 
     match = RATING_RE.search(response.text)

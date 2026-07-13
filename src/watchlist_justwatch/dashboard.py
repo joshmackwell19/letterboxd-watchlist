@@ -661,9 +661,11 @@ _TEMPLATE = """<!DOCTYPE html>
     padding: 10px 0; border-bottom: 1px solid var(--hairline);
   }
   .tab-btn {
-    padding: 7px 15px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 7px 15px 7px 12px; border: none; border-radius: 999px; background: transparent; color: var(--text-muted);
     cursor: pointer; font-size: 12.5px; font-weight: 500; transition: background 0.15s, color 0.15s;
   }
+  .tab-btn svg { width: 16px; height: 16px; stroke: currentColor; flex-shrink: 0; }
   .tab-btn:hover { background: var(--hairline); }
   .tab-btn.active { background: var(--text); color: var(--bg); }
   .controls { display: flex; gap: 9px; align-items: center; margin-bottom: 11px; flex-wrap: wrap; font-size: 12.5px; }
@@ -785,12 +787,13 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
   .film-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px;
-    box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start; position: relative;
+    box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start;
   }
+  .film-card-end { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .dismiss-btn {
-    position: absolute; top: 8px; right: 8px; width: 20px; height: 20px; line-height: 18px;
-    border-radius: 50%; border: 1px solid var(--hairline-strong); background: var(--surface);
-    color: var(--text-faint); font-size: 11px; cursor: pointer; padding: 0; text-align: center;
+    width: 17px; height: 17px; line-height: 15px; flex-shrink: 0;
+    border-radius: 50%; border: 1px solid var(--hairline-strong); background: none;
+    color: var(--text-faint); font-size: 10px; cursor: pointer; padding: 0; text-align: center;
   }
   .dismiss-btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--hairline); }
   .film-card.dismissing { opacity: 0; transform: scale(0.96); transition: opacity 0.2s, transform 0.2s; }
@@ -883,10 +886,36 @@ _TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <div class="tabs">
-  <button class="tab-btn active" id="tab-home">Home<span class="new-badge home-new-badge hidden"></span></button>
-  <button class="tab-btn" id="tab-country">By VPN country</button>
-  <button class="tab-btn" id="tab-services">By service</button>
-  <button class="tab-btn" id="tab-films">By film</button>
+  <button class="tab-btn active" id="tab-home">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path>
+    </svg>
+    Home<span class="new-badge home-new-badge hidden"></span>
+  </button>
+  <button class="tab-btn" id="tab-country">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
+    </svg>
+    By VPN country
+  </button>
+  <button class="tab-btn" id="tab-services">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
+      <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"></path>
+      <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path>
+    </svg>
+    By service
+  </button>
+  <button class="tab-btn" id="tab-films">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+      <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+      <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+      <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+    </svg>
+    By film
+  </button>
 </div>
 
 <section class="view active" id="view-home">
@@ -1421,7 +1450,7 @@ function filmCardShell(row, servicesHtml) {
       '<div class="film-card-title-row">' +
         '<a class="film-link film-card-title" target="_blank" href="https://letterboxd.com/film/' + row.slug + '/">' +
           esc(row.title) + year + '</a>' +
-        '<span class="film-card-rating">' + rating + '</span>' +
+        '<span class="film-card-end"><span class="film-card-rating">' + rating + '</span></span>' +
       '</div>' +
       director + genre + addedService + leavingNote + servicesHtml +
     '</div>';
@@ -1516,7 +1545,12 @@ function addDismissButton(cardEl, slug) {
     event.stopPropagation();
     dismissRecommendation(slug, cardEl);
   });
-  cardEl.appendChild(btn);
+  // Lives next to the rating (inside the flex title row) rather than
+  // absolutely positioned over the card — that used to land directly on
+  // top of the rating badge since both anchored to the same top-right
+  // corner.
+  const end = cardEl.querySelector('.film-card-end');
+  (end || cardEl).appendChild(btn);
 }
 
 function renderHome() {

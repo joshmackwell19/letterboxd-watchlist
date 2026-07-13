@@ -1719,7 +1719,6 @@ function handleSurpriseMeClick() {
   const pool = surprisePool();
   if (!pool.length) return;
   const pick = pool[Math.floor(Math.random() * pool.length)];
-  showView('home');
   openQuickLook(pick.slug);
 }
 document.getElementById('surpriseMeBtnDesktop').addEventListener('click', handleSurpriseMeClick);

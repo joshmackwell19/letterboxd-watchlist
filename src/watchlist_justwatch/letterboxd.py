@@ -99,6 +99,7 @@ def _parse_film_json_ld(html: str) -> dict | None:
 
 _EMPTY_FILM_DETAILS = {
     "rating": None, "rating_count": None, "poster_url": None, "director": [], "starring": [], "synopsis": None,
+    "genre": [],
 }
 
 
@@ -110,6 +111,12 @@ def _film_details_from_json_ld(html: str) -> dict:
     aggregate_rating = data.get("aggregateRating", {})
     rating = aggregate_rating.get("ratingValue")
     rating_count = aggregate_rating.get("ratingCount")
+    # schema.org allows "genre" to be either a single string or a list —
+    # Letterboxd emits a list for every film we've seen, but normalize
+    # defensively rather than trust that never changes.
+    genre = data.get("genre", [])
+    if isinstance(genre, str):
+        genre = [genre]
     return {
         "rating": float(rating) if rating is not None else None,
         # Members who've rated the film on Letterboxd — a direct Letterboxd
@@ -120,6 +127,7 @@ def _film_details_from_json_ld(html: str) -> dict:
         "director": [p["name"] for p in data.get("director", []) if p.get("name")],
         "starring": [p["name"] for p in data.get("actor", [])[:MAX_STARRING] if p.get("name")],
         "synopsis": data.get("description"),
+        "genre": genre,
     }
 
 

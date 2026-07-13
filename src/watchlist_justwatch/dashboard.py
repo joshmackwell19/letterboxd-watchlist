@@ -157,6 +157,7 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
         "poster_url": film.poster_url,
         "director": _truncate_joined(", ".join(film.director) if film.director else None),
         "starring": ", ".join(film.starring) if film.starring else None,
+        "genre": film.genre,
         "any_service": bool(all_offers),
         "have_service": any_have,
         "coverage_countries": len(all_countries),
@@ -230,6 +231,7 @@ def _country_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> l
                 "poster_url": film.poster_url,
                 "director": _truncate_joined(", ".join(film.director) if film.director else None),
                 "starring": ", ".join(film.starring) if film.starring else None,
+                "genre": film.genre,
                 "services": services,
                 "has_have": any(s["classification"] == "have" for s in services),
             })
@@ -255,6 +257,7 @@ def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> 
             "director": ", ".join(film.director) if film.director else None,
             "starring": film.starring,
             "synopsis": film.synopsis,
+            "genre": film.genre,
             "all_offers": all_offers,
         }
     return lookup
@@ -271,6 +274,7 @@ def _mini_card(film) -> dict:
         "rating": film.rating,
         "poster_url": film.poster_url,
         "director": _truncate_joined(", ".join(film.director) if film.director else None),
+        "genre": film.genre,
     }
 
 
@@ -308,6 +312,7 @@ def _mini_card_from_lookup(entry: dict) -> dict:
         "slug": entry["slug"], "title": entry["title"], "year": entry["year"],
         "rating": entry["rating"], "poster_url": entry["poster_url"],
         "director": _truncate_joined(entry["director"]),
+        "genre": entry.get("genre") or [],
     }
 
 
@@ -406,9 +411,13 @@ def _leaving_soon_section(state: StateDoc, films_all_offers: dict[str, list[dict
 
 
 def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
-                          films_by_slug: dict[str, dict]) -> list[dict]:
+                          films_by_slug: dict[str, dict], dismissed_recommendations: set[str]) -> list[dict]:
     lookup = {**films_by_slug, **state.discovery_films}
-    used: set[str] = set()
+    # Seeded with dismissed slugs so every section below skips them for
+    # free — "not interested" only ever applies to a discovery pick (not
+    # already on the watchlist), so this can't accidentally hide a real
+    # watchlist film from leaving_soon/recently_added/top_rated too.
+    used: set[str] = set(dismissed_recommendations)
     sections: list[dict] = []
 
     def add(section: dict) -> None:
@@ -482,6 +491,7 @@ def build_dashboard_data(
     config: dict[str, CountryConfig],
     global_subscriptions: list[str],
     revisitable: set[str],
+    dismissed_recommendations: set[str] = frozenset(),
 ) -> dict:
     main_brands = _select_main_brands(state, config, global_subscriptions)
     main_brand_set = set(main_brands)
@@ -500,7 +510,7 @@ def build_dashboard_data(
         "last_run_at": state.last_run_at,
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
-        "home_sections": _build_home_sections(state, films_all_offers, films_by_slug),
+        "home_sections": _build_home_sections(state, films_all_offers, films_by_slug, dismissed_recommendations),
         "films": rows,
         "services": _service_rows(state, films_all_offers),
         "countries": _country_rows(state, films_all_offers),
@@ -775,8 +785,29 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
   .film-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px;
-    box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start;
+    box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start; position: relative;
   }
+  .dismiss-btn {
+    position: absolute; top: 8px; right: 8px; width: 20px; height: 20px; line-height: 18px;
+    border-radius: 50%; border: 1px solid var(--hairline-strong); background: var(--surface);
+    color: var(--text-faint); font-size: 11px; cursor: pointer; padding: 0; text-align: center;
+  }
+  .dismiss-btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--hairline); }
+  .film-card.dismissing { opacity: 0; transform: scale(0.96); transition: opacity 0.2s, transform 0.2s; }
+  .toast {
+    position: fixed; bottom: calc(20px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
+    background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text);
+    padding: 10px 18px; border-radius: 10px; font-size: 12.5px; box-shadow: var(--shadow); z-index: 40;
+    max-width: 90vw; text-align: center;
+  }
+  .toast.hidden { display: none; }
+  .new-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
+    background: var(--accent); color: var(--bg); font-size: 9.5px; font-weight: 700;
+    margin-left: 5px; vertical-align: middle;
+  }
+  .new-badge.hidden { display: none; }
   .film-card .poster-thumb, .film-card .poster-placeholder { width: 56px; height: 82px; }
   .skeleton-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; height: 110px;
@@ -788,6 +819,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-card-title { font-weight: 600; font-size: 13.5px; }
   .film-card-rating { font-size: 12px; color: #4ade80; font-weight: 600; white-space: nowrap; }
   .film-card-director { font-size: 11.5px; color: var(--text-muted); }
+  .film-card-genre { font-size: 11px; color: var(--text-faint); }
   .film-card-added-service { font-size: 11px; color: var(--accent); font-weight: 500; margin-top: 2px; }
   .film-card-leaving-note { font-size: 11px; color: #fbbf24; font-weight: 500; margin-top: 2px; }
   .service-group { margin-top: 7px; }
@@ -851,7 +883,7 @@ _TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <div class="tabs">
-  <button class="tab-btn active" id="tab-home">Home</button>
+  <button class="tab-btn active" id="tab-home">Home<span class="new-badge home-new-badge hidden"></span></button>
   <button class="tab-btn" id="tab-country">By VPN country</button>
   <button class="tab-btn" id="tab-services">By service</button>
   <button class="tab-btn" id="tab-films">By film</button>
@@ -952,6 +984,7 @@ _TEMPLATE = """<!DOCTYPE html>
       <span class="search-clear hidden" id="searchClear">✕</span>
     </div>
     <select id="filmsCountrySelect"></select>
+    <select id="filmsGenreSelect"></select>
     <select id="filmsSortSelect">
       <option value="title">Sort: Title (A–Z)</option>
       <option value="year">Sort: Year (newest)</option>
@@ -969,7 +1002,7 @@ _TEMPLATE = """<!DOCTYPE html>
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
       <path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path>
     </svg>
-    Home
+    Home<span class="new-badge home-new-badge hidden"></span>
   </button>
   <button class="bottom-nav-btn" id="nav-country">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -1003,6 +1036,8 @@ _TEMPLATE = """<!DOCTYPE html>
     <div id="quickLookContent"></div>
   </div>
 </div>
+
+<div class="toast hidden" id="toast"></div>
 
 <script>
 const DATA = __DATA__;
@@ -1372,6 +1407,8 @@ function filmCardShell(row, servicesHtml) {
     ? '<img class="poster-thumb" loading="lazy" src="' + row.poster_url + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
     : '<div class="poster-placeholder"></div>';
   const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
+  const genre = (row.genre && row.genre.length)
+    ? '<div class="film-card-genre">' + esc(row.genre.join(', ')) + '</div>' : '';
   const addedService = row.added_service
     ? '<div class="film-card-added-service">Added to ' + esc(row.added_service) + '</div>' : '';
   const leavingNote = row.leaving_note
@@ -1386,7 +1423,7 @@ function filmCardShell(row, servicesHtml) {
           esc(row.title) + year + '</a>' +
         '<span class="film-card-rating">' + rating + '</span>' +
       '</div>' +
-      director + addedService + leavingNote + servicesHtml +
+      director + genre + addedService + leavingNote + servicesHtml +
     '</div>';
   return div;
 }
@@ -1430,6 +1467,55 @@ function badgeHtml(entries, brandLabel) {
 
 // ---------- Home ----------
 
+// "Not interested" only ever applies to a pure discovery pick — a film not
+// already on the watchlist — since a real watchlist film's presence in
+// leaving_soon/recently_added/top_rated reflects the watchlist itself, not
+// a recommendation choice.
+function isDiscoveryOnly(slug) {
+  return !(slug in DATA.films_by_slug);
+}
+
+let toastTimer = null;
+function showToast(message) {
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.add('hidden'), 4000);
+}
+
+function dismissRecommendation(slug, cardEl) {
+  cardEl.classList.add('dismissing');
+  setTimeout(() => cardEl.remove(), 200);
+  fetch(DATA.settings.refresh_worker_url + '/dismiss-recommendation', {
+    method: 'POST',
+    headers: {
+      'X-Trigger-Secret': DATA.settings.refresh_trigger_secret,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ slug }),
+  })
+    .then(response => response.json().catch(() => null))
+    .then(body => {
+      if (!body || !body.ok) showToast('Hidden for now, but saving that preference failed — it may reappear tomorrow.');
+    })
+    .catch(() => showToast('Hidden for now, but saving that preference failed — it may reappear tomorrow.'));
+}
+
+function addDismissButton(cardEl, slug) {
+  if (!isDiscoveryOnly(slug)) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'dismiss-btn';
+  btn.title = 'Not interested — hide from future recommendations';
+  btn.textContent = '✕';
+  btn.addEventListener('click', event => {
+    event.stopPropagation();
+    dismissRecommendation(slug, cardEl);
+  });
+  cardEl.appendChild(btn);
+}
+
 function renderHome() {
   const container = document.getElementById('homeSections');
   container.innerHTML = '';
@@ -1443,7 +1529,11 @@ function renderHome() {
 
     const grid = document.createElement('div');
     grid.className = 'film-cards';
-    section.films.forEach(film => grid.appendChild(filmCardShell(film, '')));
+    section.films.forEach(film => {
+      const card = filmCardShell(film, '');
+      addDismissButton(card, film.slug);
+      grid.appendChild(card);
+    });
     wrap.appendChild(grid);
 
     container.appendChild(wrap);
@@ -1451,7 +1541,7 @@ function renderHome() {
 }
 
 document.getElementById('homeSections').addEventListener('click', event => {
-  if (event.target.closest('a.film-link')) return;
+  if (event.target.closest('a.film-link') || event.target.closest('.dismiss-btn')) return;
   const card = event.target.closest('.film-card');
   if (card) openQuickLook(card.dataset.slug);
 });
@@ -1494,6 +1584,8 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
   const director = film.director ? '<p class="detail-meta"><strong>Director:</strong> ' + esc(film.director) + '</p>' : '';
   const starring = (film.starring && film.starring.length)
     ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
+  const genreLine = (film.genre && film.genre.length)
+    ? '<p class="detail-meta"><strong>Genre:</strong> ' + esc(film.genre.join(', ')) + '</p>' : '';
   const synopsis = film.synopsis ? '<p class="detail-synopsis">' + esc(film.synopsis) + '</p>' : '';
 
   // Offers a real JustWatch url turn into an actual link (badge-link) that
@@ -1544,7 +1636,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     '<div class="detail-body">' +
       '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
       '<p class="detail-rating">' + rating + '</p>' +
-      director + starring + synopsis + primaryHtml +
+      director + starring + genreLine + synopsis + primaryHtml +
       '<div class="other-services-section">' +
         '<p class="detail-meta"><strong>' + otherLabel + '</strong></p>' +
         '<div class="badge-wrap">' + otherHtml + '</div>' +
@@ -1597,6 +1689,7 @@ const filmCols = [
 let filmSortKey = 'title', filmSortDir = 1;
 let activeCountry = null;
 let activeService = null;
+let activeGenre = null;
 
 function baseFilteredFilms() {
   const q = document.getElementById('search').value.trim().toLowerCase();
@@ -1607,6 +1700,31 @@ function baseFilteredFilms() {
     if (activeService && !row.main[activeService]) return false;
     return true;
   });
+}
+
+function genreCountsFromRows(rows) {
+  const counts = {};
+  rows.forEach(row => (row.genre || []).forEach(g => { counts[g] = (counts[g] || 0) + 1; }));
+  return counts;
+}
+
+function updateFilmsGenreSelect(counts) {
+  const select = document.getElementById('filmsGenreSelect');
+  select.innerHTML = '';
+  const allOpt = document.createElement('option');
+  allOpt.value = '';
+  allOpt.textContent = 'Focus on a genre...';
+  select.appendChild(allOpt);
+
+  const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (activeGenre && !counts[activeGenre]) ranked.push([activeGenre, 0]);
+  ranked.forEach(([genre, count]) => {
+    const opt = document.createElement('option');
+    opt.value = genre;
+    opt.textContent = genre + ' (' + count + ')';
+    select.appendChild(opt);
+  });
+  select.value = activeGenre || '';
 }
 
 function countryCountsFromRows(rows) {
@@ -1650,13 +1768,20 @@ function renderActiveFilmFilters() {
   container.innerHTML = '';
   const searchVal = document.getElementById('search').value.trim();
   const notHaveOnly = document.getElementById('notHaveOnly').checked;
-  if (!activeCountry && !activeService && !searchVal && !notHaveOnly) return;
+  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly) return;
   if (activeCountry) {
     const name = (DATA.countryNames && DATA.countryNames[activeCountry]) || activeCountry;
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
     chip.textContent = name + ' ✕';
     chip.addEventListener('click', () => { activeCountry = null; renderFilms(); });
+    container.appendChild(chip);
+  }
+  if (activeGenre) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = activeGenre + ' ✕';
+    chip.addEventListener('click', () => { activeGenre = null; renderFilms(); });
     container.appendChild(chip);
   }
   if (activeService) {
@@ -1690,6 +1815,7 @@ function renderActiveFilmFilters() {
   clearAll.addEventListener('click', () => {
     activeCountry = null;
     activeService = null;
+    activeGenre = null;
     document.getElementById('search').value = '';
     document.getElementById('searchClear').classList.add('hidden');
     document.getElementById('notHaveOnly').checked = false;
@@ -1699,7 +1825,9 @@ function renderActiveFilmFilters() {
 }
 
 function renderFilms() {
-  const base = baseFilteredFilms();
+  const preGenre = baseFilteredFilms();
+  updateFilmsGenreSelect(genreCountsFromRows(preGenre));
+  const base = activeGenre ? preGenre.filter(row => (row.genre || []).includes(activeGenre)) : preGenre;
   updateFilmsCountrySelect(countryCountsFromRows(base));
   renderActiveFilmFilters();
 
@@ -1805,6 +1933,10 @@ wireSearchClear('search', 'searchClear', renderFilms);
 document.getElementById('notHaveOnly').addEventListener('change', renderFilms);
 document.getElementById('filmsCountrySelect').addEventListener('change', e => {
   activeCountry = e.target.value || null;
+  renderFilms();
+});
+document.getElementById('filmsGenreSelect').addEventListener('change', e => {
+  activeGenre = e.target.value || null;
   renderFilms();
 });
 document.getElementById('filmsSortSelect').addEventListener('change', e => {
@@ -2175,6 +2307,55 @@ DATA.countries.forEach(c => { DATA.countryNames[c.code] = c.name; });
 
 renderHome();
 renderFilms();
+
+// ---------- New-since-last-viewed indicator ----------
+
+// No server round-trip needed — leaving_soon/recently_added are already in
+// DATA, so "new" is just "wasn't in that section's slug list last time this
+// browser loaded the page", tracked in localStorage. Resets the baseline on
+// every load (each open re-establishes what's "seen"), which matches how a
+// PWA actually gets opened (periodically, not continuously).
+const SEEN_SLUGS_KEY = 'watchlist_seen_slugs_v1';
+const NEW_BADGE_SECTION_KEYS = ['leaving_soon', 'recently_added'];
+
+function loadSeenSlugs() {
+  try {
+    return JSON.parse(localStorage.getItem(SEEN_SLUGS_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function updateNewSinceLastViewed() {
+  const seen = loadSeenSlugs();
+  let totalNew = 0;
+  const nextSeen = {};
+
+  NEW_BADGE_SECTION_KEYS.forEach(key => {
+    const section = DATA.home_sections.find(s => s.key === key);
+    const slugs = section ? section.films.map(f => f.slug) : [];
+    const previouslySeen = new Set(seen[key] || []);
+    totalNew += slugs.filter(s => !previouslySeen.has(s)).length;
+    nextSeen[key] = slugs;
+  });
+
+  try {
+    localStorage.setItem(SEEN_SLUGS_KEY, JSON.stringify(nextSeen));
+  } catch {
+    // Private-browsing/storage-full — badge just won't persist across loads.
+  }
+
+  document.querySelectorAll('.home-new-badge').forEach(el => {
+    if (totalNew > 0) {
+      el.textContent = String(totalNew);
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+    }
+  });
+}
+
+updateNewSinceLastViewed();
 
 // ---------- Pull to refresh (mobile) ----------
 // Reload picks up whatever dashboard.html the last daily run deployed —

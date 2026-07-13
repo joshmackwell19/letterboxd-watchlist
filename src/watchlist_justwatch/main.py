@@ -18,7 +18,10 @@ from .analysis import (
     render_favorite_recommendations,
     render_ranking,
 )
-from .config import load_config, load_favorites, load_global_subscriptions, load_revisitable_services
+from .config import (
+    load_config, load_dismissed_recommendations, load_favorites, load_global_subscriptions,
+    load_revisitable_services,
+)
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import load_state, save_state
 from .diff import build_report
@@ -58,6 +61,7 @@ from .state import StateDoc, get_cached_entry_id
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
 DEFAULT_FAVORITES_PATH = Path("config/favorites.yaml")
 DEFAULT_REVISITABLE_PATH = Path("config/revisitable_services.yaml")
+DEFAULT_DISMISSED_PATH = Path("config/dismissed_recommendations.yaml")
 DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
 # JustWatch offers are the slow, rate-limit-fragile part of each run (see
@@ -74,6 +78,7 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
     global_subscriptions = load_global_subscriptions(config_path)
     favorites = load_favorites(DEFAULT_FAVORITES_PATH)
     revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
+    dismissed = load_dismissed_recommendations(DEFAULT_DISMISSED_PATH)
     previous_state = load_state(database_url)
 
     films = fetch_watchlist(username)
@@ -102,6 +107,7 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
                 "poster_url": details["poster_url"],
                 "director": ", ".join(details["director"]) if details["director"] else None,
                 "starring": details["starring"], "synopsis": details["synopsis"],
+                "genre": details["genre"],
             }
 
     # Correlated across all of TMDB, not just the watchlist, so these can
@@ -142,7 +148,7 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
                             discovery_films[slug] = previous_state.discovery_films[slug]
 
         already_seen = set(current_state_diary.keys())
-        exclude_slugs = {w["slug"] for w in recent_watches} | already_seen | set(discovery_films.keys())
+        exclude_slugs = {w["slug"] for w in recent_watches} | already_seen | set(discovery_films.keys()) | dismissed
 
         # Each discoverer returns a *list* of (key, header, slugs, films_map)
         # sections rather than always exactly one — director/cast produce
@@ -259,6 +265,7 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
                 film_state.director = previous_film.director
                 film_state.starring = previous_film.starring
                 film_state.synopsis = previous_film.synopsis
+                film_state.genre = previous_film.genre
             else:
                 details = get_film_details_by_slug(film.slug)
                 film_state.rating = details["rating"]
@@ -266,6 +273,7 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
                 film_state.director = details["director"]
                 film_state.starring = details["starring"]
                 film_state.synopsis = details["synopsis"]
+                film_state.genre = details["genre"]
         except Exception as exc:
             print(f"warning: failed to check {film.slug!r}, skipping it this run ({exc})", file=sys.stderr)
             if previous_film is not None:
@@ -303,7 +311,7 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
     # (JustWatch refresh, discovery, diary) shouldn't be lost just because
     # Resend is having an outage; the email is a nice-to-have on top.
     save_state(database_url, current_state)
-    dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable)
+    dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable, dismissed)
     DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
 
     if text:
@@ -431,8 +439,9 @@ def main() -> None:
         config = load_config(args.config)
         global_subscriptions = load_global_subscriptions(args.config)
         revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
+        dismissed = load_dismissed_recommendations(DEFAULT_DISMISSED_PATH)
         state = load_state(args.database_url)
-        data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable)
+        data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable, dismissed)
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
         sys.exit(0)
@@ -479,6 +488,7 @@ def main() -> None:
                 "poster_url": details["poster_url"],
                 "director": ", ".join(details["director"]) if details["director"] else None,
                 "starring": details["starring"], "synopsis": details["synopsis"],
+                "genre": details["genre"],
             }
             added += 1
             if added % 25 == 0:

@@ -609,6 +609,8 @@ _TEMPLATE = """<!DOCTYPE html>
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
   .icon-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  .icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .icon-btn:disabled:hover { color: var(--text-muted); border-color: var(--hairline-strong); }
   .settings-block { margin-bottom: 22px; }
   .settings-service-group { margin-bottom: 18px; }
   .settings-service-group > h4 {
@@ -681,6 +683,8 @@ _TEMPLATE = """<!DOCTYPE html>
   .tab-btn.active { background: var(--text); color: var(--bg); }
   .tab-btn-accent { color: var(--accent); }
   .tab-btn-accent:hover { background: var(--accent-soft); }
+  .tab-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .tab-btn:disabled:hover { background: transparent; }
   /* Only visible on desktop (see .header-actions/.mobile-only-bar below) —
      Settings became a peer tab and "Surprise me"/the watchlist link moved
      up here, so mobile's small standalone gear icon and in-section
@@ -950,6 +954,20 @@ _TEMPLATE = """<!DOCTYPE html>
       </button>
     </div>
     <div class="tabs tabs-right">
+      <button class="tab-btn" id="reloadPageBtn" title="Reload this page">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 4v6h-6"></path>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+        </svg>
+        Reload
+      </button>
+      <button class="tab-btn" id="triggerRefreshBtn" title="Re-run the daily check and redeploy">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.4-1.5A5 5 0 0 0 7 19h10.5z"></path>
+          <path d="M12 12v5M9.5 14.5L12 17l2.5-2.5"></path>
+        </svg>
+        Refresh data
+      </button>
       <button class="tab-btn" id="surpriseMeBtnDesktop">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <rect x="4" y="4" width="16" height="16" rx="3"></rect>
@@ -972,6 +990,10 @@ _TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
+      <!-- Reload has no separate mobile button — pull-to-refresh (below)
+           already does a plain page reload here. Refresh-data has no mobile
+           gesture equivalent, so it still needs an explicit control. -->
+      <button class="icon-btn" id="triggerRefreshBtnMobile" aria-label="Refresh data" title="Re-run the daily check and redeploy">☁</button>
       <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
     </div>
   </div>
@@ -1071,14 +1093,11 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="settings-block">
     <h3 class="home-section-header">Refresh dashboard data</h3>
     <p class="muted">
-      A new Letterboxd log already triggers this automatically within about 15 minutes — this button is
-      just for forcing it sooner. Re-runs the daily check (watchlist, streaming availability,
-      recommendations) and redeploys; takes about 5 minutes, then pull to refresh this page.
+      A new Letterboxd log already triggers this automatically within about 15 minutes — the
+      "Refresh data" button in the top bar is just for forcing it sooner. Re-runs the daily
+      check (watchlist, streaming availability, recommendations) and redeploys; takes about
+      5 minutes, then reload the page.
     </p>
-    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom: 10px;">
-      <button class="back-btn" id="triggerRefresh" style="margin-bottom:0; color: var(--accent); border-color: var(--accent);">Refresh now</button>
-    </div>
-    <p class="muted" id="refreshStatus"></p>
   </div>
 </section>
 
@@ -1453,9 +1472,16 @@ document.getElementById('saveServices').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('triggerRefresh').addEventListener('click', async () => {
-  const status = document.getElementById('refreshStatus');
-  status.textContent = 'Triggering refresh...';
+document.getElementById('reloadPageBtn').addEventListener('click', () => location.reload());
+
+const refreshDataBtns = [
+  document.getElementById('triggerRefreshBtn'),
+  document.getElementById('triggerRefreshBtnMobile'),
+];
+
+async function handleRefreshDataClick() {
+  refreshDataBtns.forEach(btn => { btn.disabled = true; });
+  showToast('Triggering refresh...');
   try {
     const response = await fetch(DATA.settings.refresh_worker_url, {
       method: 'POST',
@@ -1466,14 +1492,17 @@ document.getElementById('triggerRefresh').addEventListener('click', async () => 
     });
     const body = await response.json().catch(() => null);
     if (response.ok && body && body.ok) {
-      status.textContent = 'Refresh triggered — usually takes about 5 minutes. Pull to refresh this page once done.';
+      showToast('Refresh triggered — usually takes about 5 minutes, then reload the page.', 7000);
     } else {
-      status.textContent = 'Unexpected response (' + response.status + ').';
+      showToast('Unexpected response (' + response.status + ').');
     }
   } catch (error) {
-    status.textContent = 'Request failed: ' + error.message;
+    showToast('Request failed: ' + error.message);
+  } finally {
+    refreshDataBtns.forEach(btn => { btn.disabled = false; });
   }
-});
+}
+refreshDataBtns.forEach(btn => btn.addEventListener('click', handleRefreshDataClick));
 
 function showView(name) {
   document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));
@@ -1594,12 +1623,12 @@ function isDiscoveryOnly(slug) {
 }
 
 let toastTimer = null;
-function showToast(message) {
+function showToast(message, duration = 4000) {
   const toast = document.getElementById('toast');
   toast.textContent = message;
   toast.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.add('hidden'), 4000);
+  toastTimer = setTimeout(() => toast.classList.add('hidden'), duration);
 }
 
 function dismissRecommendation(slug, cardEl) {

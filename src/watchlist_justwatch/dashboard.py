@@ -679,6 +679,14 @@ _TEMPLATE = """<!DOCTYPE html>
   .tab-btn svg { width: 16px; height: 16px; stroke: currentColor; flex-shrink: 0; }
   .tab-btn:hover { background: var(--hairline); }
   .tab-btn.active { background: var(--text); color: var(--bg); }
+  .tab-btn-accent { color: var(--accent); }
+  .tab-btn-accent:hover { background: var(--accent-soft); }
+  /* Only visible on desktop (see .header-actions/.mobile-only-bar below) —
+     Settings became a peer tab and "Surprise me"/the watchlist link moved
+     up here, so mobile's small standalone gear icon and in-section
+     surprise button (still needed there) shouldn't double up with these. */
+  .header-actions { display: none; }
+  .mobile-only-bar { display: none; }
   .controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
   .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
   .quick-filters .hint { color: var(--text-faint); font-size: 11.5px; margin-right: 2px; }
@@ -866,6 +874,8 @@ _TEMPLATE = """<!DOCTYPE html>
     .app-bar-title { display: block; }
     .app-bar-controls { padding: 0; margin-bottom: 11px; }
     .tabs { display: none; }
+    .header-actions { display: flex; }
+    .mobile-only-bar { display: block; }
     .controls { gap: 7px; }
     /* iOS Safari zooms the whole page in on focus of any input/select whose
        computed font-size is under 16px, and doesn't reliably zoom back out
@@ -912,7 +922,7 @@ _TEMPLATE = """<!DOCTYPE html>
           <circle cx="12" cy="12" r="9"></circle>
           <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
         </svg>
-        By VPN country
+        Country
       </button>
       <button class="tab-btn" id="tab-services">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -920,7 +930,7 @@ _TEMPLATE = """<!DOCTYPE html>
           <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"></path>
           <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path>
         </svg>
-        By service
+        Services
       </button>
       <button class="tab-btn" id="tab-films">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -929,8 +939,36 @@ _TEMPLATE = """<!DOCTYPE html>
           <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
           <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
         </svg>
-        By film
+        Films
       </button>
+      <button class="tab-btn" id="tab-settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.2"></circle>
+          <path d="M12 3v3M12 18v3M21 12h-3M6 12H3M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M18.4 18.4l-2.1-2.1M7.7 7.7L5.6 5.6"></path>
+        </svg>
+        Settings
+      </button>
+    </div>
+    <div class="tabs tabs-right">
+      <button class="tab-btn" id="surpriseMeBtnDesktop">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="4" width="16" height="16" rx="3"></rect>
+          <circle cx="8.5" cy="8.5" r="1.1" fill="currentColor" stroke="none"></circle>
+          <circle cx="15.5" cy="8.5" r="1.1" fill="currentColor" stroke="none"></circle>
+          <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none"></circle>
+          <circle cx="8.5" cy="15.5" r="1.1" fill="currentColor" stroke="none"></circle>
+          <circle cx="15.5" cy="15.5" r="1.1" fill="currentColor" stroke="none"></circle>
+        </svg>
+        Surprise me
+      </button>
+      <a class="tab-btn tab-btn-accent" id="watchlistLinkDesktop" target="_blank">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+          <path d="M15 3h6v6"></path>
+          <path d="M10 14L21 3"></path>
+        </svg>
+        Letterboxd
+      </a>
     </div>
     <div class="header-actions">
       <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
@@ -938,9 +976,6 @@ _TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
   <div class="app-bar-controls" id="appBarControls">
-    <div class="surprise-bar" data-view="home" id="controls-home">
-      <button class="surprise-btn" id="surpriseMeBtn">🎲 Surprise me</button>
-    </div>
     <div class="controls" data-view="country" id="controls-country">
       <select id="countrySelect"></select>
       <select id="countryServiceSelect"></select>
@@ -970,24 +1005,28 @@ _TEMPLATE = """<!DOCTYPE html>
       <span id="serviceFilterToggles"></span>
     </div>
     <div class="controls" data-view="films" id="controls-films">
+      <select id="filmsCountrySelect"></select>
+      <select id="filmsGenreSelect"></select>
       <div class="search-wrap">
         <input type="text" id="search" placeholder="Search title, year, director, cast...">
         <span class="search-clear hidden" id="searchClear">✕</span>
       </div>
-      <select id="filmsCountrySelect"></select>
-      <select id="filmsGenreSelect"></select>
       <select id="filmsSortSelect">
         <option value="title">Sort: Title (A–Z)</option>
         <option value="year">Sort: Year (newest)</option>
         <option value="rating">Sort: Rating (highest)</option>
         <option value="coverage_countries">Sort: Most countries</option>
       </select>
+      <span id="filmsFilterToggles"></span>
       <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
     </div>
   </div>
 </div>
 
 <section class="view active" id="view-home">
+  <div class="surprise-bar mobile-only-bar">
+    <button class="surprise-btn" id="surpriseMeBtnMobile">🎲 Surprise me</button>
+  </div>
   <div id="homeSections">
     <div class="film-cards">
       <div class="skeleton-card"></div>
@@ -1015,7 +1054,6 @@ _TEMPLATE = """<!DOCTYPE html>
 </section>
 
 <section class="view" id="view-settings">
-  <button class="back-btn" id="backFromSettings">← Back</button>
   <h2 class="detail-title">Settings</h2>
   <div class="settings-block">
     <h3 class="home-section-header">Letterboxd account</h3>
@@ -1123,6 +1161,7 @@ document.addEventListener('click', () => {
   document.getElementById('lastCheckedInfo').classList.remove('open');
 });
 document.getElementById('watchlistLink').href = DATA.letterboxd_watchlist_url;
+document.getElementById('watchlistLinkDesktop').href = DATA.letterboxd_watchlist_url;
 
 // have > free > could_get_again > subscription, always — used to order the
 // "where to watch" badges on quick-look and service-detail cards.
@@ -1202,13 +1241,16 @@ document.getElementById('tab-home').addEventListener('click', () => showView('ho
 document.getElementById('tab-country').addEventListener('click', () => showView('country'));
 document.getElementById('tab-services').addEventListener('click', () => showView('services'));
 document.getElementById('tab-films').addEventListener('click', () => showView('films'));
+document.getElementById('tab-settings').addEventListener('click', () => { renderSettings(); showView('settings'); });
 document.getElementById('nav-home').addEventListener('click', () => showView('home'));
 document.getElementById('nav-country').addEventListener('click', () => showView('country'));
 document.getElementById('nav-services').addEventListener('click', () => showView('services'));
 document.getElementById('nav-films').addEventListener('click', () => showView('films'));
 document.getElementById('backToServices').addEventListener('click', () => showView('services'));
+// Mobile keeps a small standalone gear icon (Settings isn't one of its
+// bottom-nav's 4 destinations) — desktop's tab-settings button above is the
+// primary entry point now that Settings is a peer tab, not a drill-down.
 document.getElementById('settingsBtn').addEventListener('click', () => { renderSettings(); showView('settings'); });
-document.getElementById('backFromSettings').addEventListener('click', () => showView('home'));
 
 // Every brand this watchlist has ever seen on JustWatch — the "entire
 // domain" the settings-page autocomplete offers, since DATA.services
@@ -1441,13 +1483,19 @@ function showView(name) {
     document.getElementById('tab-' + n).classList.toggle('active', isActive);
     document.getElementById('nav-' + n).classList.toggle('active', isActive);
   });
+  // Settings is a fifth desktop tab but not one of mobile's 4 bottom-nav
+  // destinations (mobile keeps its own small gear icon instead) — handled
+  // separately rather than folded into TABS so that loop above doesn't
+  // break looking for a nonexistent "nav-settings" button.
+  document.getElementById('tab-settings').classList.toggle('active', name === 'settings');
 
   // The fixed bar's second row holds each tab's own search/sort/filter
   // controls (moved up out of the scrolling content so they never scroll
   // out of reach) — exactly one is shown at a time, matched strictly by
-  // view name. service-detail/settings have no controls of their own (they
-  // never did — service-detail is a drill-down with just a back button), so
-  // the whole row collapses away rather than showing a stale/wrong one.
+  // view name. service-detail/settings/home have no controls of their own
+  // (service-detail is a drill-down; settings has none; home's "Surprise
+  // me" moved up into the nav row itself), so the whole row collapses away
+  // rather than showing a stale/wrong one.
   const controlsSlot = document.getElementById('appBarControls');
   const matchingControls = controlsSlot.querySelector('[data-view="' + name + '"]');
   controlsSlot.querySelectorAll('[data-view]').forEach(el => {
@@ -1638,13 +1686,15 @@ function surprisePool() {
   return pool;
 }
 
-document.getElementById('surpriseMeBtn').addEventListener('click', () => {
+function handleSurpriseMeClick() {
   const pool = surprisePool();
   if (!pool.length) return;
   const pick = pool[Math.floor(Math.random() * pool.length)];
   showView('home');
   openQuickLook(pick.slug);
-});
+}
+document.getElementById('surpriseMeBtnDesktop').addEventListener('click', handleSurpriseMeClick);
+document.getElementById('surpriseMeBtnMobile').addEventListener('click', handleSurpriseMeClick);
 
 // ---------- Film detail card (shared: quick look + service detail) ----------
 
@@ -1765,6 +1815,7 @@ let filmSortKey = 'title', filmSortDir = 1;
 let activeCountry = null;
 let activeService = null;
 let activeGenre = null;
+const filmsFilterState = { have: true, free: true, could_get_again: true, subscription: true };
 
 function baseFilteredFilms() {
   const q = document.getElementById('search').value.trim().toLowerCase();
@@ -1843,7 +1894,8 @@ function renderActiveFilmFilters() {
   container.innerHTML = '';
   const searchVal = document.getElementById('search').value.trim();
   const notHaveOnly = document.getElementById('notHaveOnly').checked;
-  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly) return;
+  const anyToggleOff = CLASSIFICATIONS.some(k => !filmsFilterState[k]);
+  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly && !anyToggleOff) return;
   if (activeCountry) {
     const name = (DATA.countryNames && DATA.countryNames[activeCountry]) || activeCountry;
     const chip = document.createElement('span');
@@ -1884,6 +1936,17 @@ function renderActiveFilmFilters() {
     chip.addEventListener('click', () => { document.getElementById('notHaveOnly').checked = false; renderFilms(); });
     container.appendChild(chip);
   }
+  if (anyToggleOff) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Type filters ✕';
+    chip.addEventListener('click', () => {
+      CLASSIFICATIONS.forEach(k => { filmsFilterState[k] = true; });
+      renderFilmFilterToggles();
+      renderFilms();
+    });
+    container.appendChild(chip);
+  }
   const clearAll = document.createElement('span');
   clearAll.className = 'filter-chip clear-all-chip';
   clearAll.textContent = 'Clear all ✕';
@@ -1894,9 +1957,15 @@ function renderActiveFilmFilters() {
     document.getElementById('search').value = '';
     document.getElementById('searchClear').classList.add('hidden');
     document.getElementById('notHaveOnly').checked = false;
+    CLASSIFICATIONS.forEach(k => { filmsFilterState[k] = true; });
+    renderFilmFilterToggles();
     renderFilms();
   });
   container.appendChild(clearAll);
+}
+
+function renderFilmFilterToggles() {
+  renderClassificationToggles('filmsFilterToggles', filmsFilterState, renderFilms);
 }
 
 function renderFilms() {
@@ -1921,11 +1990,13 @@ function renderFilms() {
     candidateBrands.forEach(brand => {
       const entries = row.main[brand];
       if (!entries) return;
-      const filtered = activeCountry ? entries.filter(e => e.country === activeCountry) : entries;
+      const filtered = entries.filter(e =>
+        filmsFilterState[e.classification] && (!activeCountry || e.country === activeCountry));
       if (filtered.length) visibleMain[brand] = filtered;
     });
     const visibleOther = showOtherServices
-      ? (activeCountry ? row.other_services.filter(o => o.country === activeCountry) : row.other_services)
+      ? row.other_services.filter(o =>
+          filmsFilterState[o.classification] && (!activeCountry || o.country === activeCountry))
       : [];
 
     const include = Object.keys(visibleMain).length > 0 || visibleOther.length > 0;
@@ -2398,6 +2469,7 @@ function updateAppBarOffset() {
 window.addEventListener('resize', updateAppBarOffset);
 
 renderHome();
+renderFilmFilterToggles();
 renderFilms();
 // The static HTML has all four controls blocks visible at once (no JS has
 // run yet to hide the non-active ones) — showView('home') both fixes that

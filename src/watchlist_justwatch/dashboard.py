@@ -1548,7 +1548,7 @@ function filmCardShell(row, servicesHtml) {
   const year = row.year ? ' (' + row.year + ')' : '';
   const rating = row.rating != null ? row.rating.toFixed(2) + '★' : '—';
   const poster = row.poster_url
-    ? '<img class="poster-thumb" loading="lazy" src="' + row.poster_url + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
+    ? '<img class="poster-thumb" loading="lazy" src="' + escAttr(row.poster_url) + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
     : '<div class="poster-placeholder"></div>';
   const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
   const genre = (row.genre && row.genre.length)
@@ -1732,7 +1732,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
   const year = film.year ? ' (' + film.year + ')' : '';
   const rating = film.rating != null ? film.rating.toFixed(2) + '★' : '—';
   const poster = film.poster_url
-    ? '<img class="detail-poster" loading="lazy" src="' + film.poster_url + '">'
+    ? '<img class="detail-poster" loading="lazy" src="' + escAttr(film.poster_url) + '">'
     : '<div class="detail-poster-placeholder"></div>';
   const director = film.director ? '<p class="detail-meta"><strong>Director:</strong> ' + esc(film.director) + '</p>' : '';
   const starring = (film.starring && film.starring.length)

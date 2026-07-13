@@ -536,8 +536,6 @@ def main() -> None:
 
     if not args.username:
         parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
-    if not args.database_url:
-        parser.error("--database-url is required (or set DATABASE_URL in .env)")
 
     try:
         exit_code = run(args.username, args.config, args.database_url)

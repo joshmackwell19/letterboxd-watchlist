@@ -10,6 +10,11 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # This job never uses the default GITHUB_TOKEN — dispatching daily.yml
+    # below needs a real PAT instead (GitHub blocks the default token from
+    # triggering other workflows), and nothing else here touches the repo.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 

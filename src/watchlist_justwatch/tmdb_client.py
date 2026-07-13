@@ -1,4 +1,5 @@
 import os
+import time
 from itertools import zip_longest
 
 import requests
@@ -17,12 +18,28 @@ def _api_key() -> str:
     return key
 
 
-def _get(path: str, **params) -> dict:
+def _get(path: str, *, max_retries: int = 3, backoff_base_seconds: float = 2.0, **params) -> dict:
+    # Unlike justwatch_client/letterboxd's fetchers, this had no retry at
+    # all — a plain timeout or connection blip raised immediately, silently
+    # dropping whatever discovery section was calling it (most call sites
+    # wrap this in a broad except-continue) where a single retry would
+    # likely have just worked.
     params["api_key"] = _api_key()
-    response = requests.get(f"{TMDB_BASE_URL}{path}", params=params, timeout=15)
-    if not response.ok:
-        raise TMDBError(f"TMDB request to {path} failed: HTTP {response.status_code}")
-    return response.json()
+    last_error: str | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(f"{TMDB_BASE_URL}{path}", params=params, timeout=15)
+            if response.ok:
+                return response.json()
+            last_error = f"HTTP {response.status_code}"
+        except requests.RequestException as exc:
+            last_error = str(exc)
+
+        if attempt < max_retries:
+            time.sleep(backoff_base_seconds * (2 ** attempt))
+
+    raise TMDBError(f"TMDB request to {path} failed after {max_retries + 1} attempts ({last_error})")
 
 
 def search_movie(title: str, year: int | None = None) -> dict | None:

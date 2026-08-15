@@ -8,6 +8,7 @@ global:
     - "Tubi TV"
     - "YouTube"
     - "Kanopy"
+    - "BFI Player"
 
 countries:
   AU:

@@ -258,3 +258,174 @@ def render_country_audit_html(countries: list[dict]) -> str:
                 f'{year}{rating} — {_film_service_summary_html(film["services"])}</p>'
             )
     return _wrap_document(body)
+
+
+# ---------------------------------------------------------------- weekly digest
+
+def _days_phrase(n: int) -> str:
+    if n == 0:
+        return "today"
+    if n == 1:
+        return "tomorrow"
+    return f"in {n} days"
+
+
+def _country_list(codes: list[str], limit: int = 3) -> str:
+    names = sorted({country_name(c) for c in codes})
+    if len(names) <= limit:
+        return ", ".join(names)
+    return ", ".join(names[:limit]) + f" +{len(names) - limit} more"
+
+
+def _film_title_year(film) -> str:
+    year = f" ({film.year})" if film.year else ""
+    return f"{film.title}{year}"
+
+
+def _film_rating(film) -> str:
+    return f"{film.rating:.2f}★" if film.rating is not None else ""
+
+
+def _other_entry_services(entry: dict, limit: int = 4) -> list[tuple[str, list[str]]]:
+    return sorted(entry["services"].items())[:limit]
+
+
+def _other_entry_overflow(entry: dict, limit: int = 4) -> int:
+    return max(0, len(entry["services"]) - limit)
+
+
+# -- text --
+
+def _main_group_text(main_group: dict[str, list[dict]], *, days_key: str | None = None) -> list[str]:
+    lines = []
+    for brand in sorted(main_group):
+        lines.append(f"{brand}:")
+        for e in main_group[brand]:
+            film = e["film"]
+            extra = f" — {_days_phrase(e[days_key])}" if days_key else ""
+            lines.append(f"  {_film_title_year(film)} {_film_rating(film)}{extra} — {_country_list(e['countries'])}")
+        lines.append("")
+    return lines
+
+
+def _other_list_text(entries: list[dict], *, days_key: str | None = None) -> list[str]:
+    lines = []
+    for entry in entries:
+        film = entry["film"]
+        extra = f" — {_days_phrase(entry[days_key])}" if days_key else ""
+        services = _other_entry_services(entry)
+        service_bits = [f"{brand} ({_country_list(countries)})" for brand, countries in services]
+        overflow = _other_entry_overflow(entry)
+        if overflow:
+            service_bits.append(f"+{overflow} more services")
+        lines.append(f"  {_film_title_year(film)} {_film_rating(film)}{extra}")
+        lines.append(f"    {'; '.join(service_bits)}")
+    return lines
+
+
+def render_weekly_digest_text(digest: dict) -> str:
+    week_range = f"{digest['week_start'].strftime('%d %b')}–{digest['week_end'].strftime('%d %b %Y')}"
+    lines = [f"This week on your watchlist ({week_range})",
+             f"{digest['total_added']} added, {digest['total_leaving']} leaving on your main and other services.", ""]
+
+    lines.append("ADDED TO YOUR MAIN SERVICES")
+    if digest["main_additions"]:
+        lines += _main_group_text(digest["main_additions"])
+    else:
+        lines += ["  Nothing new this week.", ""]
+    if digest["other_additions"]:
+        lines.append("ALSO ADDED ELSEWHERE")
+        lines += _other_list_text(digest["other_additions"])
+        lines.append("")
+
+    lines.append("LEAVING YOUR MAIN SERVICES THIS WEEK")
+    if digest["main_leaving"]:
+        lines += _main_group_text(digest["main_leaving"], days_key="days")
+    else:
+        lines += ["  Nothing leaving this week.", ""]
+    if digest["other_leaving"]:
+        lines.append("ALSO LEAVING ELSEWHERE")
+        lines += _other_list_text(digest["other_leaving"], days_key="min_days")
+
+    return "\n".join(lines).rstrip()
+
+
+# -- html --
+
+_STYLE_DIGEST_POSTER = "border-radius:4px; display:block; margin-bottom:5px;"
+_DIGEST_POSTER_WIDTH = 64
+
+
+def _main_group_html(main_group: dict[str, list[dict]], *, days_key: str | None = None) -> str:
+    body = ""
+    for brand in sorted(main_group):
+        body += f'<p style="margin:16px 0 8px; font-size:13px; font-weight:bold; color:#111;">{_esc(brand)}</p>'
+        body += '<table role="presentation" style="border-collapse:collapse;"><tr>'
+        for e in main_group[brand]:
+            film = e["film"]
+            poster = (f'<img src="{_esc(film.poster_url)}" width="{_DIGEST_POSTER_WIDTH}" '
+                      f'style="{_STYLE_DIGEST_POSTER}" alt="">') if film.poster_url else ""
+            extra = f'<div style="font-size:10px; color:#b45309;">{_days_phrase(e[days_key])}</div>' if days_key else ""
+            body += (
+                f'<td style="vertical-align:top; padding:0 12px 10px 0; width:{_DIGEST_POSTER_WIDTH + 6}px;">'
+                f'<a href="https://letterboxd.com/film/{_esc(film.slug)}/">{poster}</a>'
+                f'<div style="font-size:11px; color:#111; line-height:1.3;">{_esc(_film_title_year(film))}</div>'
+                f'<div style="font-size:10.5px; color:#2a9d8f;">{_film_rating(film)}</div>'
+                f'{extra}'
+                f'<div style="font-size:10px; color:#888;">{_esc(_country_list(e["countries"], limit=1))}</div>'
+                '</td>'
+            )
+        body += '</tr></table>'
+    return body
+
+
+def _other_list_html(entries: list[dict], *, days_key: str | None = None) -> str:
+    body = ""
+    for entry in entries:
+        film = entry["film"]
+        extra = f' &mdash; <span style="color:#b45309;">{_days_phrase(entry[days_key])}</span>' if days_key else ""
+        services = _other_entry_services(entry)
+        service_bits = [f'{_esc(brand)} ({_esc(_country_list(countries))})' for brand, countries in services]
+        overflow = _other_entry_overflow(entry)
+        if overflow:
+            service_bits.append(f"+{overflow} more services")
+        body += (
+            f'<p style="margin:0 0 3px; font-size:12.5px; color:#333; line-height:1.4;">'
+            f'<a href="https://letterboxd.com/film/{_esc(film.slug)}/" style="color:#111; text-decoration:none;">'
+            f'{_esc(_film_title_year(film))}</a> '
+            f'<span style="color:#2a9d8f;">{_film_rating(film)}</span>{extra}<br>'
+            f'<span style="font-size:11px; color:#888;">{"; ".join(service_bits)}</span></p>'
+        )
+    return body
+
+
+def render_weekly_digest_html(digest: dict) -> str:
+    week_range = f"{digest['week_start'].strftime('%d %b')}&ndash;{digest['week_end'].strftime('%d %b %Y')}"
+    body = (
+        f'<h2 style="font-size:18px; font-weight:500; margin:0 0 4px;">This week on your watchlist</h2>'
+        f'<p style="font-size:13px; color:#555; margin:0 0 20px;">{week_range} &middot; '
+        f'{digest["total_added"]} added, {digest["total_leaving"]} leaving.</p>'
+        '<h3 style="font-size:15px; margin:0 0 6px; border-bottom:1px solid #eee; padding-bottom:6px;">'
+        'Added to your main services</h3>'
+    )
+    if digest["main_additions"]:
+        body += _main_group_html(digest["main_additions"])
+    else:
+        body += '<p style="font-size:13px; color:#777;">Nothing new this week.</p>'
+    if digest["other_additions"]:
+        body += ('<p style="margin:14px 0 6px; font-size:12px; font-weight:bold; text-transform:uppercase; '
+                  'letter-spacing:.03em; color:#888;">Also added elsewhere</p>')
+        body += _other_list_html(digest["other_additions"])
+
+    body += ('<h3 style="font-size:15px; margin:26px 0 6px; border-bottom:1px solid #eee; padding-bottom:6px;">'
+              'Leaving your main services this week</h3>')
+    if digest["main_leaving"]:
+        body += _main_group_html(digest["main_leaving"], days_key="days")
+    else:
+        body += '<p style="font-size:13px; color:#777;">Nothing leaving this week.</p>'
+    if digest["other_leaving"]:
+        body += ('<p style="margin:14px 0 6px; font-size:12px; font-weight:bold; text-transform:uppercase; '
+                  'letter-spacing:.03em; color:#888;">Also leaving elsewhere</p>')
+        body += _other_list_html(digest["other_leaving"], days_key="min_days")
+
+    return _wrap_document(body)

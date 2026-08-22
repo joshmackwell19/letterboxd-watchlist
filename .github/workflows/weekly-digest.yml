@@ -1,0 +1,33 @@
+name: Weekly digest email
+
+on:
+  schedule:
+    # ~17:00 UK time (no DST awareness in GH Actions cron; drifts an hour in
+    # GMT, same caveat as daily.yml's cron)
+    - cron: "0 16 * * 5"
+  workflow_dispatch: {}
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    # Read-only: sends an email from already-stored state, doesn't scrape
+    # Letterboxd/JustWatch/TMDB and doesn't commit or deploy anything.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Send weekly digest
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m watchlist_justwatch.main --weekly-digest

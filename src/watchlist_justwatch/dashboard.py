@@ -340,7 +340,7 @@ def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12)
     seen: set[str] = set()
     chosen: list[str] = []
     added_service_by_slug: dict[str, str] = {}
-    for entry in state.recent_additions:  # already newest-first, capped rolling log
+    for entry in state.recent_additions:  # already newest-first, retained by age not count (see main.py)
         slug = entry["slug"]
         if slug in seen or slug in exclude or slug not in state.films:
             continue

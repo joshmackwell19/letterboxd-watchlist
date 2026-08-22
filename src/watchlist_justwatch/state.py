@@ -32,8 +32,11 @@ class StateDoc:
     # slug -> same shape as a films_by_slug entry, for films the sections
     # above surfaced that aren't already on the watchlist.
     discovery_films: dict[str, dict] = field(default_factory=dict)
-    # Rolling log of newly-detected have/free offers, newest first, capped —
-    # a single day's diff is often too small to fill a "recently added" list.
+    # Rolling log of newly-detected have/free offers, newest first, retained
+    # for RECENT_ADDITIONS_RETENTION_DAYS (see main.py) rather than a fixed
+    # count — a single day's diff is often too small to fill a "recently
+    # added" list, and a count cap let one unusually busy day evict
+    # genuinely-this-week entries before anything downstream saw them.
     recent_additions: list[dict] = field(default_factory=list)
     # Every film ever logged as watched (slug -> title/year/rating/poster/
     # director/starring/synopsis, enriched once and cached forever) — no

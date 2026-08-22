@@ -4,7 +4,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -71,6 +71,15 @@ DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 # the 10-25%/day (4-10 day cycle) range that felt safe for how often a
 # watchlist film's availability actually shifts.
 STALE_BATCH_FRACTION = 0.20
+
+# recent_additions used to be capped by count (newest 200), which meant a
+# single busy day (e.g. a forced full re-check, or just a lot of offers
+# landing at once) could evict genuinely-this-week entries before a weekly
+# digest ever saw them — silent under-reporting with no error. Retention is
+# by age instead: comfortably longer than the 7-day window anything reads
+# today, so a slow week never gets truncated regardless of how many entries
+# a single busy day produces.
+RECENT_ADDITIONS_RETENTION_DAYS = 35
 
 
 def run(username: str, config_path: Path, database_url: str, *, progress: bool = True) -> int:
@@ -289,8 +298,8 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
 
     # A single day's diff is usually too small to fill a "recently added"
     # section on its own, so newly-detected have/free offers accumulate into
-    # a capped rolling log instead of a one-day snapshot. Skipped on a true
-    # first run, where every offer would otherwise look "new".
+    # a rolling log instead of a one-day snapshot. Skipped on a true first
+    # run, where every offer would otherwise look "new".
     if previous_state.films:
         today = now_iso[:10]
         previous_snapshot = compute_offer_snapshot(previous_state, config, global_subscriptions, revisitable)
@@ -302,7 +311,10 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
             if classification in ("have", "free")
             and previous_snapshot.get(slug, {}).get((brand, country)) != classification
         ]
-        current_state.recent_additions = (new_additions + previous_state.recent_additions)[:200]
+        retention_cutoff = (date.fromisoformat(today) - timedelta(days=RECENT_ADDITIONS_RETENTION_DAYS)).isoformat()
+        current_state.recent_additions = [
+            a for a in new_additions + previous_state.recent_additions if a["added_at"] >= retention_cutoff
+        ]
 
     report = build_report(previous_state, current_state, config)
     text = render_report(report, config, global_subscriptions, revisitable)

@@ -1,0 +1,11 @@
+# The streaming services you actually watch day to day — additions/
+# departures on these get full billing (grouped, with posters) in the
+# weekly digest email; everything else still gets listed, just condensed
+# under "also added/leaving elsewhere". Edit freely as your habits change;
+# this only affects the weekly digest, nothing else.
+services:
+  - MUBI
+  - BFI Player
+  - Amazon Prime Video
+  - Stan
+  - Disney Plus

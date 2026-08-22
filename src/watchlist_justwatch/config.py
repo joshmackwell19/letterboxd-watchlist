@@ -125,6 +125,20 @@ def load_revisitable_services(path: Path) -> set[str]:
     return {canonical_brand_name(name) for name in raw.get("services", [])}
 
 
+def load_main_services(path: Path) -> list[str]:
+    """The services you actually watch day to day — config/main_services.yaml
+    — used by the weekly digest email to decide what gets full per-service
+    billing vs a condensed "elsewhere" mention. Order is preserved (used for
+    display), duplicates collapsed."""
+    raw = yaml.safe_load(path.read_text())
+    seen: list[str] = []
+    for name in raw.get("services", []):
+        canonical = canonical_brand_name(name)
+        if canonical not in seen:
+            seen.append(canonical)
+    return seen
+
+
 def load_dismissed_recommendations(path: Path) -> set[str]:
     """Slugs marked "not interested" from a home-page recommendation card —
     config/dismissed_recommendations.yaml, editable from Settings via the

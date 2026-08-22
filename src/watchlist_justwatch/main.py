@@ -20,7 +20,7 @@ from .analysis import (
 )
 from .config import (
     load_config, load_dismissed_recommendations, load_favorites, load_global_subscriptions,
-    load_revisitable_services,
+    load_main_services, load_revisitable_services,
 )
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import load_state, save_state
@@ -31,6 +31,8 @@ from .html_email import (
     render_film_audit_html,
     render_film_audit_text,
     render_report_html,
+    render_weekly_digest_html,
+    render_weekly_digest_text,
 )
 from .justwatch_client import resolve_and_fetch
 from .letterboxd import (
@@ -57,11 +59,13 @@ from .similar import (
     render_similar,
 )
 from .state import StateDoc, get_cached_entry_id
+from .weekly_digest import compute_weekly_digest
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
 DEFAULT_FAVORITES_PATH = Path("config/favorites.yaml")
 DEFAULT_REVISITABLE_PATH = Path("config/revisitable_services.yaml")
 DEFAULT_DISMISSED_PATH = Path("config/dismissed_recommendations.yaml")
+DEFAULT_MAIN_SERVICES_PATH = Path("config/main_services.yaml")
 DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 
 # JustWatch offers are the slow, rate-limit-fragile part of each run (see
@@ -366,6 +370,11 @@ def main() -> None:
     parser.add_argument("--email-audit-by-country", action="store_true",
                          help="Same as --email-audit but organized into sections by VPN country, using "
                               "already-fetched state (no network calls), then exit")
+    parser.add_argument("--weekly-digest", action="store_true",
+                         help="Send the weekly roundup email (films added to/leaving your streaming "
+                              "services this week, main services grouped with posters, everything else "
+                              "condensed), using already-fetched state (no network calls), then exit")
+    parser.add_argument("--main-services", type=Path, default=DEFAULT_MAIN_SERVICES_PATH)
     parser.add_argument("--backfill-diary", action="store_true",
                          help="One-time full watch-history backfill into state.diary — must be run "
                               "locally, since Letterboxd blocks /username/films/ (diary included) from "
@@ -482,6 +491,21 @@ def main() -> None:
         total_films = sum(len(c["films"]) for c in countries)
         sent = send_if_configured(f"Letterboxd Watchlist — {total_films} films not on a service you have, by country",
                                    text, html_body=html_body)
+        print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
+        sys.exit(0)
+
+    if args.weekly_digest:
+        config = load_config(args.config)
+        global_subscriptions = load_global_subscriptions(args.config)
+        revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
+        main_services = load_main_services(args.main_services)
+        state = load_state(args.database_url)
+        digest = compute_weekly_digest(state, config, global_subscriptions, revisitable, main_services)
+        text = render_weekly_digest_text(digest)
+        html_body = render_weekly_digest_html(digest)
+        sent = send_if_configured(
+            f"This week on your watchlist — {digest['total_added']} added, {digest['total_leaving']} leaving",
+            text, html_body=html_body)
         print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
         sys.exit(0)
 

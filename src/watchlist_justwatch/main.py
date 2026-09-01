@@ -23,7 +23,7 @@ from .config import (
     load_main_services, load_revisitable_services,
 )
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
-from .db import load_state, save_state
+from .db import get_meta_value, load_state, save_state
 from .diff import build_report
 from .html_email import (
     render_country_audit_html,
@@ -429,9 +429,16 @@ def main() -> None:
     if args.check_for_new_log:
         if not args.username:
             parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
-        state = load_state(args.database_url)
-        new_entries = fetch_new_diary_entries(args.username, state.last_seen_diary_guid)
+        # Runs hourly, and on almost every run nothing new has happened — a
+        # full load_state() just to read this one value (every film's offer
+        # data, the whole diary) on every single invocation was the actual
+        # driver of Neon's free-tier data-transfer quota being exceeded.
+        # The full read/write only happens on the rare run that finds
+        # something new to record.
+        last_seen_diary_guid = get_meta_value(args.database_url, "last_seen_diary_guid")
+        new_entries = fetch_new_diary_entries(args.username, last_seen_diary_guid)
         if new_entries:
+            state = load_state(args.database_url)
             # Newest first — entries[0] is the latest guid seen this check.
             state.last_seen_diary_guid = new_entries[0]["guid"]
             for entry in new_entries:

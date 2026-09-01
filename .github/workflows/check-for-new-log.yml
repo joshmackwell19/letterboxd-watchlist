@@ -2,9 +2,13 @@ name: Check for new Letterboxd log
 
 on:
   schedule:
-    # RSS-only check, one cheap request — safe to run often. The full daily
-    # pipeline only actually runs when this detects something new.
-    - cron: "*/15 * * * *"
+    # Was every 15 minutes — the RSS fetch itself is cheap, but every run
+    # also does a full load_state() (all films' offer data, the whole
+    # diary) against Neon regardless of whether anything new turns up, and
+    # that's what actually drove Neon's free-tier data-transfer quota over
+    # its limit. Hourly cuts that read volume 4x; the full daily pipeline
+    # still only actually runs when this detects something new.
+    - cron: "0 * * * *"
   workflow_dispatch: {}
 
 jobs:

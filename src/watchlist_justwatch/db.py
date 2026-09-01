@@ -68,6 +68,19 @@ def _offer_from_dict(data: dict) -> OfferRecord:
     )
 
 
+def get_meta_value(database_url: str, key: str):
+    """A single meta value without pulling the rest of state — the
+    15-min-turned-hourly --check-for-new-log run only ever needs
+    last_seen_diary_guid, and a full load_state() (every film's offer data,
+    the whole diary) on every single invocation was the actual driver of
+    Neon's free-tier data-transfer quota being exceeded, not run frequency
+    alone."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        row = conn.execute("SELECT value FROM meta WHERE key = %s", (key,)).fetchone()
+        return row[0] if row else None
+
+
 def load_state(database_url: str) -> StateDoc:
     with psycopg.connect(database_url) as conn:
         _ensure_schema(conn)

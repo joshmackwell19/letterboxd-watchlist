@@ -1,5 +1,7 @@
 import html as html_lib
+import zlib
 from datetime import date
+from types import SimpleNamespace
 
 from .availability import bucket_offers
 from .config import CountryConfig
@@ -7,102 +9,154 @@ from .countries import country_name
 from .diff import Report, ReportEntry
 
 _BUCKET_LABELS = [
-    ("have", "✅ Already available on a service you have"),
-    ("could_get_again", "\U0001F91D Could get again (friends/family, previous subscription)"),
-    ("free", "\U0001F193 Available without a subscription (free/ad-supported)"),
-    ("subscription", "\U0001F4B3 Available on other subscription services"),
+    ("have", "Available on a service you have"),
+    ("could_get_again", "Could get again (friends/family, previous subscription)"),
+    ("free", "Available without a subscription (free/ad-supported)"),
+    ("subscription", "Available on other subscription services"),
 ]
 
-_STYLE_CARD = "margin:0 0 28px; border-bottom:1px solid #eee; padding-bottom:20px;"
-_STYLE_POSTER = "border-radius:4px; display:block;"
-_STYLE_TITLE = "margin:0 0 6px; font-size:17px;"
-_STYLE_META = "margin:0 0 4px; color:#555; font-size:13px;"
-_STYLE_SYNOPSIS = "margin:8px 0 10px; font-size:13px; color:#333;"
-_STYLE_BUCKET_HEADING = "margin:10px 0 2px; font-size:13px; font-weight:bold;"
-_STYLE_BUCKET_LINE = "margin:0 0 2px; font-size:13px; color:#333;"
+DASHBOARD_URL = "https://joshmackwell19.github.io/letterboxd-watchlist/"
+
+# ---------------------------------------------------------------- design tokens
+# "Dispatch" — the product-transactional style (KPI tiles, poster grids, colour
+# chips per service) chosen after a round of mockups compared against a darker
+# app-branded style and an editorial/serif style. Deliberately email-safe: no
+# custom @font-face, table-based layout throughout, no CSS the major clients
+# strip.
+
+_INK = "#15181d"
+_MUTED = "#6b7178"
+_BORDER = "#e7e8eb"
+_ACCENT = "#0f9e8f"
+_ACCENT_DK = "#0a7a6e"
+_ACCENT_SOFT = "#eafaf7"
+_WARN = "#b45309"
+_SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
+
+# Soft badge backgrounds paired with a readable foreground of the same hue —
+# assigned deterministically per service brand so a given brand always gets
+# the same chip colour across every email and every run.
+_CHIP_PALETTE = [
+    ("#eef2ff", "#4338ca"), ("#f0fdfa", "#0f766e"), ("#fdf4ff", "#a21caf"),
+    ("#fff7ed", "#c2410c"), ("#f0f9ff", "#0369a1"), ("#fef2f2", "#b91c1c"),
+    ("#f7fee7", "#4d7c0f"), ("#fdf2f8", "#be185d"),
+]
 
 
-def _esc(text: str | None) -> str:
-    return html_lib.escape(text) if text else ""
+def _esc(text) -> str:
+    return html_lib.escape(str(text)) if text else ""
 
 
-def _bucket_lines_html(entries: list[tuple[str, str]]) -> str:
-    by_brand: dict[str, list[str]] = {}
-    for brand, country in entries:
-        by_brand.setdefault(brand, []).append(country_name(country))
-
-    return "".join(
-        f'<p style="{_STYLE_BUCKET_LINE}">{_esc(brand)}: {_esc(", ".join(sorted(countries)))}</p>'
-        for brand, countries in sorted(by_brand.items())
-    )
+def _chip_colors(brand: str) -> tuple[str, str]:
+    return _CHIP_PALETTE[zlib.crc32(brand.encode()) % len(_CHIP_PALETTE)]
 
 
-def _film_header_html(film) -> tuple[str, str]:
-    """Poster + title/rating/director/starring/synopsis shared by every film
-    card in the email — the rich look "new to your watchlist" already had,
-    now reused everywhere a film is mentioned rather than a single line."""
-    year = f" ({film.year})" if film.year else ""
-    rating = f" — Letterboxd {film.rating:.2f}★" if film.rating is not None else ""
-    poster = (
-        f'<img src="{_esc(film.poster_url)}" width="100" style="{_STYLE_POSTER}" alt="">'
-        if film.poster_url else ""
-    )
-    director = f'<p style="{_STYLE_META}">Directed by {_esc(", ".join(film.director))}</p>' if film.director else ""
-    starring = f'<p style="{_STYLE_META}">Starring {_esc(", ".join(film.starring))}</p>' if film.starring else ""
-    synopsis = f'<p style="{_STYLE_SYNOPSIS}">{_esc(film.synopsis)}</p>' if film.synopsis else ""
-    title_html = (
-        f'<p style="{_STYLE_TITLE}"><a href="https://letterboxd.com/film/{_esc(film.slug)}/" '
-        f'style="color:#111; text-decoration:none;">{_esc(film.title)}{year}</a>{rating}</p>'
-        f"{director}{starring}{synopsis}"
-    )
-    return poster, title_html
+def _chips_html(chips: list[str], limit: int = 4) -> str:
+    """A film on a dozen services would otherwise flood a single grid cell
+    with chips and blow out that row's height relative to its neighbours —
+    cap the visible list and fold the rest into a neutral "+N more" chip."""
+    visible, overflow = chips[:limit], len(chips) - limit
+    html = "".join(_chip(c) for c in visible)
+    if overflow > 0:
+        html += (f'<span style="display:inline-block; font:600 10px {_SANS}; color:{_MUTED}; background:#f2f3f4; '
+                 f'border-radius:5px; padding:2px 8px; margin:0 5px 4px 0;">+{overflow} more</span>')
+    return html
 
 
-def _film_card_table_html(poster: str, body_html: str) -> str:
-    return f"""
-<table role="presentation" style="{_STYLE_CARD}" width="100%">
-  <tr>
-    <td style="vertical-align:top; width:112px; padding-right:16px;">{poster}</td>
-    <td style="vertical-align:top;">{body_html}</td>
-  </tr>
-</table>
-"""
+def _chip(brand: str) -> str:
+    bg, fg = _chip_colors(brand)
+    return (f'<span style="display:inline-block; font:600 10px {_SANS}; color:{fg}; background:{bg}; '
+            f'border-radius:5px; padding:2px 8px; margin:0 5px 4px 0;">{_esc(brand)}</span>')
 
 
-def render_film_card_html(film, config: dict[str, CountryConfig], global_subscriptions: list[str],
-                           revisitable: set[str]) -> str:
-    poster, title_html = _film_header_html(film)
-
-    buckets = bucket_offers(film.offers, config, global_subscriptions, revisitable)
-    buckets_html = ""
-    if any(buckets.values()):
-        for key, label in _BUCKET_LABELS:
-            if buckets[key]:
-                buckets_html += f'<p style="{_STYLE_BUCKET_HEADING}">{label}</p>'
-                buckets_html += _bucket_lines_html(buckets[key])
-    else:
-        buckets_html = (f'<p style="{_STYLE_BUCKET_LINE}">Not currently streaming '
-                         f'(subscription/free) in any tracked country.</p>')
-
-    return _film_card_table_html(poster, title_html + buckets_html)
-
-
-def render_new_offer_card_html(film, offers: list, heading: str) -> str:
-    """Same rich poster/title/director/starring/synopsis card as a brand-new
-    watchlist addition, but for an existing film that just gained specific
-    new offers — the heading + offer list replaces the full-availability
-    breakdown since the point here is what's new, not everything it's on."""
-    poster, title_html = _film_header_html(film)
-    offers_html = f'<p style="{_STYLE_BUCKET_HEADING}">{heading}</p>'
-    offers_html += _bucket_lines_html([(o.package_clear_name, o.country) for o in offers])
-    return _film_card_table_html(poster, title_html + offers_html)
-
-
-def _wrap_document(body: str) -> str:
+def _header(pill_label: str) -> str:
     return (
-        '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; '
-        'color:#111; max-width:640px;">' + body + "</div>"
+        f'<table role="presentation" width="100%" style="margin-bottom:22px;"><tr>'
+        f'<td style="font:800 15px {_SANS}; color:{_INK}; letter-spacing:-.01em;">Watchlist</td>'
+        f'<td align="right"><span style="display:inline-block; font:600 10.5px {_SANS}; color:{_ACCENT_DK}; '
+        f'background:{_ACCENT_SOFT}; border-radius:20px; padding:5px 12px;">{_esc(pill_label)}</span></td>'
+        f'</tr></table>'
     )
+
+
+def _kpi_row(stats: list[tuple]) -> str:
+    if not stats:
+        return ""
+    n = len(stats)
+    tds = "".join(
+        f'<td style="width:{100 // n}%; padding:16px; background:#fafbfb; border:1px solid {_BORDER}; '
+        f'{"border-radius:10px 0 0 10px;" if i == 0 else ("border-radius:0 10px 10px 0; border-left:none;" if i == n - 1 else "border-left:none;")}">'
+        f'<div style="font:700 24px/1 {_SANS}; color:{_INK}; font-variant-numeric:tabular-nums;">{value}</div>'
+        f'<div style="font:500 11px {_SANS}; color:{_MUTED}; margin-top:5px;">{_esc(label)}</div></td>'
+        for i, (value, label) in enumerate(stats)
+    )
+    return f'<table role="presentation" width="100%" style="margin-bottom:26px; border-collapse:collapse;"><tr>{tds}</tr></table>'
+
+
+def _section(text: str) -> str:
+    return f'<div style="font:700 11.5px {_SANS}; color:{_INK}; margin:28px 0 12px;">{_esc(text)}</div>'
+
+
+def _empty_note(text: str) -> str:
+    return f'<p style="font:400 13px {_SANS}; color:{_MUTED}; margin:0 0 8px;">{_esc(text)}</p>'
+
+
+def _poster_img(url: str | None, w: int, h: int) -> str:
+    if not url:
+        return f'<div style="width:{w}px; height:{h}px; background:#eef0f2; border-radius:8px;"></div>'
+    return f'<img src="{_esc(url)}" width="{w}" height="{h}" style="border-radius:8px; display:block; object-fit:cover;" alt="">'
+
+
+def _grid(cells: list[str], cols: int = 3) -> str:
+    """Lay a list of pre-rendered <td> cells out into a poster grid, cols
+    per row — the visual language chosen for every film list in this
+    system (new arrivals, availability changes, audits) after comparing
+    it against a plain row-list and a denser text-only layout."""
+    rows = ""
+    for i in range(0, len(cells), cols):
+        chunk = cells[i:i + cols]
+        rows += "<tr>" + "".join(chunk) + ("<td></td>" * (cols - len(chunk))) + "</tr>"
+    return f'<table role="presentation" width="100%" style="border-collapse:collapse;">{rows}</table>'
+
+
+def _grid_item(film, *, chips: list[str] | None = None, caption: str | None = None, badge: str | None = None,
+               cols: int = 3) -> str:
+    year = f" ({film.year})" if getattr(film, "year", None) else ""
+    ry = getattr(film, "rating", None)
+    rating_html = f'<div style="font:600 10.5px {_SANS}; color:{_MUTED}; margin-top:3px;">&#9733; {ry:.2f}</div>' if ry is not None else ""
+    badge_html = f'<div style="font:600 10px {_SANS}; color:{_WARN}; margin-top:3px;">{_esc(badge)}</div>' if badge else ""
+    caption_html = f'<div style="font:400 11px {_SANS}; color:{_MUTED}; margin-top:3px;">{_esc(caption)}</div>' if caption else ""
+    chips_html = _chips_html(chips) if chips else ""
+    return (
+        f'<td style="width:{100 // cols}%; padding:0 8px 16px 0; vertical-align:top;">'
+        f'<a href="https://letterboxd.com/film/{_esc(film.slug)}/">{_poster_img(film.poster_url, 100, 144)}</a>'
+        f'<div style="font:600 12px {_SANS}; color:{_INK}; margin-top:7px; line-height:1.3;">{_esc(film.title)}{year}</div>'
+        f'{rating_html}{badge_html}<div style="margin-top:4px;">{chips_html}</div>{caption_html}</td>'
+    )
+
+
+def _cta() -> str:
+    return (f'<table role="presentation" width="100%" style="margin-top:26px;"><tr><td>'
+            f'<a href="{DASHBOARD_URL}" style="display:inline-block; font:600 13px {_SANS}; color:#ffffff; '
+            f'background:{_ACCENT}; padding:12px 24px; border-radius:8px; text-decoration:none;">Open dashboard</a>'
+            f'</td></tr></table>')
+
+
+def _footer() -> str:
+    return (f'<div style="margin-top:28px; padding-top:16px; border-top:1px solid {_BORDER}; '
+            f'font:400 11.5px {_SANS}; color:{_MUTED};">Sent automatically by Watchlist, tracking your Letterboxd '
+            f'watchlist against JustWatch.</div>')
+
+
+def _wrap(body: str) -> str:
+    return (f'<div style="font-family:{_SANS}; background:#ffffff; color:{_INK}; padding:32px; max-width:600px; '
+            f'border:1px solid {_BORDER}; border-radius:12px;">{body}</div>')
+
+
+# ---------------------------------------------------------------- daily update
+
+def _bucket_chips(entries: list[tuple[str, str]]) -> list[str]:
+    return sorted({brand for brand, _country in entries})
 
 
 def render_report_html(report: Report, config: dict[str, CountryConfig], global_subscriptions: list[str],
@@ -110,27 +164,53 @@ def render_report_html(report: Report, config: dict[str, CountryConfig], global_
     if report.is_empty():
         return None
 
-    body = f'<h2 style="font-size:18px; font-weight:500;">Letterboxd Watchlist — JustWatch Update ({date.today().isoformat()})</h2>'
+    changed_count = len(report.new_have) + len(report.new_free_tier) + len(report.new_possible)
+    body = _header("Daily update")
+    body += f'<div style="font:700 19px {_SANS}; color:{_INK}; margin-bottom:6px;">Here&rsquo;s what changed today</div>'
+    body += (f'<div style="font:400 13px {_SANS}; color:{_MUTED}; margin-bottom:20px;">'
+              f'A summary of your watchlist and streaming availability, tracked automatically.</div>')
+    body += _kpi_row([
+        (len(report.new_films), "New to watchlist"),
+        (len(_group_by_film(report.new_have)), "Now on your services"),
+        (len(_group_by_film(report.new_free_tier)) + len(_group_by_film(report.new_possible)), "Newly streaming elsewhere"),
+    ])
 
     if report.new_films:
-        body += '<h3 style="font-size:15px;">\U0001F3AC New to your watchlist</h3>'
+        body += _section("New to your watchlist")
+        cells = []
         for film in report.new_films:
-            body += render_film_card_html(film, config, global_subscriptions, revisitable)
+            caption = f"Directed by {', '.join(film.director)}" if film.director else None
+            cells.append(_grid_item(film, caption=caption))
+        body += _grid(cells)
 
-    if report.new_have or report.new_free_tier or report.new_possible:
-        body += _render_classified_section("✅ Available on a service you have", report.new_have)
-        body += _render_classified_section("\U0001F193 Available via free-tier app", report.new_free_tier)
-        body += _render_classified_section("\U0001F195 Available elsewhere (you don't have this service)",
-                                            report.new_possible)
+    if report.new_have:
+        body += _section("Available on a service you have")
+        cells = [_grid_item(film, chips=sorted({o.package_clear_name for o in offers}))
+                 for film, offers in _group_by_film(_dedupe_by_film_country(report.new_have))]
+        body += _grid(cells)
+
+    if report.new_free_tier:
+        body += _section("Free or ad-supported")
+        cells = [_grid_item(film, chips=sorted({o.package_clear_name for o in offers}))
+                 for film, offers in _group_by_film(_dedupe_by_film_country(report.new_free_tier))]
+        body += _grid(cells)
+
+    if report.new_possible:
+        body += _section("On a service you don't have")
+        cells = [_grid_item(film, chips=sorted({o.package_clear_name for o in offers}))
+                 for film, offers in _group_by_film(_dedupe_by_film_country(report.new_possible))]
+        body += _grid(cells)
 
     if report.unmatched:
-        body += '<h3 style="font-size:15px;">⚠️ Could not confidently match on JustWatch</h3>'
+        body += _section("Could not confidently match on JustWatch")
         for film in report.unmatched:
             year = f" ({film.year})" if film.year else ""
             reason = "no search results" if film.confidence == "unmatched" else "low-confidence match"
-            body += f'<p style="{_STYLE_BUCKET_LINE}">{_esc(film.title)}{year} — {reason}</p>'
+            body += _empty_note(f"{film.title}{year} — {reason}")
 
-    return _wrap_document(body)
+    body += _cta()
+    body += _footer()
+    return _wrap(body)
 
 
 _MONETIZATION_PRIORITY = {"FLATRATE": 0, "FREE": 1, "ADS": 2}
@@ -154,8 +234,8 @@ def _dedupe_by_film_country(entries: list[ReportEntry]) -> list[ReportEntry]:
 
 def _group_by_film(entries: list[ReportEntry]) -> list[tuple]:
     """One (film, offers) group per film, preserving first-seen order — a
-    film with new offers in several countries gets one card listing them
-    all, rather than one bare line per country."""
+    film with new offers in several countries gets one grid card listing
+    every brand it's newly on, rather than one card per country."""
     order: list[str] = []
     by_slug: dict[str, dict] = {}
     for e in entries:
@@ -166,26 +246,28 @@ def _group_by_film(entries: list[ReportEntry]) -> list[tuple]:
     return [(by_slug[slug]["film"], by_slug[slug]["offers"]) for slug in order]
 
 
-def _render_classified_section(heading: str, entries: list[ReportEntry]) -> str:
-    if not entries:
-        return ""
-    section = f'<h3 style="font-size:15px;">{heading}</h3>'
-    for film, offers in _group_by_film(_dedupe_by_film_country(entries)):
-        section += render_new_offer_card_html(film, offers, "Newly available:")
-    return section
-
+# ---------------------------------------------------------------- availability audits
 
 def render_film_audit_html(films: list, config: dict[str, CountryConfig], global_subscriptions: list[str],
                             revisitable: set[str]) -> str:
-    body = (
-        f'<h2 style="font-size:18px; font-weight:500;">Watchlist films not on a service you have '
-        f'({date.today().isoformat()})</h2>'
-        f'<p style="font-size:13px; color:#555; margin:0 0 20px;">{len(films)} films from your watchlist '
-        f"aren't currently available on any of your current subscriptions.</p>"
-    )
+    body = _header("Availability audit")
+    body += (f'<div style="font:700 19px {_SANS}; color:{_INK}; margin-bottom:6px;">'
+              f'{len(films)} films not on a service you have</div>')
+    body += (f'<div style="font:400 13px {_SANS}; color:{_MUTED}; margin-bottom:20px;">'
+              f"These aren't currently available on any of your current subscriptions.</div>")
+    body += _kpi_row([(len(films), "Not on your services")])
+
+    cells = []
     for film in films:
-        body += render_film_card_html(film, config, global_subscriptions, revisitable)
-    return _wrap_document(body)
+        buckets = bucket_offers(film.offers, config, global_subscriptions, revisitable)
+        chips: list[str] = []
+        for key, _label in _BUCKET_LABELS[1:]:
+            chips += _bucket_chips(buckets[key])
+        cells.append(_grid_item(film, chips=chips or None))
+    body += _grid(cells)
+    body += _cta()
+    body += _footer()
+    return _wrap(body)
 
 
 def render_film_audit_text(films: list) -> str:
@@ -227,55 +309,50 @@ def render_country_audit_text(countries: list[dict]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _film_service_summary_html(services: list[dict]) -> str:
-    by_bucket: dict[str, list[str]] = {}
-    for s in services:
-        by_bucket.setdefault(s["classification"], []).append(s["brand"])
-    parts = [
-        f'<span style="color:#333;">{emoji} {_esc(", ".join(sorted(by_bucket[key])))}</span>'
-        for key, emoji in _COUNTRY_BUCKET_LABELS if key in by_bucket
-    ]
-    return "&nbsp;&nbsp;".join(parts)
-
-
 def render_country_audit_html(countries: list[dict]) -> str:
     total_films = sum(len(c["films"]) for c in countries)
-    body = (
-        f'<h2 style="font-size:18px; font-weight:500;">Watchlist films not on a service you have, '
-        f'by VPN country ({date.today().isoformat()})</h2>'
-        f'<p style="font-size:13px; color:#555; margin:0 0 20px;">{total_films} film/country combinations '
-        f"across {len(countries)} countries.</p>"
-    )
+    body = _header("Country audit")
+    body += (f'<div style="font:700 19px {_SANS}; color:{_INK}; margin-bottom:6px;">'
+              f'Not on a service you have, by VPN country</div>')
+    body += (f'<div style="font:400 13px {_SANS}; color:{_MUTED}; margin-bottom:20px;">'
+              f'{total_films} film/country combinations across {len(countries)} countries.</div>')
+    body += _kpi_row([(total_films, "Combinations"), (len(countries), "Countries")])
+
     for country in countries:
-        body += (f'<h3 style="font-size:15px; margin:20px 0 6px; border-bottom:1px solid #eee; padding-bottom:4px;">'
-                 f'{_esc(country["name"])} ({len(country["films"])} films)</h3>')
+        body += _section(f"{country['name']} · {len(country['films'])} films")
+        cells = []
         for film in country["films"]:
-            year = f" ({film['year']})" if film["year"] else ""
-            rating = f" — {film['rating']:.2f}★" if film["rating"] is not None else ""
-            body += (
-                f'<p style="{_STYLE_BUCKET_LINE}">'
-                f'<a href="https://letterboxd.com/film/{_esc(film["slug"])}/" style="color:#111;">{_esc(film["title"])}</a>'
-                f'{year}{rating} — {_film_service_summary_html(film["services"])}</p>'
+            chips = sorted({s["brand"] for s in film["services"]})
+            entry = SimpleNamespace(
+                slug=film["slug"], title=film["title"], year=film["year"],
+                rating=film["rating"], poster_url=film.get("poster_url"),
             )
-    return _wrap_document(body)
+            cells.append(_grid_item(entry, chips=chips))
+        body += _grid(cells)
+
+    body += _cta()
+    body += _footer()
+    return _wrap(body)
 
 
 # ---------------------------------------------------------------- weekly digest
 
 def _days_phrase(n: int) -> str:
     if n == 0:
-        return "today"
+        return "leaving today"
     if n == 1:
-        return "tomorrow"
-    return f"in {n} days"
+        return "leaving tomorrow"
+    return f"leaving in {n} days"
 
 
-def _country_list(codes: list[str], limit: int = 3) -> str:
+def _country_list(codes: list[str], limit: int = 2) -> str:
     names = sorted({country_name(c) for c in codes})
     if len(names) <= limit:
         return ", ".join(names)
-    return ", ".join(names[:limit]) + f" +{len(names) - limit} more"
+    return ", ".join(names[:limit]) + f" +{len(names) - limit}"
 
+
+# -- text (unchanged plain-text fallback) --
 
 def _film_title_year(film) -> str:
     year = f" ({film.year})" if film.year else ""
@@ -286,24 +363,14 @@ def _film_rating(film) -> str:
     return f"{film.rating:.2f}★" if film.rating is not None else ""
 
 
-def _other_entry_services(entry: dict, limit: int = 4) -> list[tuple[str, list[str]]]:
-    return sorted(entry["services"].items())[:limit]
-
-
-def _other_entry_overflow(entry: dict, limit: int = 4) -> int:
-    return max(0, len(entry["services"]) - limit)
-
-
-# -- text --
-
 def _main_group_text(main_group: dict[str, list[dict]], *, days_key: str | None = None) -> list[str]:
     lines = []
     for brand in sorted(main_group):
         lines.append(f"{brand}:")
         for e in main_group[brand]:
             film = e["film"]
-            extra = f" — {_days_phrase(e[days_key])}" if days_key else ""
-            lines.append(f"  {_film_title_year(film)} {_film_rating(film)}{extra} — {_country_list(e['countries'])}")
+            extra = f" — leaving in {e[days_key]} days" if days_key else ""
+            lines.append(f"  {_film_title_year(film)} {_film_rating(film)}{extra} — {_country_list(e['countries'], limit=3)}")
         lines.append("")
     return lines
 
@@ -312,10 +379,10 @@ def _other_list_text(entries: list[dict], *, days_key: str | None = None) -> lis
     lines = []
     for entry in entries:
         film = entry["film"]
-        extra = f" — {_days_phrase(entry[days_key])}" if days_key else ""
-        services = _other_entry_services(entry)
-        service_bits = [f"{brand} ({_country_list(countries)})" for brand, countries in services]
-        overflow = _other_entry_overflow(entry)
+        extra = f" — leaving in {entry[days_key]} days" if days_key else ""
+        services = sorted(entry["services"].items())[:4]
+        service_bits = [f"{brand} ({_country_list(countries, limit=3)})" for brand, countries in services]
+        overflow = max(0, len(entry["services"]) - 4)
         if overflow:
             service_bits.append(f"+{overflow} more services")
         lines.append(f"  {_film_title_year(film)} {_film_rating(film)}{extra}")
@@ -352,80 +419,54 @@ def render_weekly_digest_text(digest: dict) -> str:
 
 # -- html --
 
-_STYLE_DIGEST_POSTER = "border-radius:4px; display:block; margin-bottom:5px;"
-_DIGEST_POSTER_WIDTH = 64
-
-
-def _main_group_html(main_group: dict[str, list[dict]], *, days_key: str | None = None) -> str:
+def _digest_grid_main(main_group: dict[str, list[dict]], *, days_key: str | None = None) -> str:
     body = ""
     for brand in sorted(main_group):
-        body += f'<p style="margin:16px 0 8px; font-size:13px; font-weight:bold; color:#111;">{_esc(brand)}</p>'
-        body += '<table role="presentation" style="border-collapse:collapse;"><tr>'
+        body += f'<div style="font:600 12px {_SANS}; color:{_INK}; margin:16px 0 8px;">{_esc(brand)}</div>'
+        cells = []
         for e in main_group[brand]:
             film = e["film"]
-            poster = (f'<img src="{_esc(film.poster_url)}" width="{_DIGEST_POSTER_WIDTH}" '
-                      f'style="{_STYLE_DIGEST_POSTER}" alt="">') if film.poster_url else ""
-            extra = f'<div style="font-size:10px; color:#b45309;">{_days_phrase(e[days_key])}</div>' if days_key else ""
-            body += (
-                f'<td style="vertical-align:top; padding:0 12px 10px 0; width:{_DIGEST_POSTER_WIDTH + 6}px;">'
-                f'<a href="https://letterboxd.com/film/{_esc(film.slug)}/">{poster}</a>'
-                f'<div style="font-size:11px; color:#111; line-height:1.3;">{_esc(_film_title_year(film))}</div>'
-                f'<div style="font-size:10.5px; color:#2a9d8f;">{_film_rating(film)}</div>'
-                f'{extra}'
-                f'<div style="font-size:10px; color:#888;">{_esc(_country_list(e["countries"], limit=1))}</div>'
-                '</td>'
-            )
-        body += '</tr></table>'
+            badge = _days_phrase(e[days_key]) if days_key else None
+            cells.append(_grid_item(film, caption=_country_list(e["countries"]), badge=badge))
+        body += _grid(cells)
     return body
 
 
-def _other_list_html(entries: list[dict], *, days_key: str | None = None) -> str:
-    body = ""
+def _digest_grid_other(entries: list[dict], *, days_key: str | None = None) -> str:
+    cells = []
     for entry in entries:
         film = entry["film"]
-        extra = f' &mdash; <span style="color:#b45309;">{_days_phrase(entry[days_key])}</span>' if days_key else ""
-        services = _other_entry_services(entry)
-        service_bits = [f'{_esc(brand)} ({_esc(_country_list(countries))})' for brand, countries in services]
-        overflow = _other_entry_overflow(entry)
-        if overflow:
-            service_bits.append(f"+{overflow} more services")
-        body += (
-            f'<p style="margin:0 0 3px; font-size:12.5px; color:#333; line-height:1.4;">'
-            f'<a href="https://letterboxd.com/film/{_esc(film.slug)}/" style="color:#111; text-decoration:none;">'
-            f'{_esc(_film_title_year(film))}</a> '
-            f'<span style="color:#2a9d8f;">{_film_rating(film)}</span>{extra}<br>'
-            f'<span style="font-size:11px; color:#888;">{"; ".join(service_bits)}</span></p>'
-        )
-    return body
+        chips = sorted(entry["services"].keys())
+        badge = _days_phrase(entry[days_key]) if days_key else None
+        cells.append(_grid_item(film, chips=chips, badge=badge))
+    return _grid(cells)
 
 
 def render_weekly_digest_html(digest: dict) -> str:
     week_range = f"{digest['week_start'].strftime('%d %b')}&ndash;{digest['week_end'].strftime('%d %b %Y')}"
-    body = (
-        f'<h2 style="font-size:18px; font-weight:500; margin:0 0 4px;">This week on your watchlist</h2>'
-        f'<p style="font-size:13px; color:#555; margin:0 0 20px;">{week_range} &middot; '
-        f'{digest["total_added"]} added, {digest["total_leaving"]} leaving.</p>'
-        '<h3 style="font-size:15px; margin:0 0 6px; border-bottom:1px solid #eee; padding-bottom:6px;">'
-        'Added to your main services</h3>'
-    )
+    body = _header("Weekly digest")
+    body += f'<div style="font:700 19px {_SANS}; color:{_INK}; margin-bottom:4px;">This week on your watchlist</div>'
+    body += f'<div style="font:400 13px {_SANS}; color:{_MUTED}; margin-bottom:20px;">{week_range}</div>'
+    body += _kpi_row([(digest["total_added"], "Added this week"), (digest["total_leaving"], "Leaving this week")])
+
+    body += _section("Added to your main services")
     if digest["main_additions"]:
-        body += _main_group_html(digest["main_additions"])
+        body += _digest_grid_main(digest["main_additions"])
     else:
-        body += '<p style="font-size:13px; color:#777;">Nothing new this week.</p>'
+        body += _empty_note("Nothing new this week.")
     if digest["other_additions"]:
-        body += ('<p style="margin:14px 0 6px; font-size:12px; font-weight:bold; text-transform:uppercase; '
-                  'letter-spacing:.03em; color:#888;">Also added elsewhere</p>')
-        body += _other_list_html(digest["other_additions"])
+        body += _section("Also added elsewhere")
+        body += _digest_grid_other(digest["other_additions"])
 
-    body += ('<h3 style="font-size:15px; margin:26px 0 6px; border-bottom:1px solid #eee; padding-bottom:6px;">'
-              'Leaving your main services this week</h3>')
+    body += _section("Leaving your main services this week")
     if digest["main_leaving"]:
-        body += _main_group_html(digest["main_leaving"], days_key="days")
+        body += _digest_grid_main(digest["main_leaving"], days_key="days")
     else:
-        body += '<p style="font-size:13px; color:#777;">Nothing leaving this week.</p>'
+        body += _empty_note("Nothing leaving this week.")
     if digest["other_leaving"]:
-        body += ('<p style="margin:14px 0 6px; font-size:12px; font-weight:bold; text-transform:uppercase; '
-                  'letter-spacing:.03em; color:#888;">Also leaving elsewhere</p>')
-        body += _other_list_html(digest["other_leaving"], days_key="min_days")
+        body += _section("Also leaving elsewhere")
+        body += _digest_grid_other(digest["other_leaving"], days_key="min_days")
 
-    return _wrap_document(body)
+    body += _cta()
+    body += _footer()
+    return _wrap(body)

@@ -198,7 +198,7 @@ def films_not_on_favorite_by_country(
             services.sort(key=lambda s: s["brand"])
             by_country[country].append({
                 "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
-                "services": services,
+                "poster_url": film.poster_url, "services": services,
             })
 
     countries = []

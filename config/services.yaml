@@ -9,6 +9,7 @@ global:
     - "YouTube"
     - "Kanopy"
     - "BFI Player"
+    - "Netflix"
 
 countries:
   AU:

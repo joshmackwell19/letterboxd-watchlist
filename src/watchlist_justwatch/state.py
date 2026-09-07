@@ -43,15 +43,17 @@ class StateDoc:
     # per-entry watch dates (see fetch_watched_films), but enough to exclude
     # already-seen films from discovery and to power "worth a rewatch".
     diary: dict[str, dict] = field(default_factory=dict)
-    # Sarah's own Letterboxd watchlist (slugs only) — purely additive to the
-    # dashboard, refreshed each run same as the primary watchlist. Being on
-    # this list does NOT imply watch_together status; see db.py's dedicated
-    # watch_together table for that.
+    # `films` holds every film tracked for JustWatch offers/enrichment —
+    # Josh's watchlist UNION Sarah's, each run (see main.py's combined_films).
+    # These two membership sets say whose watchlist each slug actually
+    # belongs to, since `films` alone can no longer answer that. Josh's own
+    # dashboard tabs (Films/Country/Services/home sections) scope to
+    # josh_watchlist only — Sarah's list being additive was never meant to
+    # bleed a solo-interest film into his own browsing/recommendations.
+    # Neither membership implies watch_together status; see db.py's
+    # dedicated watch_together table for that.
+    josh_watchlist: set[str] = field(default_factory=set)
     sarah_watchlist: set[str] = field(default_factory=set)
-    # Enriched details (same shape as a discovery_films entry) for any slug
-    # on Sarah's watchlist that isn't already in `films` — films already on
-    # the primary watchlist are looked up there instead, not duplicated here.
-    sarah_extra_films: dict[str, dict] = field(default_factory=dict)
 
 
 def get_cached_entry_id(state: StateDoc, slug: str) -> tuple[str | None, str | None]:

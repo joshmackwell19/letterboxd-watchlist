@@ -24,8 +24,8 @@ on:
           - declined
 
 # Shares daily.yml's concurrency group on purpose — queues behind an
-# in-progress full run rather than racing its own "commit dashboard.html"
-# step, same reasoning already documented there.
+# in-progress full run rather than racing it on the database, same reasoning
+# already documented there.
 concurrency:
   group: daily-pipeline
   cancel-in-progress: false
@@ -34,7 +34,7 @@ jobs:
   regenerate:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -62,17 +62,12 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m watchlist_justwatch.main --dashboard
 
-      - name: Commit updated dashboard
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add dashboard.html
-          git diff --cached --quiet || git commit -m "Update dashboard [skip ci]"
-          git push
-
+      # Not committed to git (see daily.yml) — Pages deploys straight from
+      # this run's own artifact upload below.
+      #
       # Same reasoning as daily.yml: the actual change (DB write + dashboard
-      # regen + commit) has already succeeded by this point — a transient
-      # Pages hiccup shouldn't mark this run as failed.
+      # regen) has already succeeded by this point — a transient Pages
+      # hiccup shouldn't mark this run as failed.
       - name: Prepare Pages site
         continue-on-error: true
         run: |

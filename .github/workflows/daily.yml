@@ -8,9 +8,9 @@ on:
 
 # The dashboard's "Refresh data" button and check-for-new-log.yml can both
 # trigger this on top of the daily cron — without this, two overlapping runs
-# would race on the "Commit updated dashboard" step's git push. Queue instead
-# of canceling, since an in-progress run may already be partway through
-# writing state to the database.
+# would race writing state to the database (one could start reading previous
+# state before the other has finished saving its own run). Queue instead of
+# canceling, since an in-progress run may already be partway through that.
 concurrency:
   group: daily-pipeline
   cancel-in-progress: false
@@ -19,7 +19,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -46,17 +46,17 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m watchlist_justwatch.main
 
-      - name: Commit updated dashboard
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add dashboard.html
-          git diff --cached --quiet || git commit -m "Update dashboard [skip ci]"
-          git push
-
-      # The watchlist check, email, and state commit above are the parts that
-      # matter — they've already succeeded by this point. Pages deployment is
-      # a nice-to-have mirror of the dashboard; GitHub's Pages deploy step
+      # dashboard.html is no longer committed to git — Pages deploys straight
+      # from this workflow's own artifact upload below, which never touched
+      # git history anyway, and committing a fresh ~12MB file on every run
+      # (several times a day, since regenerate-dashboard.yml joined daily.yml
+      # on this) was pure unbounded repo growth with no reader left that
+      # needed it (see scripts/sync_dashboard_to_icloud.sh, which now pulls
+      # from the public Pages URL instead of git).
+      #
+      # The watchlist check and email above are the parts that matter —
+      # they've already succeeded by this point. Pages deployment is a
+      # nice-to-have mirror of the dashboard; GitHub's Pages deploy step
       # occasionally has transient hiccups (e.g. right after first enabling
       # Pages), and those shouldn't mark the whole daily run as failed or
       # send an alarming failure email when the actual functionality worked.

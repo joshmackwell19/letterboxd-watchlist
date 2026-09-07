@@ -5,6 +5,7 @@ from datetime import date
 from .brands import canonical_brand_name, group_offers_by_brand_and_country, is_major_brand
 from .config import CountryConfig, is_have_anywhere
 from .countries import country_name
+from .languages import is_subtitled, language_name
 from .state import StateDoc
 
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
@@ -157,6 +158,8 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
         "director": _truncate_joined(", ".join(film.director) if film.director else None),
         "starring": ", ".join(film.starring) if film.starring else None,
         "genre": film.genre,
+        "language_name": language_name(film.original_language),
+        "is_subtitled": is_subtitled(film.original_language),
         "any_service": bool(all_offers),
         "have_service": any_have,
         "coverage_countries": len(all_countries),
@@ -257,6 +260,8 @@ def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> 
             "starring": film.starring,
             "synopsis": film.synopsis,
             "genre": film.genre,
+            "language_name": language_name(film.original_language),
+            "is_subtitled": is_subtitled(film.original_language),
             "all_offers": all_offers,
         }
     return lookup
@@ -523,19 +528,32 @@ def build_dashboard_data(
 
     rows = [_film_row(film, main_brand_set, films_all_offers[slug]) for slug, film in state.films.items()]
     for r in rows:
-        r["watch_together_status"] = watch_together.get(r["slug"], {}).get("status")
+        info = watch_together.get(r["slug"], {})
+        r["watch_together_status"] = info.get("status")
+        r["watch_together_added_at"] = info.get("added_at")
     rows.sort(key=lambda r: r["title"].lower())
 
     films_by_slug = _films_by_slug(state, films_all_offers)
     for slug, entry in films_by_slug.items():
         entry["watch_together_status"] = watch_together.get(slug, {}).get("status")
 
+    # Sarah's own watchlist entries aren't stored as full FilmState objects
+    # (no JustWatch offer-checking for them, see main.py) — just enough for
+    # a mini-card and quick-look, with the same language_name/is_subtitled
+    # resolution as every other film so quick-look reads identically
+    # regardless of which tab a film was opened from.
+    sarah_extra_resolved = {
+        slug: {**data, "language_name": language_name(data.get("original_language")),
+               "is_subtitled": is_subtitled(data.get("original_language"))}
+        for slug, data in state.sarah_extra_films.items()
+    }
+
     sarah_films = [
-        _mini_card(state.films[slug]) if slug in state.films else _mini_card_from_lookup(state.sarah_extra_films[slug])
+        _mini_card(state.films[slug]) if slug in state.films else _mini_card_from_lookup(sarah_extra_resolved[slug])
         for slug in sorted(state.sarah_watchlist, key=lambda s: (
-            state.films[s].title if s in state.films else state.sarah_extra_films.get(s, {}).get("title", "")
+            state.films[s].title if s in state.films else sarah_extra_resolved.get(s, {}).get("title", "")
         ).lower())
-        if slug in state.films or slug in state.sarah_extra_films
+        if slug in state.films or slug in sarah_extra_resolved
     ]
 
     return {
@@ -547,7 +565,7 @@ def build_dashboard_data(
         "films": rows,
         "services": _service_rows(state, films_all_offers),
         "countries": _country_rows(state, films_all_offers),
-        "films_by_slug": {**films_by_slug, **state.discovery_films},
+        "films_by_slug": {**films_by_slug, **state.discovery_films, **sarah_extra_resolved},
         "sarah_films": sarah_films,
         "settings": _settings_data(config, global_subscriptions),
     }
@@ -855,18 +873,71 @@ _TEMPLATE = """<!DOCTYPE html>
   }
   .dismiss-btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--hairline); }
   .film-card.dismissing { opacity: 0; transform: scale(0.96); transition: opacity 0.2s, transform 0.2s; }
-  .review-actions { display: flex; gap: 6px; margin-top: 8px; }
-  .review-btn {
-    flex: 1; border-radius: 999px; border: 1.5px solid var(--hairline-strong); background: none;
-    padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text-muted);
-  }
-  .review-btn-yes { border-color: rgba(74, 222, 128, 0.4); color: #4ade80; }
-  .review-btn-yes:hover { background: rgba(74, 222, 128, 0.14); }
-  .review-btn-no { border-color: rgba(248, 113, 113, 0.4); color: #f87171; }
-  .review-btn-no:hover { background: rgba(248, 113, 113, 0.14); }
-  .review-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .icon-btn { position: relative; }
   .icon-btn .new-badge { position: absolute; top: -3px; right: -3px; margin-left: 0; }
+
+  /* ---------- Review screen: one film at a time, not a grid ---------- */
+  .review-shell { max-width: 460px; margin: 0 auto; }
+  .review-progress {
+    text-align: center; font-size: 12px; font-weight: 600; color: var(--text-faint);
+    letter-spacing: 0.02em; margin-bottom: 10px;
+  }
+  .review-card {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 18px;
+    overflow: hidden; box-shadow: var(--shadow);
+  }
+  .review-poster-wrap { position: relative; }
+  .review-poster {
+    width: 100%; height: min(48vh, 420px); min-height: 260px; object-fit: cover; display: block;
+    background: var(--hairline);
+  }
+  .review-poster-placeholder {
+    width: 100%; height: min(48vh, 420px); min-height: 260px; background: var(--hairline);
+  }
+  .review-rating-badge {
+    position: absolute; bottom: 12px; left: 14px; background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+    color: #4ade80; font-weight: 700; font-size: 13.5px; padding: 4px 10px; border-radius: 999px;
+  }
+  .review-body { padding: 18px 20px 22px; }
+  .review-title { font-size: 21px; font-weight: 700; margin: 0 0 3px; letter-spacing: -0.01em; }
+  .review-title .year { color: var(--text-faint); font-weight: 400; }
+  .review-director { font-size: 13px; color: var(--text-muted); margin: 0 0 10px; }
+  .review-subtitled-badge {
+    display: inline-flex; align-items: center; gap: 6px; background: rgba(251, 191, 36, 0.14);
+    border: 1px solid rgba(251, 191, 36, 0.35); color: #fbbf24; font-size: 12.5px; font-weight: 700;
+    padding: 5px 12px; border-radius: 999px; margin: 0 0 12px;
+  }
+  .review-genre { font-size: 13px; margin: 0 0 12px; }
+  .review-synopsis { font-size: 14px; line-height: 1.6; color: var(--text-muted); margin: 0 0 14px; }
+  .review-cast { font-size: 12.5px; color: var(--text-faint); margin: 0 0 4px; }
+  .review-cast b { color: var(--text-muted); font-weight: 600; }
+  .review-actions { display: flex; gap: 10px; margin-top: 18px; }
+  .review-btn {
+    flex: 1; border-radius: 999px; padding: 15px 14px; font-size: 15px; font-weight: 700;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+    transition: transform 0.1s, background 0.15s;
+  }
+  .review-btn:active { transform: scale(0.97); }
+  .review-btn-no {
+    background: none; border: 1.5px solid rgba(248, 113, 113, 0.4); color: #f87171; flex: 0.85;
+  }
+  .review-btn-no:hover { background: rgba(248, 113, 113, 0.14); }
+  .review-btn-yes { background: var(--accent); border: none; color: #06201d; }
+  .review-btn-yes:hover { filter: brightness(1.08); }
+  .review-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .review-card.dismissing { animation: review-card-exit 0.26s ease forwards; }
+  @keyframes review-card-exit { to { opacity: 0; transform: scale(0.96) translateY(6px); } }
+  .review-card.entering { animation: review-card-enter 0.24s ease; }
+  @keyframes review-card-enter { from { opacity: 0; transform: scale(0.98); } }
+  .review-empty {
+    text-align: center; padding: 70px 20px; color: var(--text-muted);
+  }
+  .review-empty .icon { font-size: 34px; margin-bottom: 12px; display: block; }
+  .review-empty h3 { font-size: 16px; color: var(--text); margin: 0 0 6px; }
+  .review-empty p { font-size: 13.5px; margin: 0; }
+  @media (max-width: 700px) {
+    .review-poster, .review-poster-placeholder { height: 40vh; }
+  }
   .toast {
     position: fixed; bottom: calc(20px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
     background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text);
@@ -1105,12 +1176,6 @@ _TEMPLATE = """<!DOCTYPE html>
       <span id="filmsFilterToggles"></span>
       <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
     </div>
-    <div class="controls" data-view="review" id="controls-review">
-      <div class="search-wrap">
-        <input type="text" id="reviewSearch" placeholder="Search title, year, director, cast...">
-        <span class="search-clear hidden" id="reviewSearchClear">✕</span>
-      </div>
-    </div>
     <div class="controls" data-view="sarah" id="controls-sarah">
       <div class="search-wrap">
         <input type="text" id="sarahSearch" placeholder="Search title, year, director, cast...">
@@ -1182,11 +1247,7 @@ _TEMPLATE = """<!DOCTYPE html>
 </section>
 
 <section class="view" id="view-review">
-  <p class="muted" style="margin: 0 0 14px;">
-    Every film added to the watchlist lands here for a yes/no on watching it together — decisions save
-    within about a minute, no need to wait around.
-  </p>
-  <div id="reviewGrid" class="film-cards"></div>
+  <div id="reviewScreen"></div>
 </section>
 
 <section class="view" id="view-sarah">
@@ -1762,24 +1823,42 @@ function addDismissButton(cardEl, slug) {
   (end || cardEl).appendChild(btn);
 }
 
-// ---------- Watch-together review ----------
+// ---------- Watch-together review — one film at a time, not a grid ----------
+
+// Oldest-added first, so nothing sits unreviewed indefinitely (matches the
+// backfill order main.py seeds pending rows in).
+function pendingQueue() {
+  return DATA.films
+    .filter(f => f.watch_together_status === 'pending')
+    .sort((a, b) => (a.watch_together_added_at || '').localeCompare(b.watch_together_added_at || ''));
+}
+
+let reviewIndex = 0;
+
+function updateReviewBadge() {
+  const count = pendingQueue().length;
+  document.querySelectorAll('.review-count-badge, .review-count-badge-mobile').forEach(el => {
+    el.textContent = String(count);
+    el.classList.toggle('hidden', count === 0);
+  });
+}
 
 // Unlike dismissRecommendation, this goes through the regenerate-dashboard
 // workflow (not a plain GitHub commit) since the status lives in Postgres,
 // not a config YAML file — see db.py's watch_together table. Still
-// optimistic: the card leaves the Review queue immediately, the actual
+// optimistic: the card advances to the next film immediately, the actual
 // write/regen happens in the background over the next under-a-minute or so.
 function tagFilm(slug, status, cardEl) {
   cardEl.classList.add('dismissing');
-  setTimeout(() => { cardEl.remove(); updateReviewBadge(); }, 200);
   // DATA.films and DATA.films_by_slug are separate object instances per slug
   // (each just its own spot in the parsed JSON payload, not shared
-  // references) — both need updating, or a later re-render (e.g. switching
-  // back to the Review tab) would still see 'pending' and resurrect the card.
+  // references) — both need updating, or a later re-render would still see
+  // 'pending' and resurrect this film at the front of the queue.
   const row = DATA.films.find(f => f.slug === slug);
   if (row) row.watch_together_status = status;
   const film = DATA.films_by_slug[slug];
   if (film) film.watch_together_status = status;
+  setTimeout(renderReview, 220);
   fetch(DATA.settings.refresh_worker_url + '/tag-film', {
     method: 'POST',
     headers: {
@@ -1795,59 +1874,77 @@ function tagFilm(slug, status, cardEl) {
     .catch(() => showToast('Saved locally, but the write failed — it may revert to pending.'));
 }
 
-function addReviewActions(cardEl, slug) {
-  const wrap = document.createElement('div');
-  wrap.className = 'review-actions';
-  const yesBtn = document.createElement('button');
-  yesBtn.type = 'button';
-  yesBtn.className = 'review-btn review-btn-yes';
-  yesBtn.textContent = '✓ Watch together';
-  const noBtn = document.createElement('button');
-  noBtn.type = 'button';
-  noBtn.className = 'review-btn review-btn-no';
-  noBtn.textContent = '✕ Not for us';
-  [yesBtn, noBtn].forEach(btn => btn.addEventListener('click', event => {
-    event.stopPropagation();
-    yesBtn.disabled = true;
-    noBtn.disabled = true;
-    tagFilm(slug, btn === yesBtn ? 'confirmed' : 'declined', cardEl);
-  }));
-  wrap.appendChild(yesBtn);
-  wrap.appendChild(noBtn);
-  cardEl.querySelector('.film-card-body').appendChild(wrap);
-}
-
-function updateReviewBadge() {
-  const count = DATA.films.filter(f => f.watch_together_status === 'pending').length;
-  document.querySelectorAll('.review-count-badge, .review-count-badge-mobile').forEach(el => {
-    el.textContent = String(count);
-    el.classList.toggle('hidden', count === 0);
-  });
-}
-
 function renderReview() {
-  const q = document.getElementById('reviewSearch').value.trim().toLowerCase();
-  const pending = DATA.films.filter(f => f.watch_together_status === 'pending' && (!q || searchHaystack(f).includes(q)));
-  const container = document.getElementById('reviewGrid');
-  container.innerHTML = '';
-  const frag = document.createDocumentFragment();
-  pending.forEach(film => {
-    const card = filmCardShell(film, '');
-    addReviewActions(card, film.slug);
-    frag.appendChild(card);
-  });
-  container.appendChild(frag);
-  ensureNotEmpty(container, q ? 'No pending films match your search.' : 'Nothing waiting on a decision right now.');
+  const queue = pendingQueue();
+  const container = document.getElementById('reviewScreen');
   updateReviewBadge();
+
+  if (!queue.length) {
+    container.innerHTML =
+      '<div class="review-empty">' +
+        '<span class="icon">🎬</span>' +
+        '<h3>You’re all caught up</h3>' +
+        '<p>Nothing waiting on a decision right now — new watchlist additions land here automatically.</p>' +
+      '</div>';
+    return;
+  }
+  if (reviewIndex >= queue.length) reviewIndex = 0;
+  const film = queue[reviewIndex];
+
+  const poster = film.poster_url
+    ? '<img class="review-poster" loading="lazy" src="' + escAttr(film.poster_url) +
+      '" onerror="this.outerHTML=\\'<div class=&quot;review-poster-placeholder&quot;></div>\\'">'
+    : '<div class="review-poster-placeholder"></div>';
+  const rating = film.rating != null ? '<div class="review-rating-badge">' + film.rating.toFixed(2) + '★</div>' : '';
+  const director = film.director ? '<p class="review-director">' + esc(film.director) + '</p>' : '';
+  // The explicit call-out Sarah asked for — only shown when the film's
+  // original language isn't English (see languages.is_subtitled), never a
+  // "not subtitled" badge for the common case, same "only show when it's
+  // actually relevant" convention leaving_soon/added_service already use.
+  const subtitled = film.is_subtitled
+    ? '<div class="review-subtitled-badge">🌐 Subtitled film' +
+      (film.language_name ? ' · ' + esc(film.language_name) : '') + '</div>'
+    : '';
+  const genre = (film.genre && film.genre.length)
+    ? '<p class="review-genre detail-genre">' + esc(film.genre.join(', ')) + '</p>' : '';
+  const synopsis = film.synopsis ? '<p class="review-synopsis">' + esc(film.synopsis) + '</p>' : '';
+  const cast = film.starring ? '<p class="review-cast"><b>Starring</b> ' + esc(film.starring) + '</p>' : '';
+
+  container.innerHTML =
+    '<div class="review-shell">' +
+      '<div class="review-progress">' + (reviewIndex + 1) + ' of ' + queue.length + ' to review</div>' +
+      '<div class="review-card entering" id="reviewCard" data-slug="' + escAttr(film.slug) + '">' +
+        '<div class="review-poster-wrap">' + poster + rating + '</div>' +
+        '<div class="review-body">' +
+          '<h2 class="review-title">' + esc(film.title) +
+            (film.year ? ' <span class="year">' + film.year + '</span>' : '') + '</h2>' +
+          director + subtitled + genre + synopsis + cast +
+          '<div class="review-actions">' +
+            '<button type="button" class="review-btn review-btn-no" id="reviewNoBtn">✕ Not for us</button>' +
+            '<button type="button" class="review-btn review-btn-yes" id="reviewYesBtn">♥ Watch together</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  const card = document.getElementById('reviewCard');
+  document.getElementById('reviewYesBtn').addEventListener('click', () => {
+    document.getElementById('reviewYesBtn').disabled = true;
+    document.getElementById('reviewNoBtn').disabled = true;
+    tagFilm(film.slug, 'confirmed', card);
+  });
+  document.getElementById('reviewNoBtn').addEventListener('click', () => {
+    document.getElementById('reviewYesBtn').disabled = true;
+    document.getElementById('reviewNoBtn').disabled = true;
+    tagFilm(film.slug, 'declined', card);
+  });
 }
 
-document.getElementById('reviewGrid').addEventListener('click', event => {
-  if (event.target.closest('a.film-link') || event.target.closest('.review-btn')) return;
-  const card = event.target.closest('.film-card');
+document.getElementById('reviewScreen').addEventListener('click', event => {
+  if (event.target.closest('.review-btn')) return;
+  const card = event.target.closest('.review-card');
   if (card) openQuickLook(card.dataset.slug);
 });
-document.getElementById('reviewSearch').addEventListener('input', renderReview);
-wireSearchClear('reviewSearch', 'reviewSearchClear', renderReview);
 
 // ---------- Sarah's watchlist (browsing only — additive, not tied to watch_together) ----------
 
@@ -1941,6 +2038,9 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
   const genreLine = (film.genre && film.genre.length)
     ? '<p class="detail-meta detail-genre"><strong>Genre:</strong> ' + esc(film.genre.join(', ')) + '</p>' : '';
+  const languageLine = film.language_name
+    ? '<p class="detail-meta"><strong>Language:</strong> ' + esc(film.language_name) +
+      (film.is_subtitled ? ' <span title="Subtitled film">🌐</span>' : '') + '</p>' : '';
   const synopsis = film.synopsis ? '<p class="detail-synopsis">' + esc(film.synopsis) + '</p>' : '';
 
   // Offers a real JustWatch url turn into an actual link (badge-link) that
@@ -1991,7 +2091,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     '<div class="detail-body">' +
       '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
       '<p class="detail-rating">' + rating + '</p>' +
-      director + starring + genreLine + synopsis + primaryHtml +
+      director + starring + genreLine + languageLine + synopsis + primaryHtml +
       '<div class="other-services-section">' +
         '<p class="detail-meta"><strong>' + otherLabel + '</strong></p>' +
         '<div class="badge-wrap">' + otherHtml + '</div>' +

@@ -50,3 +50,6 @@ class FilmState:
     starring: list[str] = field(default_factory=list)
     synopsis: str | None = None
     genre: list[str] = field(default_factory=list)
+    # ISO 639-1 code (TMDB's "original_language", not Letterboxd's own
+    # inLanguage list — see tmdb_client.original_language for why).
+    original_language: str | None = None

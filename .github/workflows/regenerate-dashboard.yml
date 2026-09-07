@@ -23,12 +23,17 @@ on:
           - confirmed
           - declined
 
-# Shares daily.yml's concurrency group on purpose — queues behind an
-# in-progress full run rather than racing it on the database, same reasoning
-# already documented there.
-concurrency:
-  group: daily-pipeline
-  cancel-in-progress: false
+# Deliberately no concurrency group. This used to share daily.yml's
+# ("daily-pipeline"), but GitHub Actions concurrency only lets ONE run wait
+# queued at a time — dispatching several taps within the ~30s a run takes
+# (exactly what happens tapping through the Review queue) meant only the
+# LAST one in each rapid burst actually ran; every earlier one was silently
+# cancelled before its --set-watch-together-status ever executed, losing
+# real decisions with no trace. Each run here only touches its own single
+# watch_together row (its own tiny transaction, safe under any interleaving)
+# and reads a transactionally-consistent snapshot of everything else for
+# --dashboard — nothing here needs serializing against another run of
+# itself, or against daily.yml's own separate concurrency-protected run.
 
 jobs:
   regenerate:

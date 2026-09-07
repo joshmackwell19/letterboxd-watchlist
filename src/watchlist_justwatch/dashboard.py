@@ -158,6 +158,11 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
         "director": _truncate_joined(", ".join(film.director) if film.director else None),
         "starring": ", ".join(film.starring) if film.starring else None,
         "genre": film.genre,
+        # Not used by the small tile cards (filmCardShell), but the Review
+        # screen's much bigger card reads DATA.films directly (not
+        # films_by_slug, which is quick-look's own separate copy) and needs
+        # the full plot, not just director/genre.
+        "synopsis": film.synopsis,
         "language_name": language_name(film.original_language),
         "is_subtitled": is_subtitled(film.original_language),
         "any_service": bool(all_offers),
@@ -876,20 +881,27 @@ _TEMPLATE = """<!DOCTYPE html>
   .icon-btn { position: relative; }
   .icon-btn .new-badge { position: absolute; top: -3px; right: -3px; margin-left: 0; }
 
-  /* ---------- Review screen: one film at a time, not a grid ---------- */
-  .review-shell { max-width: 460px; margin: 0 auto; }
+  /* ---------- Review screen: a small hand of films, not a grid ---------- */
   .review-progress {
     text-align: center; font-size: 12px; font-weight: 600; color: var(--text-faint);
-    letter-spacing: 0.02em; margin-bottom: 10px;
+    letter-spacing: 0.02em; margin-bottom: 14px;
+  }
+  .review-grid {
+    display: grid; grid-template-columns: 1fr; gap: 22px; max-width: 460px; margin: 0 auto;
+  }
+  @media (min-width: 900px) {
+    .review-grid { grid-template-columns: repeat(3, 1fr); max-width: 1160px; align-items: start; }
   }
   .review-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 18px;
-    overflow: hidden; box-shadow: var(--shadow);
+    overflow: hidden; box-shadow: var(--shadow); position: relative; touch-action: pan-y;
+    user-select: none; cursor: grab;
   }
+  .review-card:active { cursor: grabbing; }
   .review-poster-wrap { position: relative; }
   .review-poster {
     width: 100%; height: min(48vh, 420px); min-height: 260px; object-fit: cover; display: block;
-    background: var(--hairline);
+    background: var(--hairline); pointer-events: none;
   }
   .review-poster-placeholder {
     width: 100%; height: min(48vh, 420px); min-height: 260px; background: var(--hairline);
@@ -898,10 +910,17 @@ _TEMPLATE = """<!DOCTYPE html>
     position: absolute; bottom: 12px; left: 14px; background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
     color: #4ade80; font-weight: 700; font-size: 13.5px; padding: 4px 10px; border-radius: 999px;
   }
+  .review-stamp {
+    position: absolute; top: 22px; padding: 6px 14px; border-radius: 8px; font-size: 20px; font-weight: 800;
+    letter-spacing: 0.06em; border: 3px solid; opacity: 0; pointer-events: none; text-transform: uppercase;
+  }
+  .review-stamp.yes { left: 18px; color: var(--accent); border-color: var(--accent); transform: rotate(-14deg); }
+  .review-stamp.no { right: 18px; color: #f87171; border-color: #f87171; transform: rotate(14deg); }
   .review-body { padding: 18px 20px 22px; }
   .review-title { font-size: 21px; font-weight: 700; margin: 0 0 3px; letter-spacing: -0.01em; }
   .review-title .year { color: var(--text-faint); font-weight: 400; }
-  .review-director { font-size: 13px; color: var(--text-muted); margin: 0 0 10px; }
+  .review-director { font-size: 13.5px; color: var(--text-muted); margin: 0 0 10px; }
+  .review-director b { color: var(--text); font-weight: 600; }
   .review-subtitled-badge {
     display: inline-flex; align-items: center; gap: 6px; background: rgba(251, 191, 36, 0.14);
     border: 1px solid rgba(251, 191, 36, 0.35); color: #fbbf24; font-size: 12.5px; font-weight: 700;
@@ -925,8 +944,6 @@ _TEMPLATE = """<!DOCTYPE html>
   .review-btn-yes { background: var(--accent); border: none; color: #06201d; }
   .review-btn-yes:hover { filter: brightness(1.08); }
   .review-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .review-card.dismissing { animation: review-card-exit 0.26s ease forwards; }
-  @keyframes review-card-exit { to { opacity: 0; transform: scale(0.96) translateY(6px); } }
   .review-card.entering { animation: review-card-enter 0.24s ease; }
   @keyframes review-card-enter { from { opacity: 0; transform: scale(0.98); } }
   .review-empty {
@@ -1823,17 +1840,24 @@ function addDismissButton(cardEl, slug) {
   (end || cardEl).appendChild(btn);
 }
 
-// ---------- Watch-together review — one film at a time, not a grid ----------
+// ---------- Watch-together review — a small hand of films, not a grid ----------
 
 // Oldest-added first, so nothing sits unreviewed indefinitely (matches the
-// backfill order main.py seeds pending rows in).
+// backfill order main.py seeds pending rows in). Always the front of this
+// list is shown — deciding a film removes it from the pending set entirely,
+// so the next-oldest naturally slides into view with no index bookkeeping.
 function pendingQueue() {
   return DATA.films
     .filter(f => f.watch_together_status === 'pending')
     .sort((a, b) => (a.watch_together_added_at || '').localeCompare(b.watch_together_added_at || ''));
 }
 
-let reviewIndex = 0;
+// Wide viewports get three at once (less empty margin either side of one
+// narrow card, and lets you triage a few in one glance) — phones stay one
+// at a time, matching the 900px grid breakpoint in the CSS above.
+function reviewCardsToShow() {
+  return window.matchMedia('(min-width: 900px)').matches ? 3 : 1;
+}
 
 function updateReviewBadge() {
   const count = pendingQueue().length;
@@ -1843,22 +1867,28 @@ function updateReviewBadge() {
   });
 }
 
+function animateReviewCardExit(cardEl, direction, dy) {
+  const flyX = direction * Math.max(window.innerWidth, 600);
+  cardEl.style.transition = 'transform 0.32s ease, opacity 0.32s ease';
+  cardEl.style.transform = 'translate(' + flyX + 'px, ' + (dy || 0) + 'px) rotate(' + (direction * 24) + 'deg)';
+  cardEl.style.opacity = '0';
+}
+
 // Unlike dismissRecommendation, this goes through the regenerate-dashboard
 // workflow (not a plain GitHub commit) since the status lives in Postgres,
 // not a config YAML file — see db.py's watch_together table. Still
-// optimistic: the card advances to the next film immediately, the actual
-// write/regen happens in the background over the next under-a-minute or so.
-function tagFilm(slug, status, cardEl) {
-  cardEl.classList.add('dismissing');
-  // DATA.films and DATA.films_by_slug are separate object instances per slug
-  // (each just its own spot in the parsed JSON payload, not shared
-  // references) — both need updating, or a later re-render would still see
-  // 'pending' and resurrect this film at the front of the queue.
+// optimistic: the card flies off and the next film slides into view
+// immediately: the actual write/regen happens in the background over the
+// next under-a-minute or so. `dy` lets a completed swipe carry on in the
+// same direction it was already being dragged, rather than snapping back
+// to center before flying off.
+function tagFilm(slug, status, cardEl, dy) {
+  animateReviewCardExit(cardEl, status === 'confirmed' ? 1 : -1, dy || 0);
   const row = DATA.films.find(f => f.slug === slug);
   if (row) row.watch_together_status = status;
   const film = DATA.films_by_slug[slug];
   if (film) film.watch_together_status = status;
-  setTimeout(renderReview, 220);
+  setTimeout(renderReview, 300);
   fetch(DATA.settings.refresh_worker_url + '/tag-film', {
     method: 'POST',
     headers: {
@@ -1872,6 +1902,113 @@ function tagFilm(slug, status, cardEl) {
       if (!body || !body.ok) showToast('Saved locally, but the write failed — it may revert to pending.');
     })
     .catch(() => showToast('Saved locally, but the write failed — it may revert to pending.'));
+}
+
+function reviewCardHtml(film) {
+  const poster = film.poster_url
+    ? '<img class="review-poster" loading="lazy" src="' + escAttr(film.poster_url) +
+      '" onerror="this.outerHTML=\\'<div class=&quot;review-poster-placeholder&quot;></div>\\'">'
+    : '<div class="review-poster-placeholder"></div>';
+  const rating = film.rating != null ? '<div class="review-rating-badge">' + film.rating.toFixed(2) + '★</div>' : '';
+  const director = film.director ? '<p class="review-director"><b>Director</b> ' + esc(film.director) + '</p>' : '';
+  // The explicit call-out Sarah asked for — only shown when the film's
+  // original language isn't English (see languages.is_subtitled), never a
+  // "not subtitled" badge for the common case, same "only show when it's
+  // actually relevant" convention leaving_soon/added_service already use.
+  const subtitled = film.is_subtitled
+    ? '<div class="review-subtitled-badge">🌐 Subtitled film' +
+      (film.language_name ? ' · ' + esc(film.language_name) : '') + '</div>'
+    : '';
+  const genre = (film.genre && film.genre.length)
+    ? '<p class="review-genre detail-genre">' + esc(film.genre.join(', ')) + '</p>' : '';
+  const synopsis = film.synopsis ? '<p class="review-synopsis"><b>Plot</b> ' + esc(film.synopsis) + '</p>' : '';
+  const cast = film.starring ? '<p class="review-cast"><b>Starring</b> ' + esc(film.starring) + '</p>' : '';
+
+  return (
+    '<div class="review-card entering" data-slug="' + escAttr(film.slug) + '">' +
+      '<div class="review-poster-wrap">' + poster + rating +
+        '<div class="review-stamp yes">Watch together</div>' +
+        '<div class="review-stamp no">Not for us</div>' +
+      '</div>' +
+      '<div class="review-body">' +
+        '<h2 class="review-title">' + esc(film.title) +
+          (film.year ? ' <span class="year">' + film.year + '</span>' : '') + '</h2>' +
+        director + subtitled + genre + synopsis + cast +
+        '<div class="review-actions">' +
+          '<button type="button" class="review-btn review-btn-no">✕ Not for us</button>' +
+          '<button type="button" class="review-btn review-btn-yes">♥ Watch together</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+// Phase 2: drag-to-decide, Tinder-style — a horizontal drag past the
+// threshold flies the card off and decides it, same as tapping a button;
+// a mostly-vertical drag is left alone so the page can still scroll on
+// mobile instead of the gesture being captured as a failed swipe attempt.
+const SWIPE_THRESHOLD = 110;
+
+function attachSwipe(cardEl, film) {
+  let dragging = false, direction = null, startX = 0, startY = 0, dx = 0, dy = 0;
+  const yesStamp = cardEl.querySelector('.review-stamp.yes');
+  const noStamp = cardEl.querySelector('.review-stamp.no');
+
+  function setStamps(progress) {
+    yesStamp.style.opacity = dx > 0 ? progress : 0;
+    noStamp.style.opacity = dx < 0 ? progress : 0;
+  }
+
+  cardEl.addEventListener('pointerdown', event => {
+    if (event.target.closest('.review-btn')) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    dragging = true;
+    direction = null;
+    dx = 0; dy = 0;
+    startX = event.clientX; startY = event.clientY;
+    cardEl.setPointerCapture(event.pointerId);
+    cardEl.style.transition = 'none';
+  });
+
+  cardEl.addEventListener('pointermove', event => {
+    if (!dragging) return;
+    dx = event.clientX - startX;
+    dy = event.clientY - startY;
+    if (direction === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+      direction = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+    }
+    if (direction !== 'h') return;
+    cardEl.style.transform = 'translate(' + dx + 'px, ' + (dy * 0.15) + 'px) rotate(' + (dx / 16) + 'deg)';
+    setStamps(Math.min(Math.abs(dx) / SWIPE_THRESHOLD, 1));
+  });
+
+  function finish() {
+    if (!dragging) return;
+    dragging = false;
+    if (direction === 'h' && Math.abs(dx) > SWIPE_THRESHOLD) {
+      cardEl.querySelectorAll('.review-btn').forEach(btn => { btn.disabled = true; });
+      tagFilm(film.slug, dx > 0 ? 'confirmed' : 'declined', cardEl, dy);
+    } else {
+      cardEl.style.transition = 'transform 0.2s ease';
+      cardEl.style.transform = '';
+      setStamps(0);
+    }
+    direction = null;
+  }
+  cardEl.addEventListener('pointerup', finish);
+  cardEl.addEventListener('pointercancel', finish);
+}
+
+function attachReviewCard(cardEl, film) {
+  cardEl.querySelector('.review-btn-yes').addEventListener('click', () => {
+    cardEl.querySelectorAll('.review-btn').forEach(btn => { btn.disabled = true; });
+    tagFilm(film.slug, 'confirmed', cardEl);
+  });
+  cardEl.querySelector('.review-btn-no').addEventListener('click', () => {
+    cardEl.querySelectorAll('.review-btn').forEach(btn => { btn.disabled = true; });
+    tagFilm(film.slug, 'declined', cardEl);
+  });
+  attachSwipe(cardEl, film);
 }
 
 function renderReview() {
@@ -1888,62 +2025,32 @@ function renderReview() {
       '</div>';
     return;
   }
-  if (reviewIndex >= queue.length) reviewIndex = 0;
-  const film = queue[reviewIndex];
 
-  const poster = film.poster_url
-    ? '<img class="review-poster" loading="lazy" src="' + escAttr(film.poster_url) +
-      '" onerror="this.outerHTML=\\'<div class=&quot;review-poster-placeholder&quot;></div>\\'">'
-    : '<div class="review-poster-placeholder"></div>';
-  const rating = film.rating != null ? '<div class="review-rating-badge">' + film.rating.toFixed(2) + '★</div>' : '';
-  const director = film.director ? '<p class="review-director">' + esc(film.director) + '</p>' : '';
-  // The explicit call-out Sarah asked for — only shown when the film's
-  // original language isn't English (see languages.is_subtitled), never a
-  // "not subtitled" badge for the common case, same "only show when it's
-  // actually relevant" convention leaving_soon/added_service already use.
-  const subtitled = film.is_subtitled
-    ? '<div class="review-subtitled-badge">🌐 Subtitled film' +
-      (film.language_name ? ' · ' + esc(film.language_name) : '') + '</div>'
-    : '';
-  const genre = (film.genre && film.genre.length)
-    ? '<p class="review-genre detail-genre">' + esc(film.genre.join(', ')) + '</p>' : '';
-  const synopsis = film.synopsis ? '<p class="review-synopsis">' + esc(film.synopsis) + '</p>' : '';
-  const cast = film.starring ? '<p class="review-cast"><b>Starring</b> ' + esc(film.starring) + '</p>' : '';
-
+  const shown = queue.slice(0, reviewCardsToShow());
+  const label = queue.length === 1 ? '1 film to review' : queue.length + ' films to review';
   container.innerHTML =
-    '<div class="review-shell">' +
-      '<div class="review-progress">' + (reviewIndex + 1) + ' of ' + queue.length + ' to review</div>' +
-      '<div class="review-card entering" id="reviewCard" data-slug="' + escAttr(film.slug) + '">' +
-        '<div class="review-poster-wrap">' + poster + rating + '</div>' +
-        '<div class="review-body">' +
-          '<h2 class="review-title">' + esc(film.title) +
-            (film.year ? ' <span class="year">' + film.year + '</span>' : '') + '</h2>' +
-          director + subtitled + genre + synopsis + cast +
-          '<div class="review-actions">' +
-            '<button type="button" class="review-btn review-btn-no" id="reviewNoBtn">✕ Not for us</button>' +
-            '<button type="button" class="review-btn review-btn-yes" id="reviewYesBtn">♥ Watch together</button>' +
-          '</div>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
+    '<div class="review-progress">' + label + '</div>' +
+    '<div class="review-grid">' + shown.map(reviewCardHtml).join('') + '</div>';
 
-  const card = document.getElementById('reviewCard');
-  document.getElementById('reviewYesBtn').addEventListener('click', () => {
-    document.getElementById('reviewYesBtn').disabled = true;
-    document.getElementById('reviewNoBtn').disabled = true;
-    tagFilm(film.slug, 'confirmed', card);
-  });
-  document.getElementById('reviewNoBtn').addEventListener('click', () => {
-    document.getElementById('reviewYesBtn').disabled = true;
-    document.getElementById('reviewNoBtn').disabled = true;
-    tagFilm(film.slug, 'declined', card);
+  container.querySelectorAll('.review-card').forEach(cardEl => {
+    const film = shown.find(f => f.slug === cardEl.dataset.slug);
+    attachReviewCard(cardEl, film);
   });
 }
 
 document.getElementById('reviewScreen').addEventListener('click', event => {
   if (event.target.closest('.review-btn')) return;
   const card = event.target.closest('.review-card');
-  if (card) openQuickLook(card.dataset.slug);
+  // A finished drag still fires a click on release — only open quick-look
+  // when the card is at rest (no active swipe transform), so a completed
+  // or in-progress swipe doesn't also pop the modal open underneath it.
+  if (card && !card.style.transform) openQuickLook(card.dataset.slug);
+});
+
+let reviewResizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(reviewResizeTimer);
+  reviewResizeTimer = setTimeout(renderReview, 200);
 });
 
 // ---------- Sarah's watchlist (browsing only — additive, not tied to watch_together) ----------

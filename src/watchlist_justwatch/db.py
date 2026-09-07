@@ -36,13 +36,17 @@ CREATE TABLE IF NOT EXISTS recommendation_sections (
     header TEXT NOT NULL,
     slugs JSONB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS josh_watchlist (
+    slug TEXT PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS sarah_watchlist (
     slug TEXT PRIMARY KEY
 );
-CREATE TABLE IF NOT EXISTS sarah_extra_films (
-    slug TEXT PRIMARY KEY,
-    data JSONB NOT NULL
-);
+-- Superseded: Sarah's watchlist films are now full `films` rows (real
+-- JustWatch offers, same enrichment pipeline as Josh's own watchlist —
+-- see main.py's combined_films), so a separate lightweight copy with no
+-- offer data is no longer needed.
+DROP TABLE IF EXISTS sarah_extra_films;
 -- Written incrementally from two separate call sites (the daily run seeding
 -- new "pending" rows, and the standalone --set-watch-together-status flag)
 -- rather than replaced wholesale each run like the tables above — see
@@ -127,8 +131,8 @@ def load_state(database_url: str) -> StateDoc:
                 "SELECT key, header, slugs FROM recommendation_sections"
             ).fetchall()
         ]
+        josh_watchlist = {row[0] for row in conn.execute("SELECT slug FROM josh_watchlist").fetchall()}
         sarah_watchlist = {row[0] for row in conn.execute("SELECT slug FROM sarah_watchlist").fetchall()}
-        sarah_extra_films = dict(conn.execute("SELECT slug, data FROM sarah_extra_films").fetchall())
 
     return StateDoc(
         schema_version=meta.get("schema_version", SCHEMA_VERSION),
@@ -141,8 +145,8 @@ def load_state(database_url: str) -> StateDoc:
         discovery_films=discovery_films,
         recent_additions=meta.get("recent_additions", []),
         diary=diary,
+        josh_watchlist=josh_watchlist,
         sarah_watchlist=sarah_watchlist,
-        sarah_extra_films=sarah_extra_films,
     )
 
 
@@ -159,8 +163,8 @@ def save_state(database_url: str, state: StateDoc) -> None:
         conn.execute("DELETE FROM diary")
         conn.execute("DELETE FROM discovery_films")
         conn.execute("DELETE FROM recommendation_sections")
+        conn.execute("DELETE FROM josh_watchlist")
         conn.execute("DELETE FROM sarah_watchlist")
-        conn.execute("DELETE FROM sarah_extra_films")
         conn.execute("DELETE FROM meta")
         # watch_together is deliberately NOT wiped here — it's written
         # incrementally by seed_pending_watch_together/set_watch_together_status,
@@ -197,16 +201,16 @@ def save_state(database_url: str, state: StateDoc) -> None:
                 [(s["key"], s["header"], Jsonb(s["slugs"])) for s in state.recommendation_sections],
             )
 
+        if state.josh_watchlist:
+            conn.cursor().executemany(
+                "INSERT INTO josh_watchlist (slug) VALUES (%s)",
+                [(slug,) for slug in state.josh_watchlist],
+            )
+
         if state.sarah_watchlist:
             conn.cursor().executemany(
                 "INSERT INTO sarah_watchlist (slug) VALUES (%s)",
                 [(slug,) for slug in state.sarah_watchlist],
-            )
-
-        if state.sarah_extra_films:
-            conn.cursor().executemany(
-                "INSERT INTO sarah_extra_films (slug, data) VALUES (%s, %s)",
-                [(slug, Jsonb(data)) for slug, data in state.sarah_extra_films.items()],
             )
 
         conn.cursor().executemany(

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from collections import defaultdict
 from datetime import date
@@ -523,54 +524,52 @@ def build_dashboard_data(
     watch_together: dict[str, dict] | None = None,
 ) -> dict:
     watch_together = watch_together or {}
-    main_brands = _select_main_brands(state, config, global_subscriptions)
-    main_brand_set = set(main_brands)
 
+    # state.films is Josh's watchlist UNION Sarah's (see main.py's
+    # combined_films) — offers/quick-look are computed for all of it so her
+    # films get exactly the same JustWatch/quick-look treatment as his, but
+    # his own tabs (Films/Country/Services/home sections) stay scoped to
+    # josh_watchlist only via josh_state below, same as before this was
+    # unified — her solo-interest films were never meant to bleed into his
+    # own browsing or recommendations.
     films_all_offers = {
         slug: _all_offers_for_film(film, config, global_subscriptions, revisitable)
         for slug, film in state.films.items()
     }
+    films_by_slug = _films_by_slug(state, films_all_offers)
+    for slug, entry in films_by_slug.items():
+        entry["watch_together_status"] = watch_together.get(slug, {}).get("status")
 
-    rows = [_film_row(film, main_brand_set, films_all_offers[slug]) for slug, film in state.films.items()]
+    josh_films = {slug: f for slug, f in state.films.items() if slug in state.josh_watchlist}
+    josh_offers = {slug: films_all_offers[slug] for slug in josh_films}
+    josh_state = dataclasses.replace(state, films=josh_films)
+
+    main_brands = _select_main_brands(josh_state, config, global_subscriptions)
+    main_brand_set = set(main_brands)
+
+    rows = [_film_row(film, main_brand_set, josh_offers[slug]) for slug, film in josh_films.items()]
     for r in rows:
         info = watch_together.get(r["slug"], {})
         r["watch_together_status"] = info.get("status")
         r["watch_together_added_at"] = info.get("added_at")
     rows.sort(key=lambda r: r["title"].lower())
 
-    films_by_slug = _films_by_slug(state, films_all_offers)
-    for slug, entry in films_by_slug.items():
-        entry["watch_together_status"] = watch_together.get(slug, {}).get("status")
-
-    # Sarah's own watchlist entries aren't stored as full FilmState objects
-    # (no JustWatch offer-checking for them, see main.py) — just enough for
-    # a mini-card and quick-look, with the same language_name/is_subtitled
-    # resolution as every other film so quick-look reads identically
-    # regardless of which tab a film was opened from.
-    sarah_extra_resolved = {
-        slug: {**data, "language_name": language_name(data.get("original_language")),
-               "is_subtitled": is_subtitled(data.get("original_language"))}
-        for slug, data in state.sarah_extra_films.items()
-    }
-
     sarah_films = [
-        _mini_card(state.films[slug]) if slug in state.films else _mini_card_from_lookup(sarah_extra_resolved[slug])
-        for slug in sorted(state.sarah_watchlist, key=lambda s: (
-            state.films[s].title if s in state.films else sarah_extra_resolved.get(s, {}).get("title", "")
-        ).lower())
-        if slug in state.films or slug in sarah_extra_resolved
+        _mini_card(state.films[slug])
+        for slug in sorted(state.sarah_watchlist, key=lambda s: state.films[s].title.lower() if s in state.films else "")
+        if slug in state.films
     ]
 
     return {
         "last_run_at": state.last_run_at,
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
-        "home_sections": _build_home_sections(state, films_all_offers, films_by_slug, dismissed_recommendations,
+        "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, dismissed_recommendations,
                                               watch_together),
         "films": rows,
-        "services": _service_rows(state, films_all_offers),
-        "countries": _country_rows(state, films_all_offers),
-        "films_by_slug": {**films_by_slug, **state.discovery_films, **sarah_extra_resolved},
+        "services": _service_rows(josh_state, josh_offers),
+        "countries": _country_rows(josh_state, josh_offers),
+        "films_by_slug": {**films_by_slug, **state.discovery_films},
         "sarah_films": sarah_films,
         "settings": _settings_data(config, global_subscriptions),
     }

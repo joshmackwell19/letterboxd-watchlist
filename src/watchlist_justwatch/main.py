@@ -47,7 +47,7 @@ from .letterboxd import (
     fetch_watchlist,
     get_film_details_by_slug,
 )
-from .models import FilmState, OfferRecord
+from .models import FilmState, OfferRecord, WatchlistFilm
 from .notify import send_if_configured
 from .report import render_report
 from .similar import (
@@ -139,30 +139,30 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 "genre": details["genre"], "original_language": _fetch_original_language(w.title, w.year),
             }
 
-    # Sarah's own watchlist — purely additive (shown in its own dashboard
-    # tab), never implies watch_together status. Optional: no-ops entirely
-    # if she isn't configured. A fetch failure just carries forward
-    # yesterday's list, same reasoning as every other best-effort fetch here.
+    # Sarah's own watchlist — additive (shown in its own dashboard tab),
+    # never implies watch_together status. Optional: no-ops entirely if
+    # she isn't configured. Films exclusive to her list now go through the
+    # exact same JustWatch/enrichment pipeline as Josh's own (see
+    # combined_films below) so quick-look/services work identically for her
+    # films too — only the membership (whose list a slug came from) is
+    # tracked separately, in sarah_watchlist_slugs / josh_watchlist_slugs.
+    # A fetch failure just carries forward yesterday's list (reconstructed
+    # from already-known films, so those still get their normal stale-
+    # rotation recheck rather than silently dropping out for the day).
+    josh_watchlist_slugs = {f.slug for f in films}
     sarah_watchlist_slugs = set(previous_state.sarah_watchlist)
-    sarah_extra_films = dict(previous_state.sarah_extra_films)
+    sarah_films: list[WatchlistFilm] = []
     if sarah_username:
         try:
             sarah_films = fetch_watchlist(sarah_username)
             sarah_watchlist_slugs = {f.slug for f in sarah_films}
-            for f in sarah_films:
-                if f.slug in current_state_diary or f.slug in sarah_extra_films:
-                    continue
-                details = get_film_details_by_slug(f.slug)
-                sarah_extra_films[f.slug] = {
-                    "slug": f.slug, "title": f.title, "year": f.year,
-                    "rating": details["rating"], "poster_url": details["poster_url"],
-                    "director": ", ".join(details["director"]) if details["director"] else None,
-                    "starring": details["starring"], "synopsis": details["synopsis"],
-                    "genre": details["genre"], "original_language": _fetch_original_language(f.title, f.year),
-                }
         except Exception as exc:
             print(f"warning: failed to fetch Sarah's watchlist, carrying forward yesterday's ({exc})",
                   file=sys.stderr)
+            sarah_films = [
+                WatchlistFilm(slug=slug, title=previous_state.films[slug].title, year=previous_state.films[slug].year)
+                for slug in sarah_watchlist_slugs if slug in previous_state.films
+            ]
 
     # Correlated across all of TMDB, not just the watchlist, so these can
     # surface films worth discovering rather than only re-surfacing what's
@@ -267,13 +267,22 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 recommendation_sections.append({"key": "rewatch", "header": header, "slugs": slugs})
                 discovery_films.update(films_map)
 
+    # The actual pool the JustWatch/enrichment loop below processes: Josh's
+    # watchlist UNION Sarah's — a film on both only needs resolving once.
+    # Order favors Josh's own WatchlistFilm object when a slug is on both
+    # (arbitrary — the two lists always agree on title/year for the same
+    # slug anyway).
+    combined_films_by_slug: dict[str, WatchlistFilm] = {f.slug: f for f in sarah_films}
+    combined_films_by_slug.update({f.slug: f for f in films})
+    combined_films = list(combined_films_by_slug.values())
+
     # New watchlist additions have no cached offers yet, so they're always
-    # checked live; films dropped from the watchlist just aren't in `films`
-    # any more and fall out of current_state.films naturally. Everything
-    # else is checked on a stale-first rotation (see STALE_BATCH_FRACTION),
-    # except on the 1st of the month, when service libraries most often
-    # change, so the whole watchlist gets a live check regardless of how
-    # recently each film was last checked.
+    # checked live; films dropped from both watchlists just aren't in
+    # `combined_films` any more and fall out of current_state.films
+    # naturally. Everything else is checked on a stale-first rotation (see
+    # STALE_BATCH_FRACTION), except on the 1st of the month, when service
+    # libraries most often change, so the whole pool gets a live check
+    # regardless of how recently each film was last checked.
     #
     # That rotation is capped to once per calendar day regardless of how
     # many times the workflow actually runs that day — re-triggering
@@ -282,22 +291,22 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     # happened earlier the same day.
     today_str = now_dt.date().isoformat()
     already_refreshed_today = previous_state.last_justwatch_check_date == today_str
-    new_slugs = {film.slug for film in films if film.slug not in previous_state.films}
+    new_slugs = {film.slug for film in combined_films if film.slug not in previous_state.films}
     if already_refreshed_today:
         checked_today = new_slugs
     elif now_dt.day == 1:
-        checked_today = {film.slug for film in films}
+        checked_today = {film.slug for film in combined_films}
     else:
-        existing = [film for film in films if film.slug not in new_slugs]
+        existing = [film for film in combined_films if film.slug not in new_slugs]
         existing.sort(key=lambda film: previous_state.films[film.slug].last_checked)
-        batch_size = max(0, round(len(films) * STALE_BATCH_FRACTION) - len(new_slugs))
+        batch_size = max(0, round(len(combined_films) * STALE_BATCH_FRACTION) - len(new_slugs))
         checked_today = new_slugs | {film.slug for film in existing[:batch_size]}
 
     current_state = StateDoc(last_run_at=now_iso, last_justwatch_check_date=today_str,
                               last_seen_diary_guid=previous_state.last_seen_diary_guid)
-    for i, film in enumerate(films, start=1):
+    for i, film in enumerate(combined_films, start=1):
         if progress and i % 25 == 0:
-            print(f"...processed {i}/{len(films)} films", file=sys.stderr)
+            print(f"...processed {i}/{len(combined_films)} films", file=sys.stderr)
 
         previous_film = previous_state.films.get(film.slug)
         if film.slug not in checked_today and previous_film is not None:
@@ -348,8 +357,8 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     current_state.recommendation_sections = recommendation_sections
     current_state.discovery_films = discovery_films
     current_state.diary = current_state_diary
+    current_state.josh_watchlist = josh_watchlist_slugs
     current_state.sarah_watchlist = sarah_watchlist_slugs
-    current_state.sarah_extra_films = sarah_extra_films
 
     # Auto-queue every watchlist film missing a watch-together decision for
     # Sarah's review — covers both the one-time backfill of the existing

@@ -453,6 +453,11 @@ def main() -> None:
                               "covers everything older. Doesn't include 'liked' — not reliably scrapable "
                               "from the static diary page — only --check-for-new-log captures that, "
                               "going forward.")
+    parser.add_argument("--backfill-language", action="store_true",
+                         help="One-time TMDB-only backfill of original_language for every watchlist film "
+                              "missing it (normally fills in gradually via the stale-checking rotation, "
+                              "see run()) — no JustWatch/Letterboxd calls, just one TMDB search per film, "
+                              "then exit.")
     parser.add_argument("--set-watch-together-status", nargs=2, metavar=("SLUG", "STATUS"),
                          help="Set one film's watch-with-Sarah review status to 'confirmed' or "
                               "'declined', then exit. No network calls — this is what the dashboard's "
@@ -524,6 +529,22 @@ def main() -> None:
             print("new_log=true")
         else:
             print("new_log=false")
+        sys.exit(0)
+
+    if args.backfill_language:
+        state = load_state(args.database_url)
+        missing = [f for f in state.films.values() if f.original_language is None]
+        print(f"Backfilling original_language for {len(missing)}/{len(state.films)} films...")
+        updated = 0
+        for i, film in enumerate(missing, start=1):
+            film.original_language = _fetch_original_language(film.title, film.year)
+            if film.original_language is not None:
+                updated += 1
+            if i % 25 == 0:
+                print(f"...checked {i}/{len(missing)}", file=sys.stderr)
+            time.sleep(0.1)
+        save_state(args.database_url, state)
+        print(f"Backfilled {updated}/{len(missing)} films (the rest had no TMDB match), written to the database.")
         sys.exit(0)
 
     if args.set_watch_together_status:

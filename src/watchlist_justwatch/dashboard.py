@@ -1161,6 +1161,7 @@ _TEMPLATE = """<!DOCTYPE html>
         <option value="year">Sort: Year (newest)</option>
       </select>
       <span id="countryFilterToggles"></span>
+      <label><input type="checkbox" id="countryDeclinedOnly"> Only films Sarah said no to</label>
     </div>
     <div class="controls" data-view="services" id="controls-services">
       <select id="serviceSelect"></select>
@@ -1176,6 +1177,7 @@ _TEMPLATE = """<!DOCTYPE html>
         <option value="unique_film_count">Sort: # unique (most)</option>
       </select>
       <span id="serviceFilterToggles"></span>
+      <label><input type="checkbox" id="serviceDeclinedOnly"> Only films Sarah said no to</label>
     </div>
     <div class="controls" data-view="films" id="controls-films">
       <select id="filmsCountrySelect"></select>
@@ -1192,6 +1194,7 @@ _TEMPLATE = """<!DOCTYPE html>
       </select>
       <span id="filmsFilterToggles"></span>
       <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
+      <label><input type="checkbox" id="filmsDeclinedOnly"> Only films Sarah said no to</label>
     </div>
     <div class="controls" data-view="sarah" id="controls-sarah">
       <div class="search-wrap">
@@ -2254,12 +2257,23 @@ let activeService = null;
 let activeGenre = null;
 const filmsFilterState = { have: true, free: true, could_get_again: true, subscription: true };
 
+// Declining only ever means "not to watch together" — it says nothing about
+// whether the film is still worth watching solo, so this filters FOR the
+// declined ones (to review/reconsider them) rather than hiding them by
+// default anywhere; nothing disappears from a tab unless this is switched on.
+function isDeclined(slug) {
+  const f = DATA.films_by_slug[slug];
+  return !!f && f.watch_together_status === 'declined';
+}
+
 function baseFilteredFilms() {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const notHaveOnly = document.getElementById('notHaveOnly').checked;
+  const declinedOnly = document.getElementById('filmsDeclinedOnly').checked;
   return DATA.films.filter(row => {
     if (q && !searchHaystack(row).includes(q)) return false;
     if (notHaveOnly && row.have_service) return false;
+    if (declinedOnly && row.watch_together_status !== 'declined') return false;
     if (activeService && !row.main[activeService]) return false;
     return true;
   });
@@ -2331,8 +2345,9 @@ function renderActiveFilmFilters() {
   container.innerHTML = '';
   const searchVal = document.getElementById('search').value.trim();
   const notHaveOnly = document.getElementById('notHaveOnly').checked;
+  const declinedOnly = document.getElementById('filmsDeclinedOnly').checked;
   const anyToggleOff = CLASSIFICATIONS.some(k => !filmsFilterState[k]);
-  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly && !anyToggleOff) return;
+  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly && !declinedOnly && !anyToggleOff) return;
   if (activeCountry) {
     const name = (DATA.countryNames && DATA.countryNames[activeCountry]) || activeCountry;
     const chip = document.createElement('span');
@@ -2373,6 +2388,13 @@ function renderActiveFilmFilters() {
     chip.addEventListener('click', () => { document.getElementById('notHaveOnly').checked = false; renderFilms(); });
     container.appendChild(chip);
   }
+  if (declinedOnly) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Sarah said no ✕';
+    chip.addEventListener('click', () => { document.getElementById('filmsDeclinedOnly').checked = false; renderFilms(); });
+    container.appendChild(chip);
+  }
   if (anyToggleOff) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
@@ -2394,6 +2416,7 @@ function renderActiveFilmFilters() {
     document.getElementById('search').value = '';
     document.getElementById('searchClear').classList.add('hidden');
     document.getElementById('notHaveOnly').checked = false;
+    document.getElementById('filmsDeclinedOnly').checked = false;
     CLASSIFICATIONS.forEach(k => { filmsFilterState[k] = true; });
     renderFilmFilterToggles();
     renderFilms();
@@ -2514,6 +2537,7 @@ function renderFilmCards(processed, columnBrands, showOtherServices) {
 document.getElementById('search').addEventListener('input', renderFilms);
 wireSearchClear('search', 'searchClear', renderFilms);
 document.getElementById('notHaveOnly').addEventListener('change', renderFilms);
+document.getElementById('filmsDeclinedOnly').addEventListener('change', renderFilms);
 document.getElementById('filmsCountrySelect').addEventListener('change', e => {
   activeCountry = e.target.value || null;
   renderFilms();
@@ -2591,8 +2615,9 @@ function renderActiveServiceFilters() {
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim();
+  const declinedOnly = document.getElementById('serviceDeclinedOnly').checked;
   const anyToggleOff = CLASSIFICATIONS.some(k => !serviceFilterState[k]);
-  if (!serviceQ && !countryQ && !genreQ && !filmQ && !anyToggleOff) return;
+  if (!serviceQ && !countryQ && !genreQ && !filmQ && !declinedOnly && !anyToggleOff) return;
 
   if (genreQ) {
     const chip = document.createElement('span');
@@ -2626,6 +2651,13 @@ function renderActiveServiceFilters() {
     });
     container.appendChild(chip);
   }
+  if (declinedOnly) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Sarah said no ✕';
+    chip.addEventListener('click', () => { document.getElementById('serviceDeclinedOnly').checked = false; renderServicesRows(); });
+    container.appendChild(chip);
+  }
   if (anyToggleOff) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
@@ -2646,6 +2678,7 @@ function renderActiveServiceFilters() {
     document.getElementById('serviceGenreSelect').value = '';
     document.getElementById('serviceFilmSearch').value = '';
     document.getElementById('serviceFilmSearchClear').classList.add('hidden');
+    document.getElementById('serviceDeclinedOnly').checked = false;
     CLASSIFICATIONS.forEach(k => { serviceFilterState[k] = true; });
     renderServiceFilterToggles();
     renderServicesRows();
@@ -2664,23 +2697,27 @@ function renderServicesRows() {
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
+  const declinedOnly = document.getElementById('serviceDeclinedOnly').checked;
   renderActiveServiceFilters();
 
-  // Service rows aren't per-film, so a genre filter here means "narrow each
-  // service's own film list down to that genre" — recomputing film_count/
-  // unique_film_count from the narrowed list (rather than just hiding
-  // non-matching services outright) so the counts on screen always match
-  // what's actually being counted. openServiceDetail re-reads the row
-  // straight from DATA.services, so drilling in still shows everything —
-  // scoped to keep this a top-level-grid filter, not a deeper feature.
+  // Service rows aren't per-film, so a genre/declined filter here means
+  // "narrow each service's own film list down to that criterion" —
+  // recomputing film_count/unique_film_count from the narrowed list (rather
+  // than just hiding non-matching services outright) so the counts on
+  // screen always match what's actually being counted. openServiceDetail
+  // re-reads the row straight from DATA.services, so drilling in still
+  // shows everything — scoped to keep this a top-level-grid filter, not a
+  // deeper feature.
   let rows = DATA.services.map(row => {
-    if (!genreQ) return row;
+    if (!genreQ && !declinedOnly) return row;
     const uniqueSet = new Set(row.unique_slugs);
-    const matchingSlugs = row.slugs.filter(s => (DATA.films_by_slug[s]?.genre || []).includes(genreQ));
+    let matchingSlugs = row.slugs;
+    if (genreQ) matchingSlugs = matchingSlugs.filter(s => (DATA.films_by_slug[s]?.genre || []).includes(genreQ));
+    if (declinedOnly) matchingSlugs = matchingSlugs.filter(isDeclined);
     const matchingUniqueCount = matchingSlugs.filter(s => uniqueSet.has(s)).length;
     return { ...row, slugs: matchingSlugs, film_count: matchingSlugs.length, unique_film_count: matchingUniqueCount };
   });
-  if (genreQ) rows = rows.filter(row => row.film_count > 0);
+  if (genreQ || declinedOnly) rows = rows.filter(row => row.film_count > 0);
 
   const col = serviceCols.find(c => c.key === serviceSortKey);
   // Services you have/can-get-again always lead, regardless of the chosen
@@ -2733,6 +2770,7 @@ document.getElementById('serviceCountrySelect').addEventListener('change', rende
 document.getElementById('serviceGenreSelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
 wireSearchClear('serviceFilmSearch', 'serviceFilmSearchClear', renderServicesRows);
+document.getElementById('serviceDeclinedOnly').addEventListener('change', renderServicesRows);
 document.getElementById('servicesSortSelect').addEventListener('change', e => {
   serviceSortKey = e.target.value;
   serviceSortDir = serviceCols.find(c => c.key === serviceSortKey).dir;
@@ -2818,8 +2856,9 @@ function renderActiveCountryFilters() {
   const q = document.getElementById('countryFilmSearch').value.trim();
   const serviceQ = document.getElementById('countryServiceSelect').value;
   const genreQ = document.getElementById('countryGenreSelect').value;
+  const declinedOnly = document.getElementById('countryDeclinedOnly').checked;
   const anyToggleOff = CLASSIFICATIONS.some(k => !countryFilterState[k]);
-  if (!q && !serviceQ && !genreQ && !anyToggleOff) return;
+  if (!q && !serviceQ && !genreQ && !declinedOnly && !anyToggleOff) return;
 
   if (genreQ) {
     const chip = document.createElement('span');
@@ -2846,6 +2885,13 @@ function renderActiveCountryFilters() {
     chip.addEventListener('click', () => { document.getElementById('countryServiceSelect').value = ''; renderCountryRows(); });
     container.appendChild(chip);
   }
+  if (declinedOnly) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Sarah said no ✕';
+    chip.addEventListener('click', () => { document.getElementById('countryDeclinedOnly').checked = false; renderCountryRows(); });
+    container.appendChild(chip);
+  }
   if (anyToggleOff) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
@@ -2865,6 +2911,7 @@ function renderActiveCountryFilters() {
     document.getElementById('countryFilmSearchClear').classList.add('hidden');
     document.getElementById('countryServiceSelect').value = '';
     document.getElementById('countryGenreSelect').value = '';
+    document.getElementById('countryDeclinedOnly').checked = false;
     CLASSIFICATIONS.forEach(k => { countryFilterState[k] = true; });
     renderCountryFilterToggles();
     renderCountryRows();
@@ -2882,6 +2929,7 @@ function renderCountryRows() {
   const q = document.getElementById('countryFilmSearch').value.trim().toLowerCase();
   const serviceQ = document.getElementById('countryServiceSelect').value;
   const genreQ = document.getElementById('countryGenreSelect').value;
+  const declinedOnly = document.getElementById('countryDeclinedOnly').checked;
 
   let rows = country.films.slice();
   const col = countryCols.find(c => c.key === countrySortKey);
@@ -2897,6 +2945,7 @@ function renderCountryRows() {
     if (q && !searchHaystack(row).includes(q)) return;
     if (serviceQ && !row.services.some(s => s.brand === serviceQ)) return;
     if (genreQ && !(row.genre || []).includes(genreQ)) return;
+    if (declinedOnly && !isDeclined(row.slug)) return;
     const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
     if (!visibleServices.length) return;
 
@@ -2934,6 +2983,7 @@ document.getElementById('countryServiceSelect').addEventListener('change', rende
 document.getElementById('countryGenreSelect').addEventListener('change', renderCountryRows);
 document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
 wireSearchClear('countryFilmSearch', 'countryFilmSearchClear', renderCountryRows);
+document.getElementById('countryDeclinedOnly').addEventListener('change', renderCountryRows);
 document.getElementById('countrySortSelect').addEventListener('change', e => {
   countrySortKey = e.target.value;
   countrySortDir = countryCols.find(c => c.key === countrySortKey).dir;

@@ -1,13 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ICLOUD_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Letterboxd Dashboard"
+PAGES_URL="https://joshmackwell19.github.io/letterboxd-watchlist/"
 
-cd "$PROJECT_DIR"
-git pull --quiet
-
+# dashboard.html is no longer committed to git (see daily.yml/
+# regenerate-dashboard.yml) — pulled straight from the public Pages
+# deployment instead, which is the same content and updates on the same
+# schedule, without needing a git operation at all.
 mkdir -p "$ICLOUD_DIR"
-cp "$PROJECT_DIR/dashboard.html" "$ICLOUD_DIR/dashboard.html"
+curl -fsSL "$PAGES_URL" -o "$ICLOUD_DIR/dashboard.html"
 
 echo "Synced dashboard.html to iCloud Drive at $(date)"

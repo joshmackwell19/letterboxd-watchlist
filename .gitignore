@@ -7,3 +7,8 @@ logs/
 .claude/
 .DS_Store
 data/state.json
+
+# Generated locally by every run (and by GitHub Actions, which deploys it to
+# Pages directly rather than committing it) — see the "Stop dashboard.html's
+# unbounded git growth" note in .github/workflows/daily.yml.
+dashboard.html

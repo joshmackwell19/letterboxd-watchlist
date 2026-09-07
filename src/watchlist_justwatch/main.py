@@ -62,6 +62,7 @@ from .similar import (
     render_similar,
 )
 from .state import StateDoc, get_cached_entry_id
+from .tmdb_client import original_language as _tmdb_original_language
 from .weekly_digest import compute_weekly_digest
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
@@ -87,6 +88,17 @@ STALE_BATCH_FRACTION = 0.20
 # today, so a slow week never gets truncated regardless of how many entries
 # a single busy day produces.
 RECENT_ADDITIONS_RETENTION_DAYS = 35
+
+
+def _fetch_original_language(title: str, year: int | None) -> str | None:
+    """Best-effort TMDB lookup for the "is this subtitled" flag — a title/
+    year mismatch or a TMDB hiccup shouldn't cost the film's whole
+    enrichment, same reasoning as every other best-effort fetch here."""
+    try:
+        return _tmdb_original_language(title, year)
+    except Exception as exc:
+        print(f"warning: failed to fetch original_language for {title!r}, leaving unset ({exc})", file=sys.stderr)
+        return None
 
 
 def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
@@ -124,7 +136,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 "poster_url": details["poster_url"],
                 "director": ", ".join(details["director"]) if details["director"] else None,
                 "starring": details["starring"], "synopsis": details["synopsis"],
-                "genre": details["genre"],
+                "genre": details["genre"], "original_language": _fetch_original_language(w.title, w.year),
             }
 
     # Sarah's own watchlist — purely additive (shown in its own dashboard
@@ -146,7 +158,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                     "rating": details["rating"], "poster_url": details["poster_url"],
                     "director": ", ".join(details["director"]) if details["director"] else None,
                     "starring": details["starring"], "synopsis": details["synopsis"],
-                    "genre": details["genre"],
+                    "genre": details["genre"], "original_language": _fetch_original_language(f.title, f.year),
                 }
         except Exception as exc:
             print(f"warning: failed to fetch Sarah's watchlist, carrying forward yesterday's ({exc})",
@@ -301,13 +313,20 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
             cached_entry_id, cached_confidence = get_cached_entry_id(previous_state, film.slug)
             film_state = resolve_and_fetch(film, cached_entry_id, cached_confidence, now_iso=now_iso)
 
-            if previous_film is not None and previous_film.poster_url is not None:
+            # original_language was added after most films were already
+            # enriched — checking for it here (not just poster_url) means
+            # every film missing it gets backfilled the next time its own
+            # stale-rotation turn comes up (see STALE_BATCH_FRACTION above),
+            # rather than needing a separate one-off backfill pass.
+            if (previous_film is not None and previous_film.poster_url is not None
+                    and previous_film.original_language is not None):
                 film_state.rating = previous_film.rating
                 film_state.poster_url = previous_film.poster_url
                 film_state.director = previous_film.director
                 film_state.starring = previous_film.starring
                 film_state.synopsis = previous_film.synopsis
                 film_state.genre = previous_film.genre
+                film_state.original_language = previous_film.original_language
             else:
                 details = get_film_details_by_slug(film.slug)
                 film_state.rating = details["rating"]
@@ -316,6 +335,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 film_state.starring = details["starring"]
                 film_state.synopsis = details["synopsis"]
                 film_state.genre = details["genre"]
+                film_state.original_language = _fetch_original_language(film.title, film.year)
         except Exception as exc:
             print(f"warning: failed to check {film.slug!r}, skipping it this run ({exc})", file=sys.stderr)
             if previous_film is not None:
@@ -591,7 +611,7 @@ def main() -> None:
                 "poster_url": details["poster_url"],
                 "director": ", ".join(details["director"]) if details["director"] else None,
                 "starring": details["starring"], "synopsis": details["synopsis"],
-                "genre": details["genre"],
+                "genre": details["genre"], "original_language": _fetch_original_language(f.title, f.year),
             }
             added += 1
             if added % 25 == 0:

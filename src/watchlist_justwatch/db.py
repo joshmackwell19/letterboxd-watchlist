@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS watch_together (
     decided_at TEXT
 );
 ALTER TABLE films ADD COLUMN IF NOT EXISTS genre JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE films ADD COLUMN IF NOT EXISTS original_language TEXT;
 """
 
 
@@ -107,15 +108,15 @@ def load_state(database_url: str) -> StateDoc:
         films: dict[str, FilmState] = {}
         for row in conn.execute(
             "SELECT slug, title, year, entry_id, confidence, last_checked, offers, "
-            "rating, poster_url, director, starring, synopsis, genre FROM films"
+            "rating, poster_url, director, starring, synopsis, genre, original_language FROM films"
         ).fetchall():
             (slug, title, year, entry_id, confidence, last_checked, offers,
-             rating, poster_url, director, starring, synopsis, genre) = row
+             rating, poster_url, director, starring, synopsis, genre, original_language) = row
             films[slug] = FilmState(
                 slug=slug, title=title, year=year, entry_id=entry_id, confidence=confidence,
                 last_checked=last_checked, offers=[_offer_from_dict(o) for o in offers],
                 rating=rating, poster_url=poster_url, director=director, starring=starring,
-                synopsis=synopsis, genre=genre,
+                synopsis=synopsis, genre=genre, original_language=original_language,
             )
 
         diary = dict(conn.execute("SELECT slug, data FROM diary").fetchall())
@@ -168,12 +169,12 @@ def save_state(database_url: str, state: StateDoc) -> None:
         if state.films:
             conn.cursor().executemany(
                 "INSERT INTO films (slug, title, year, entry_id, confidence, last_checked, "
-                "offers, rating, poster_url, director, starring, synopsis, genre) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "offers, rating, poster_url, director, starring, synopsis, genre, original_language) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 [
                     (f.slug, f.title, f.year, f.entry_id, f.confidence, f.last_checked,
                      Jsonb([_offer_to_dict(o) for o in f.offers]), f.rating, f.poster_url,
-                     Jsonb(f.director), Jsonb(f.starring), f.synopsis, Jsonb(f.genre))
+                     Jsonb(f.director), Jsonb(f.starring), f.synopsis, Jsonb(f.genre), f.original_language)
                     for f in state.films.values()
                 ],
             )

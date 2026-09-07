@@ -23,7 +23,10 @@ from .config import (
     load_main_services, load_revisitable_services,
 )
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
-from .db import get_meta_value, load_state, save_state
+from .db import (
+    get_meta_value, load_state, load_watch_together, save_state, seed_pending_watch_together,
+    set_watch_together_status,
+)
 from .diff import build_report
 from .html_email import (
     render_country_audit_html,
@@ -86,7 +89,8 @@ STALE_BATCH_FRACTION = 0.20
 RECENT_ADDITIONS_RETENTION_DAYS = 35
 
 
-def run(username: str, config_path: Path, database_url: str, *, progress: bool = True) -> int:
+def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
+        progress: bool = True) -> int:
     config = load_config(config_path)
     global_subscriptions = load_global_subscriptions(config_path)
     favorites = load_favorites(DEFAULT_FAVORITES_PATH)
@@ -122,6 +126,31 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
                 "starring": details["starring"], "synopsis": details["synopsis"],
                 "genre": details["genre"],
             }
+
+    # Sarah's own watchlist — purely additive (shown in its own dashboard
+    # tab), never implies watch_together status. Optional: no-ops entirely
+    # if she isn't configured. A fetch failure just carries forward
+    # yesterday's list, same reasoning as every other best-effort fetch here.
+    sarah_watchlist_slugs = set(previous_state.sarah_watchlist)
+    sarah_extra_films = dict(previous_state.sarah_extra_films)
+    if sarah_username:
+        try:
+            sarah_films = fetch_watchlist(sarah_username)
+            sarah_watchlist_slugs = {f.slug for f in sarah_films}
+            for f in sarah_films:
+                if f.slug in current_state_diary or f.slug in sarah_extra_films:
+                    continue
+                details = get_film_details_by_slug(f.slug)
+                sarah_extra_films[f.slug] = {
+                    "slug": f.slug, "title": f.title, "year": f.year,
+                    "rating": details["rating"], "poster_url": details["poster_url"],
+                    "director": ", ".join(details["director"]) if details["director"] else None,
+                    "starring": details["starring"], "synopsis": details["synopsis"],
+                    "genre": details["genre"],
+                }
+        except Exception as exc:
+            print(f"warning: failed to fetch Sarah's watchlist, carrying forward yesterday's ({exc})",
+                  file=sys.stderr)
 
     # Correlated across all of TMDB, not just the watchlist, so these can
     # surface films worth discovering rather than only re-surfacing what's
@@ -299,6 +328,17 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
     current_state.recommendation_sections = recommendation_sections
     current_state.discovery_films = discovery_films
     current_state.diary = current_state_diary
+    current_state.sarah_watchlist = sarah_watchlist_slugs
+    current_state.sarah_extra_films = sarah_extra_films
+
+    # Auto-queue every watchlist film missing a watch-together decision for
+    # Sarah's review — covers both the one-time backfill of the existing
+    # watchlist (nothing has an entry yet the first time this runs after
+    # shipping) and future additions (only the new slug is missing) through
+    # the same call, no separate backfill step needed.
+    existing_watch_together = load_watch_together(database_url)
+    missing_watch_together = {slug for slug in current_state.films if slug not in existing_watch_together}
+    seed_pending_watch_together(database_url, missing_watch_together, today_str)
 
     # A single day's diff is usually too small to fill a "recently added"
     # section on its own, so newly-detected have/free offers accumulate into
@@ -327,7 +367,9 @@ def run(username: str, config_path: Path, database_url: str, *, progress: bool =
     # (JustWatch refresh, discovery, diary) shouldn't be lost just because
     # Resend is having an outage; the email is a nice-to-have on top.
     save_state(database_url, current_state)
-    dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable, dismissed)
+    watch_together = load_watch_together(database_url)
+    dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable,
+                                          dismissed, watch_together=watch_together)
     DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
 
     if text:
@@ -346,6 +388,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cross-check a Letterboxd watchlist against JustWatch")
     parser.add_argument("--username", default=os.getenv("LETTERBOXD_USERNAME"),
                          help="Letterboxd username (or set LETTERBOXD_USERNAME in .env)")
+    parser.add_argument("--sarah-username", default=os.getenv("SARAH_LETTERBOXD_USERNAME"),
+                         help="Sarah's Letterboxd username, shown additively in her own dashboard tab "
+                              "(or set SARAH_LETTERBOXD_USERNAME in .env). Optional — the feature no-ops "
+                              "if unset.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"),
                          help="Postgres connection string (or set DATABASE_URL in .env)")
@@ -387,6 +433,10 @@ def main() -> None:
                               "covers everything older. Doesn't include 'liked' — not reliably scrapable "
                               "from the static diary page — only --check-for-new-log captures that, "
                               "going forward.")
+    parser.add_argument("--set-watch-together-status", nargs=2, metavar=("SLUG", "STATUS"),
+                         help="Set one film's watch-with-Sarah review status to 'confirmed' or "
+                              "'declined', then exit. No network calls — this is what the dashboard's "
+                              "Review tab actually calls (via the regenerate-dashboard workflow).")
     parser.add_argument("--migrate-json-to-db", type=Path, metavar="STATE_JSON",
                          help="One-time import of a legacy data/state.json file into the database "
                               "at --database-url, then exit")
@@ -456,6 +506,14 @@ def main() -> None:
             print("new_log=false")
         sys.exit(0)
 
+    if args.set_watch_together_status:
+        slug, status = args.set_watch_together_status
+        if status not in ("confirmed", "declined"):
+            parser.error(f"--set-watch-together-status STATUS must be 'confirmed' or 'declined', got {status!r}")
+        set_watch_together_status(args.database_url, slug, status, datetime.now(timezone.utc).isoformat()[:10])
+        print(f"Set {slug!r} to {status!r}.")
+        sys.exit(0)
+
     if args.rank_services:
         config = load_config(args.config)
         state = load_state(args.database_url)
@@ -469,7 +527,9 @@ def main() -> None:
         revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
         dismissed = load_dismissed_recommendations(DEFAULT_DISMISSED_PATH)
         state = load_state(args.database_url)
-        data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable, dismissed)
+        watch_together = load_watch_together(args.database_url)
+        data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable, dismissed,
+                                    watch_together=watch_together)
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
         sys.exit(0)
@@ -581,7 +641,7 @@ def main() -> None:
         parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
 
     try:
-        exit_code = run(args.username, args.config, args.database_url)
+        exit_code = run(args.username, args.config, args.database_url, sarah_username=args.sarah_username)
     except LetterboxdFetchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         exit_code = 1

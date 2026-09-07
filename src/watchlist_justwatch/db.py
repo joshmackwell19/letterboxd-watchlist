@@ -36,6 +36,23 @@ CREATE TABLE IF NOT EXISTS recommendation_sections (
     header TEXT NOT NULL,
     slugs JSONB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sarah_watchlist (
+    slug TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS sarah_extra_films (
+    slug TEXT PRIMARY KEY,
+    data JSONB NOT NULL
+);
+-- Written incrementally from two separate call sites (the daily run seeding
+-- new "pending" rows, and the standalone --set-watch-together-status flag)
+-- rather than replaced wholesale each run like the tables above — see
+-- seed_pending_watch_together/set_watch_together_status.
+CREATE TABLE IF NOT EXISTS watch_together (
+    slug TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',
+    added_at TEXT NOT NULL,
+    decided_at TEXT
+);
 ALTER TABLE films ADD COLUMN IF NOT EXISTS genre JSONB NOT NULL DEFAULT '[]';
 """
 
@@ -109,6 +126,8 @@ def load_state(database_url: str) -> StateDoc:
                 "SELECT key, header, slugs FROM recommendation_sections"
             ).fetchall()
         ]
+        sarah_watchlist = {row[0] for row in conn.execute("SELECT slug FROM sarah_watchlist").fetchall()}
+        sarah_extra_films = dict(conn.execute("SELECT slug, data FROM sarah_extra_films").fetchall())
 
     return StateDoc(
         schema_version=meta.get("schema_version", SCHEMA_VERSION),
@@ -121,6 +140,8 @@ def load_state(database_url: str) -> StateDoc:
         discovery_films=discovery_films,
         recent_additions=meta.get("recent_additions", []),
         diary=diary,
+        sarah_watchlist=sarah_watchlist,
+        sarah_extra_films=sarah_extra_films,
     )
 
 
@@ -137,7 +158,12 @@ def save_state(database_url: str, state: StateDoc) -> None:
         conn.execute("DELETE FROM diary")
         conn.execute("DELETE FROM discovery_films")
         conn.execute("DELETE FROM recommendation_sections")
+        conn.execute("DELETE FROM sarah_watchlist")
+        conn.execute("DELETE FROM sarah_extra_films")
         conn.execute("DELETE FROM meta")
+        # watch_together is deliberately NOT wiped here — it's written
+        # incrementally by seed_pending_watch_together/set_watch_together_status,
+        # not rebuilt wholesale each run like everything else in this function.
 
         if state.films:
             conn.cursor().executemany(
@@ -170,6 +196,18 @@ def save_state(database_url: str, state: StateDoc) -> None:
                 [(s["key"], s["header"], Jsonb(s["slugs"])) for s in state.recommendation_sections],
             )
 
+        if state.sarah_watchlist:
+            conn.cursor().executemany(
+                "INSERT INTO sarah_watchlist (slug) VALUES (%s)",
+                [(slug,) for slug in state.sarah_watchlist],
+            )
+
+        if state.sarah_extra_films:
+            conn.cursor().executemany(
+                "INSERT INTO sarah_extra_films (slug, data) VALUES (%s, %s)",
+                [(slug, Jsonb(data)) for slug, data in state.sarah_extra_films.items()],
+            )
+
         conn.cursor().executemany(
             "INSERT INTO meta (key, value) VALUES (%s, %s)",
             [
@@ -180,4 +218,44 @@ def save_state(database_url: str, state: StateDoc) -> None:
                 ("recent_watches", Jsonb(state.recent_watches)),
                 ("recent_additions", Jsonb(state.recent_additions)),
             ],
+        )
+
+
+def load_watch_together(database_url: str) -> dict[str, dict]:
+    """slug -> {status, added_at, decided_at}. Unlike load_state, this reads
+    a table that's written incrementally (see seed_pending_watch_together/
+    set_watch_together_status below), not replaced wholesale each run."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute("SELECT slug, status, added_at, decided_at FROM watch_together").fetchall()
+    return {
+        slug: {"status": status, "added_at": added_at, "decided_at": decided_at}
+        for slug, status, added_at, decided_at in rows
+    }
+
+
+def seed_pending_watch_together(database_url: str, slugs: set[str], added_at: str) -> None:
+    """Adds a 'pending' row for each slug that doesn't already have one —
+    called once per daily run with every watchlist slug missing an entry, so
+    it covers both the one-time backfill of the existing watchlist (every
+    slug is "missing" the first time this runs) and future additions (only
+    the new slug is) with the same code path. A no-op for slugs that already
+    have a row, so it's safe to call with the same slug on repeat runs."""
+    if not slugs:
+        return
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        conn.cursor().executemany(
+            "INSERT INTO watch_together (slug, status, added_at) VALUES (%s, 'pending', %s) "
+            "ON CONFLICT (slug) DO NOTHING",
+            [(slug, added_at) for slug in slugs],
+        )
+
+
+def set_watch_together_status(database_url: str, slug: str, status: str, decided_at: str) -> None:
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "UPDATE watch_together SET status = %s, decided_at = %s WHERE slug = %s",
+            (status, decided_at, slug),
         )

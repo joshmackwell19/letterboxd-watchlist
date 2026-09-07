@@ -1,0 +1,93 @@
+name: Regenerate dashboard
+
+# Triggered by the Cloudflare Worker behind the dashboard's Settings save,
+# recommendation dismiss, and Review tab yes/no buttons — all three only
+# ever change how already-fetched data is classified/rendered (services.yaml,
+# dismissed_recommendations.yaml, or the watch_together table), never
+# something that needs a fresh Letterboxd/JustWatch/TMDB scrape. Splitting
+# this out from daily.yml means those three, plus a backlog of Review-tab
+# taps, don't each cost a multi-minute full pipeline run.
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Film slug to set a watch-together status for (optional — omit for a plain regen)"
+        required: false
+      status:
+        description: "New watch-together status for that slug"
+        required: false
+        type: choice
+        default: ""
+        options:
+          - ""
+          - confirmed
+          - declined
+
+# Shares daily.yml's concurrency group on purpose — queues behind an
+# in-progress full run rather than racing its own "commit dashboard.html"
+# step, same reasoning already documented there.
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Set watch-together status
+        if: inputs.slug != '' && inputs.status != ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m watchlist_justwatch.main --set-watch-together-status "${{ inputs.slug }}" "${{ inputs.status }}"
+
+      - name: Regenerate dashboard.html (no network calls)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m watchlist_justwatch.main --dashboard
+
+      - name: Commit updated dashboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dashboard.html
+          git diff --cached --quiet || git commit -m "Update dashboard [skip ci]"
+          git push
+
+      # Same reasoning as daily.yml: the actual change (DB write + dashboard
+      # regen + commit) has already succeeded by this point — a transient
+      # Pages hiccup shouldn't mark this run as failed.
+      - name: Prepare Pages site
+        continue-on-error: true
+        run: |
+          mkdir -p _site
+          cp dashboard.html _site/index.html
+          cp manifest.json _site/manifest.json
+          cp -r icons _site/icons
+
+      - name: Upload Pages artifact
+        continue-on-error: true
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v4

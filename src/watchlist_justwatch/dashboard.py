@@ -336,6 +336,23 @@ def _cached_section(state: StateDoc, lookup: dict[str, dict], key: str, exclude:
     return _section_from_cached(cached, lookup, exclude, limit)
 
 
+def _watch_together_section(state: StateDoc, watch_together: dict[str, dict], exclude: set[str],
+                             limit: int = RECOMMENDED_COUNT) -> dict:
+    """Films Sarah has confirmed from the Review tab — ranked alongside
+    leaving_soon/recently_added since a shared "yes, let's watch this
+    together" is as actionable a signal as either of those. Only slugs still
+    on the watchlist and still in `films` are shown — a film that fell off
+    the watchlist after being confirmed just quietly stops appearing, same
+    as it would everywhere else on the dashboard."""
+    confirmed = [
+        (info["decided_at"] or "", slug) for slug, info in watch_together.items()
+        if info["status"] == "confirmed" and slug in state.films and slug not in exclude
+    ]
+    confirmed.sort(key=lambda pair: pair[0], reverse=True)
+    films = [_mini_card(state.films[slug]) for _, slug in confirmed[:limit]]
+    return {"key": "watch_together", "header": "Watch together", "films": films}
+
+
 def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12) -> dict:
     seen: set[str] = set()
     chosen: list[str] = []
@@ -410,7 +427,8 @@ def _leaving_soon_section(state: StateDoc, films_all_offers: dict[str, list[dict
 
 
 def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
-                          films_by_slug: dict[str, dict], dismissed_recommendations: set[str]) -> list[dict]:
+                          films_by_slug: dict[str, dict], dismissed_recommendations: set[str],
+                          watch_together: dict[str, dict]) -> list[dict]:
     lookup = {**films_by_slug, **state.discovery_films}
     # Seeded with dismissed slugs so every section below skips them for
     # free — "not interested" only ever applies to a discovery pick (not
@@ -430,6 +448,7 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     # actionable ("this is now watchable") signal after that.
     add(_leaving_soon_section(state, films_all_offers, used))
     add(_recently_added_section(state, used))
+    add(_watch_together_section(state, watch_together, used))
 
     # Recommended-from-recent-watches and top-rated next — general
     # discovery, not tied to a specific person — so they're not buried
@@ -491,7 +510,9 @@ def build_dashboard_data(
     global_subscriptions: list[str],
     revisitable: set[str],
     dismissed_recommendations: set[str] = frozenset(),
+    watch_together: dict[str, dict] | None = None,
 ) -> dict:
+    watch_together = watch_together or {}
     main_brands = _select_main_brands(state, config, global_subscriptions)
     main_brand_set = set(main_brands)
 
@@ -501,19 +522,33 @@ def build_dashboard_data(
     }
 
     rows = [_film_row(film, main_brand_set, films_all_offers[slug]) for slug, film in state.films.items()]
+    for r in rows:
+        r["watch_together_status"] = watch_together.get(r["slug"], {}).get("status")
     rows.sort(key=lambda r: r["title"].lower())
 
     films_by_slug = _films_by_slug(state, films_all_offers)
+    for slug, entry in films_by_slug.items():
+        entry["watch_together_status"] = watch_together.get(slug, {}).get("status")
+
+    sarah_films = [
+        _mini_card(state.films[slug]) if slug in state.films else _mini_card_from_lookup(state.sarah_extra_films[slug])
+        for slug in sorted(state.sarah_watchlist, key=lambda s: (
+            state.films[s].title if s in state.films else state.sarah_extra_films.get(s, {}).get("title", "")
+        ).lower())
+        if slug in state.films or slug in state.sarah_extra_films
+    ]
 
     return {
         "last_run_at": state.last_run_at,
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
-        "home_sections": _build_home_sections(state, films_all_offers, films_by_slug, dismissed_recommendations),
+        "home_sections": _build_home_sections(state, films_all_offers, films_by_slug, dismissed_recommendations,
+                                              watch_together),
         "films": rows,
         "services": _service_rows(state, films_all_offers),
         "countries": _country_rows(state, films_all_offers),
         "films_by_slug": {**films_by_slug, **state.discovery_films},
+        "sarah_films": sarah_films,
         "settings": _settings_data(config, global_subscriptions),
     }
 
@@ -820,6 +855,18 @@ _TEMPLATE = """<!DOCTYPE html>
   }
   .dismiss-btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--hairline); }
   .film-card.dismissing { opacity: 0; transform: scale(0.96); transition: opacity 0.2s, transform 0.2s; }
+  .review-actions { display: flex; gap: 6px; margin-top: 8px; }
+  .review-btn {
+    flex: 1; border-radius: 999px; border: 1.5px solid var(--hairline-strong); background: none;
+    padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text-muted);
+  }
+  .review-btn-yes { border-color: rgba(74, 222, 128, 0.4); color: #4ade80; }
+  .review-btn-yes:hover { background: rgba(74, 222, 128, 0.14); }
+  .review-btn-no { border-color: rgba(248, 113, 113, 0.4); color: #f87171; }
+  .review-btn-no:hover { background: rgba(248, 113, 113, 0.14); }
+  .review-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .icon-btn { position: relative; }
+  .icon-btn .new-badge { position: absolute; top: -3px; right: -3px; margin-left: 0; }
   .toast {
     position: fixed; bottom: calc(20px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
     background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text);
@@ -944,6 +991,19 @@ _TEMPLATE = """<!DOCTYPE html>
         </svg>
         Films
       </button>
+      <button class="tab-btn" id="tab-review">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3L22 4"></path>
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+        </svg>
+        Review<span class="new-badge review-count-badge hidden"></span>
+      </button>
+      <button class="tab-btn" id="tab-sarah">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"></path>
+        </svg>
+        Sarah's list
+      </button>
       <button class="tab-btn" id="tab-settings">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3.2"></circle>
@@ -993,6 +1053,8 @@ _TEMPLATE = """<!DOCTYPE html>
            already does a plain page reload here. Refresh-data has no mobile
            gesture equivalent, so it still needs an explicit control. -->
       <button class="icon-btn" id="triggerRefreshBtnMobile" aria-label="Refresh data" title="Re-run the daily check and redeploy">☁</button>
+      <button class="icon-btn" id="reviewBtnMobile" aria-label="Review" title="Films to review with Sarah">✓<span class="new-badge review-count-badge-mobile hidden"></span></button>
+      <button class="icon-btn" id="sarahBtnMobile" aria-label="Sarah's list" title="Sarah's watchlist">♥</button>
       <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
     </div>
   </div>
@@ -1042,6 +1104,18 @@ _TEMPLATE = """<!DOCTYPE html>
       </select>
       <span id="filmsFilterToggles"></span>
       <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
+    </div>
+    <div class="controls" data-view="review" id="controls-review">
+      <div class="search-wrap">
+        <input type="text" id="reviewSearch" placeholder="Search title, year, director, cast...">
+        <span class="search-clear hidden" id="reviewSearchClear">✕</span>
+      </div>
+    </div>
+    <div class="controls" data-view="sarah" id="controls-sarah">
+      <div class="search-wrap">
+        <input type="text" id="sarahSearch" placeholder="Search title, year, director, cast...">
+        <span class="search-clear hidden" id="sarahSearchClear">✕</span>
+      </div>
     </div>
   </div>
 </div>
@@ -1105,6 +1179,19 @@ _TEMPLATE = """<!DOCTYPE html>
 <section class="view" id="view-films">
   <div class="active-filters" id="activeFilmFilters"></div>
   <div id="filmsGrid" class="film-cards"></div>
+</section>
+
+<section class="view" id="view-review">
+  <p class="muted" style="margin: 0 0 14px;">
+    Every film added to the watchlist lands here for a yes/no on watching it together — decisions save
+    within about a minute, no need to wait around.
+  </p>
+  <div id="reviewGrid" class="film-cards"></div>
+</section>
+
+<section class="view" id="view-sarah">
+  <p class="muted" style="margin: 0 0 14px;">Sarah's own Letterboxd watchlist — just for browsing.</p>
+  <div id="sarahGrid" class="film-cards"></div>
 </section>
 
 <nav class="bottom-nav">
@@ -1261,15 +1348,19 @@ document.getElementById('tab-home').addEventListener('click', () => showView('ho
 document.getElementById('tab-country').addEventListener('click', () => showView('country'));
 document.getElementById('tab-services').addEventListener('click', () => showView('services'));
 document.getElementById('tab-films').addEventListener('click', () => showView('films'));
+document.getElementById('tab-review').addEventListener('click', () => showView('review'));
+document.getElementById('tab-sarah').addEventListener('click', () => showView('sarah'));
 document.getElementById('tab-settings').addEventListener('click', () => { renderSettings(); showView('settings'); });
 document.getElementById('nav-home').addEventListener('click', () => showView('home'));
 document.getElementById('nav-country').addEventListener('click', () => showView('country'));
 document.getElementById('nav-services').addEventListener('click', () => showView('services'));
 document.getElementById('nav-films').addEventListener('click', () => showView('films'));
 document.getElementById('backToServices').addEventListener('click', () => showView('services'));
-// Mobile keeps a small standalone gear icon (Settings isn't one of its
-// bottom-nav's 4 destinations) — desktop's tab-settings button above is the
-// primary entry point now that Settings is a peer tab, not a drill-down.
+// Mobile keeps small standalone icons for Review/Sarah/Settings (none of
+// them are among the bottom-nav's 4 destinations) — desktop's peer tab
+// buttons above are the primary entry point for all three.
+document.getElementById('reviewBtnMobile').addEventListener('click', () => showView('review'));
+document.getElementById('sarahBtnMobile').addEventListener('click', () => showView('sarah'));
 document.getElementById('settingsBtn').addEventListener('click', () => { renderSettings(); showView('settings'); });
 
 // Every brand this watchlist has ever seen on JustWatch — the "entire
@@ -1518,6 +1609,8 @@ function showView(name) {
   // separately rather than folded into TABS so that loop above doesn't
   // break looking for a nonexistent "nav-settings" button.
   document.getElementById('tab-settings').classList.toggle('active', name === 'settings');
+  document.getElementById('tab-review').classList.toggle('active', name === 'review');
+  document.getElementById('tab-sarah').classList.toggle('active', name === 'sarah');
 
   // The fixed bar's second row holds each tab's own search/sort/filter
   // controls (moved up out of the scrolling content so they never scroll
@@ -1668,6 +1761,114 @@ function addDismissButton(cardEl, slug) {
   const end = cardEl.querySelector('.film-card-end');
   (end || cardEl).appendChild(btn);
 }
+
+// ---------- Watch-together review ----------
+
+// Unlike dismissRecommendation, this goes through the regenerate-dashboard
+// workflow (not a plain GitHub commit) since the status lives in Postgres,
+// not a config YAML file — see db.py's watch_together table. Still
+// optimistic: the card leaves the Review queue immediately, the actual
+// write/regen happens in the background over the next under-a-minute or so.
+function tagFilm(slug, status, cardEl) {
+  cardEl.classList.add('dismissing');
+  setTimeout(() => { cardEl.remove(); updateReviewBadge(); }, 200);
+  // DATA.films and DATA.films_by_slug are separate object instances per slug
+  // (each just its own spot in the parsed JSON payload, not shared
+  // references) — both need updating, or a later re-render (e.g. switching
+  // back to the Review tab) would still see 'pending' and resurrect the card.
+  const row = DATA.films.find(f => f.slug === slug);
+  if (row) row.watch_together_status = status;
+  const film = DATA.films_by_slug[slug];
+  if (film) film.watch_together_status = status;
+  fetch(DATA.settings.refresh_worker_url + '/tag-film', {
+    method: 'POST',
+    headers: {
+      'X-Trigger-Secret': DATA.settings.refresh_trigger_secret,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ slug, status }),
+  })
+    .then(response => response.json().catch(() => null))
+    .then(body => {
+      if (!body || !body.ok) showToast('Saved locally, but the write failed — it may revert to pending.');
+    })
+    .catch(() => showToast('Saved locally, but the write failed — it may revert to pending.'));
+}
+
+function addReviewActions(cardEl, slug) {
+  const wrap = document.createElement('div');
+  wrap.className = 'review-actions';
+  const yesBtn = document.createElement('button');
+  yesBtn.type = 'button';
+  yesBtn.className = 'review-btn review-btn-yes';
+  yesBtn.textContent = '✓ Watch together';
+  const noBtn = document.createElement('button');
+  noBtn.type = 'button';
+  noBtn.className = 'review-btn review-btn-no';
+  noBtn.textContent = '✕ Not for us';
+  [yesBtn, noBtn].forEach(btn => btn.addEventListener('click', event => {
+    event.stopPropagation();
+    yesBtn.disabled = true;
+    noBtn.disabled = true;
+    tagFilm(slug, btn === yesBtn ? 'confirmed' : 'declined', cardEl);
+  }));
+  wrap.appendChild(yesBtn);
+  wrap.appendChild(noBtn);
+  cardEl.querySelector('.film-card-body').appendChild(wrap);
+}
+
+function updateReviewBadge() {
+  const count = DATA.films.filter(f => f.watch_together_status === 'pending').length;
+  document.querySelectorAll('.review-count-badge, .review-count-badge-mobile').forEach(el => {
+    el.textContent = String(count);
+    el.classList.toggle('hidden', count === 0);
+  });
+}
+
+function renderReview() {
+  const q = document.getElementById('reviewSearch').value.trim().toLowerCase();
+  const pending = DATA.films.filter(f => f.watch_together_status === 'pending' && (!q || searchHaystack(f).includes(q)));
+  const container = document.getElementById('reviewGrid');
+  container.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  pending.forEach(film => {
+    const card = filmCardShell(film, '');
+    addReviewActions(card, film.slug);
+    frag.appendChild(card);
+  });
+  container.appendChild(frag);
+  ensureNotEmpty(container, q ? 'No pending films match your search.' : 'Nothing waiting on a decision right now.');
+  updateReviewBadge();
+}
+
+document.getElementById('reviewGrid').addEventListener('click', event => {
+  if (event.target.closest('a.film-link') || event.target.closest('.review-btn')) return;
+  const card = event.target.closest('.film-card');
+  if (card) openQuickLook(card.dataset.slug);
+});
+document.getElementById('reviewSearch').addEventListener('input', renderReview);
+wireSearchClear('reviewSearch', 'reviewSearchClear', renderReview);
+
+// ---------- Sarah's watchlist (browsing only — additive, not tied to watch_together) ----------
+
+function renderSarah() {
+  const q = document.getElementById('sarahSearch').value.trim().toLowerCase();
+  const films = DATA.sarah_films.filter(f => !q || searchHaystack(f).includes(q));
+  const container = document.getElementById('sarahGrid');
+  container.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  films.forEach(film => frag.appendChild(filmCardShell(film, '')));
+  container.appendChild(frag);
+  ensureNotEmpty(container, q ? 'No films match your search.' : "Sarah's watchlist is empty (or not configured yet).");
+}
+
+document.getElementById('sarahGrid').addEventListener('click', event => {
+  if (event.target.closest('a.film-link')) return;
+  const card = event.target.closest('.film-card');
+  if (card) openQuickLook(card.dataset.slug);
+});
+document.getElementById('sarahSearch').addEventListener('input', renderSarah);
+wireSearchClear('sarahSearch', 'sarahSearchClear', renderSarah);
 
 function renderHome() {
   const container = document.getElementById('homeSections');
@@ -2563,6 +2764,8 @@ window.addEventListener('resize', updateAppBarOffset);
 renderHome();
 renderFilmFilterToggles();
 renderFilms();
+renderReview();
+renderSarah();
 // The static HTML has all four controls blocks visible at once (no JS has
 // run yet to hide the non-active ones) — showView('home') both fixes that
 // and measures the now-correct bar height, rather than duplicating that

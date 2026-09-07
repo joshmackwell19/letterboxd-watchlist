@@ -39,6 +39,7 @@ jobs:
       - name: Run watchlist check
         env:
           LETTERBOXD_USERNAME: ${{ secrets.LETTERBOXD_USERNAME }}
+          SARAH_LETTERBOXD_USERNAME: ${{ secrets.SARAH_LETTERBOXD_USERNAME }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}

@@ -103,6 +103,19 @@ def _fetch_original_language(title: str, year: int | None) -> str | None:
 
 def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
         progress: bool = True) -> int:
+    # Collects the same messages already printed to stderr on a partial
+    # failure (a discovery section, a per-film check, Sarah's watchlist
+    # fetch) — those are all caught and carried-forward-on-failure by
+    # design, so the run still reports "success", and stderr alone is easy
+    # to never actually look at. Surfaced at the end of run() via
+    # $GITHUB_STEP_SUMMARY and prepended to the day's email, so a quietly
+    # degraded run doesn't look identical to a clean one.
+    run_warnings: list[str] = []
+
+    def _warn(msg: str) -> None:
+        print(f"warning: {msg}", file=sys.stderr)
+        run_warnings.append(msg)
+
     config = load_config(config_path)
     global_subscriptions = load_global_subscriptions(config_path)
     favorites = load_favorites(DEFAULT_FAVORITES_PATH)
@@ -157,8 +170,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
             sarah_films = fetch_watchlist(sarah_username)
             sarah_watchlist_slugs = {f.slug for f in sarah_films}
         except Exception as exc:
-            print(f"warning: failed to fetch Sarah's watchlist, carrying forward yesterday's ({exc})",
-                  file=sys.stderr)
+            _warn(f"failed to fetch Sarah's watchlist, carrying forward yesterday's ({exc})")
             sarah_films = [
                 WatchlistFilm(slug=slug, title=previous_state.films[slug].title, year=previous_state.films[slug].year)
                 for slug in sarah_watchlist_slugs if slug in previous_state.films
@@ -244,7 +256,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
             try:
                 results = discoverer(exclude_slugs)
             except Exception as exc:
-                print(f"warning: discovery section {name!r} failed, skipping it ({exc})", file=sys.stderr)
+                _warn(f"discovery section {name!r} failed, skipping it ({exc})")
                 continue
             for key, header, slugs, films_map in results:
                 recommendation_sections.append({"key": key, "header": header, "slugs": slugs})
@@ -261,7 +273,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                     current_state_diary, recent_watches, now_iso, config, global_subscriptions, revisitable,
                     rewatch_exclude)
             except Exception as exc:
-                print(f"warning: discovery section 'rewatch' failed, skipping it ({exc})", file=sys.stderr)
+                _warn(f"discovery section 'rewatch' failed, skipping it ({exc})")
                 slugs = []
             if slugs:
                 recommendation_sections.append({"key": "rewatch", "header": header, "slugs": slugs})
@@ -346,7 +358,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 film_state.genre = details["genre"]
                 film_state.original_language = _fetch_original_language(film.title, film.year)
         except Exception as exc:
-            print(f"warning: failed to check {film.slug!r}, skipping it this run ({exc})", file=sys.stderr)
+            _warn(f"failed to check {film.slug!r}, skipping it this run ({exc})")
             if previous_film is not None:
                 current_state.films[film.slug] = previous_film
             continue
@@ -401,14 +413,49 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                                           dismissed, watch_together=watch_together)
     DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
 
-    if text:
-        print(text)
-        html_body = render_report_html(report, config, global_subscriptions, revisitable)
-        send_if_configured("Letterboxd Watchlist — new availability", text, html_body=html_body)
+    # A discovery section or a per-film check failing is already caught and
+    # carried-forward-on-failure by design (see above) — the run still
+    # reports success either way, so without this, "one bad day" and "this
+    # has been broken for a week" look identical unless someone happens to
+    # go read stderr. Surfaced two ways: on the Actions run page directly
+    # (visible even on a day with nothing else to report), and folded into
+    # whatever email actually goes out today.
+    if run_warnings:
+        _write_step_summary(run_warnings)
+
+    if text or run_warnings:
+        print(text or "No new availability changes.")
+        subject = "Letterboxd Watchlist — new availability" if text else "Letterboxd Watchlist — pipeline warnings"
+        email_text = _prepend_warnings(text, run_warnings)
+        html_body = render_report_html(report, config, global_subscriptions, revisitable) if text else None
+        send_if_configured(subject, email_text, html_body=html_body)
     else:
         print("No new availability changes.")
 
     return 0
+
+
+def _write_step_summary(warnings: list[str]) -> None:
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    lines = ["## ⚠️ Pipeline warnings this run", ""]
+    lines += [f"- {w}" for w in warnings[:20]]
+    if len(warnings) > 20:
+        lines.append(f"- ...and {len(warnings) - 20} more (see the run's full log)")
+    with open(summary_path, "a") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _prepend_warnings(text: str, warnings: list[str]) -> str:
+    if not warnings:
+        return text
+    lines = [f"⚠️ {len(warnings)} issue(s) this run:", ""]
+    lines += [f"- {w}" for w in warnings[:20]]
+    if len(warnings) > 20:
+        lines.append(f"- ...and {len(warnings) - 20} more (see the run's full log)")
+    block = "\n".join(lines)
+    return f"{block}\n\n{text}" if text else block
 
 
 def main() -> None:

@@ -25,7 +25,7 @@ from .config import (
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import (
     get_meta_value, load_state, load_watch_together, save_state, seed_pending_watch_together,
-    set_watch_together_status,
+    set_watch_together_status, set_watch_together_statuses_batch,
 )
 from .diff import build_report
 from .html_email import (
@@ -469,8 +469,14 @@ def main() -> None:
                               "then exit.")
     parser.add_argument("--set-watch-together-status", nargs=2, metavar=("SLUG", "STATUS"),
                          help="Set one film's watch-with-Sarah review status to 'confirmed' or "
-                              "'declined', then exit. No network calls — this is what the dashboard's "
-                              "Review tab actually calls (via the regenerate-dashboard workflow).")
+                              "'declined', then exit. No network calls — for manual/one-off use; the "
+                              "dashboard's Review tab itself calls --set-watch-together-statuses-batch.")
+    parser.add_argument("--set-watch-together-statuses-batch", metavar="JSON",
+                         help="Set multiple films' watch-with-Sarah review status in one go — a JSON "
+                              "array of {\"slug\": ..., \"status\": \"confirmed\"|\"declined\"} objects — "
+                              "then exit. No network calls. This is what the dashboard's Review tab "
+                              "actually calls: taps debounce-batch client-side (see dashboard.py) so a "
+                              "review session costs one workflow run, not one per tap.")
     parser.add_argument("--migrate-json-to-db", type=Path, metavar="STATE_JSON",
                          help="One-time import of a legacy data/state.json file into the database "
                               "at --database-url, then exit")
@@ -562,6 +568,22 @@ def main() -> None:
             parser.error(f"--set-watch-together-status STATUS must be 'confirmed' or 'declined', got {status!r}")
         set_watch_together_status(args.database_url, slug, status, datetime.now(timezone.utc).isoformat()[:10])
         print(f"Set {slug!r} to {status!r}.")
+        sys.exit(0)
+
+    if args.set_watch_together_statuses_batch:
+        try:
+            items = json.loads(args.set_watch_together_statuses_batch)
+        except json.JSONDecodeError as exc:
+            parser.error(f"--set-watch-together-statuses-batch must be valid JSON ({exc})")
+        decided_at = datetime.now(timezone.utc).isoformat()[:10]
+        decisions = []
+        for item in items:
+            slug, status = item.get("slug"), item.get("status")
+            if not slug or status not in ("confirmed", "declined"):
+                parser.error(f"invalid batch entry (need slug + confirmed/declined status): {item!r}")
+            decisions.append((slug, status, decided_at))
+        set_watch_together_statuses_batch(args.database_url, decisions)
+        print(f"Set {len(decisions)} film(s) status.")
         sys.exit(0)
 
     if args.rank_services:

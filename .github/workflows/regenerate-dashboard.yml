@@ -10,18 +10,14 @@ name: Regenerate dashboard
 on:
   workflow_dispatch:
     inputs:
-      slug:
-        description: "Film slug to set a watch-together status for (optional — omit for a plain regen)"
+      decisions:
+        description: >-
+          JSON array of {slug, status} to set (optional — omit for a plain
+          regen). The Review tab debounce-batches taps client-side into one
+          call here instead of dispatching a run per tap — see
+          dashboard.py's queueDecision/flushPendingDecisions.
         required: false
-      status:
-        description: "New watch-together status for that slug"
-        required: false
-        type: choice
         default: ""
-        options:
-          - ""
-          - confirmed
-          - declined
 
 # Deliberately no concurrency group. This used to share daily.yml's
 # ("daily-pipeline"), but GitHub Actions concurrency only lets ONE run wait
@@ -56,11 +52,18 @@ jobs:
       - name: Install dependencies
         run: pip install -e .
 
-      - name: Set watch-together status
-        if: inputs.slug != '' && inputs.status != ''
+      - name: Set watch-together statuses
+        if: inputs.decisions != ''
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python -m watchlist_justwatch.main --set-watch-together-status "${{ inputs.slug }}" "${{ inputs.status }}"
+          # Passed via env rather than spliced straight into the script —
+          # ${{ }} expressions substitute as raw text before the shell ever
+          # sees the line, so an interpolated value can (in principle) break
+          # out of the quoting; going through a normal env var + shell
+          # expansion avoids that regardless of what the JSON happens to
+          # contain.
+          DECISIONS_JSON: ${{ inputs.decisions }}
+        run: python -m watchlist_justwatch.main --set-watch-together-statuses-batch "$DECISIONS_JSON"
 
       - name: Regenerate dashboard.html (no network calls)
         env:

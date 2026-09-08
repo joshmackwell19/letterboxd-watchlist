@@ -1884,6 +1884,12 @@ function animateReviewCardExit(cardEl, direction, dy) {
 // next under-a-minute or so. `dy` lets a completed swipe carry on in the
 // same direction it was already being dragged, rather than snapping back
 // to center before flying off.
+//
+// The actual write is debounce-batched, not sent per tap — a workflow run
+// (checkout, pip install, DB write, dashboard regen, Pages deploy) costs
+// real Actions minutes regardless of how small the change, and reviewing
+// is normally done in a burst of several/many taps in one sitting, not one
+// at a time. See queueDecision/flushPendingDecisions below.
 function tagFilm(slug, status, cardEl, dy) {
   animateReviewCardExit(cardEl, status === 'confirmed' ? 1 : -1, dy || 0);
   const row = DATA.films.find(f => f.slug === slug);
@@ -1891,20 +1897,87 @@ function tagFilm(slug, status, cardEl, dy) {
   const film = DATA.films_by_slug[slug];
   if (film) film.watch_together_status = status;
   setTimeout(renderReview, 300);
+  queueDecision(slug, status);
+}
+
+// ---------- Debounced batch write for Review decisions ----------
+
+// localStorage-backed (not just an in-memory array) so a decision already
+// queued survives a reload or a crash before its debounce fired — flushed
+// again on next load below instead of being silently lost.
+const REVIEW_QUEUE_KEY = 'watchlist_pending_decisions_v1';
+const REVIEW_FLUSH_DEBOUNCE_MS = 6000;
+let reviewFlushTimer = null;
+
+function loadPendingDecisions() {
+  try {
+    return JSON.parse(localStorage.getItem(REVIEW_QUEUE_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function savePendingDecisions(list) {
+  try {
+    localStorage.setItem(REVIEW_QUEUE_KEY, JSON.stringify(list));
+  } catch {
+    // Private browsing / storage full — the batch still sends normally
+    // this session, it just won't survive a crash or reload before then.
+  }
+}
+
+function queueDecision(slug, status) {
+  const list = loadPendingDecisions().filter(d => d.slug !== slug);
+  list.push({ slug, status });
+  savePendingDecisions(list);
+  clearTimeout(reviewFlushTimer);
+  reviewFlushTimer = setTimeout(flushPendingDecisions, REVIEW_FLUSH_DEBOUNCE_MS);
+}
+
+function flushPendingDecisions() {
+  clearTimeout(reviewFlushTimer);
+  const list = loadPendingDecisions();
+  if (!list.length) return;
+  // Cleared up front rather than after the request lands — a decision made
+  // while this fetch is in flight queues fresh instead of being folded
+  // into (and delayed by) a batch that's already on its way out. If the
+  // request fails, the catch below merges this batch back in rather than
+  // dropping it.
+  savePendingDecisions([]);
+  const count = list.length;
   fetch(DATA.settings.refresh_worker_url + '/tag-film', {
     method: 'POST',
     headers: {
       'X-Trigger-Secret': DATA.settings.refresh_trigger_secret,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ slug, status }),
+    body: JSON.stringify({ decisions: list }),
   })
     .then(response => response.json().catch(() => null))
     .then(body => {
-      if (!body || !body.ok) showToast('Saved locally, but the write failed — it may revert to pending.');
+      if (!body || !body.ok) {
+        savePendingDecisions(loadPendingDecisions().concat(list));
+        showToast(count + (count === 1 ? ' decision' : ' decisions') + ' saved locally, but the write failed — will retry.');
+      }
     })
-    .catch(() => showToast('Saved locally, but the write failed — it may revert to pending.'));
+    .catch(() => {
+      savePendingDecisions(loadPendingDecisions().concat(list));
+      showToast(count + (count === 1 ? ' decision' : ' decisions') + ' saved locally, but the write failed — will retry.');
+    });
 }
+
+// Best-effort flush whenever the tab is hidden or the page is being torn
+// down — covers switching apps/tabs and closing the browser, not just
+// waiting out the debounce, so a review session doesn't need to sit idle
+// for it to actually send.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushPendingDecisions();
+});
+window.addEventListener('pagehide', flushPendingDecisions);
+
+// Anything left queued from a crash or reload before its debounce fired —
+// send it now rather than waiting on the next decision to start a new timer.
+flushPendingDecisions();
 
 function reviewCardHtml(film) {
   const poster = film.poster_url

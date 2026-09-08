@@ -1,0 +1,10 @@
+# Deploys over the SAME existing worker (letterboxd-refresh-trigger) —
+# this is a new deployment *method* for it (via CI, see
+# .github/workflows/deploy-worker.yml), not a new worker. Its two secrets
+# (GITHUB_TOKEN, TRIGGER_SECRET) live on Cloudflare's side already and
+# aren't declared here — `wrangler deploy` only touches what's in this
+# file, so they're expected to carry over untouched.
+name = "letterboxd-refresh-trigger"
+main = "src/index.js"
+compatibility_date = "2026-09-08"
+account_id = "f3a920128acb341efea05ad3fbda576c"

@@ -264,3 +264,19 @@ def set_watch_together_status(database_url: str, slug: str, status: str, decided
             "UPDATE watch_together SET status = %s, decided_at = %s WHERE slug = %s",
             (status, decided_at, slug),
         )
+
+
+def set_watch_together_statuses_batch(database_url: str, decisions: list[tuple[str, str, str]]) -> None:
+    """decisions: (slug, status, decided_at) triples. One connection/
+    transaction for the whole batch instead of one per decision — the
+    Review tab now debounce-batches taps client-side specifically so a
+    session of many decisions costs one workflow run (and one DB
+    round-trip) instead of one each."""
+    if not decisions:
+        return
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        conn.cursor().executemany(
+            "UPDATE watch_together SET status = %s, decided_at = %s WHERE slug = %s",
+            [(status, decided_at, slug) for slug, status, decided_at in decisions],
+        )

@@ -479,6 +479,9 @@ def _leaving_soon_section(state: StateDoc, films_all_offers: dict[str, list[dict
     return {"key": "leaving_soon", "header": "Leaving soon", "films": films}
 
 
+MAX_PERSON_SECTIONS = 4
+
+
 def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
                           films_by_slug: dict[str, dict], dismissed_recommendations: set[str],
                           watch_together: dict[str, dict]) -> list[dict]:
@@ -511,12 +514,22 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     add(_quick_watch_section(state, films_all_offers, used))
 
     # One section per unique director/cast member from your last few
-    # watches — however many that turns out to be (see main.py) — the most
-    # personalized picks, but narrower-appeal than the two above.
+    # watches — however many that turns out to be (see main.py, which can
+    # genuinely generate a dozen+ on a run with several multi-cast recent
+    # watches). Capped here rather than at generation time (main.py still
+    # stores all of them, in case a future view wants the rest) — Home
+    # itself shouldn't be a wall of a dozen near-identical "More starring
+    # X" rows before reaching the general-discovery sections below.
+    person_sections_shown = 0
     for prefix in ("director:", "cast:"):
         for cached in state.recommendation_sections:
+            if person_sections_shown >= MAX_PERSON_SECTIONS:
+                break
             if cached["key"].startswith(prefix):
+                before = len(sections)
                 add(_section_from_cached(cached, lookup, used))
+                if len(sections) > before:
+                    person_sections_shown += 1
 
     # Popular right now moved below the director/cast sections — general
     # trending picks are lower priority than either the sections above or
@@ -792,7 +805,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .mobile-only-bar { display: none; }
   .controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
   .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
-  .quick-filters .hint { color: var(--text-faint); font-size: 11.5px; margin-right: 2px; }
+  .hint { color: var(--text-faint); font-size: 11.5px; margin-right: 2px; }
   input[type=text] {
     padding: 8px 28px 8px 12px; border: 1px solid var(--hairline-strong); border-radius: 10px; font-size: 12.5px; width: 190px;
     background: var(--surface); color: var(--text); outline: none; transition: border-color 0.15s;
@@ -838,21 +851,19 @@ _TEMPLATE = """<!DOCTYPE html>
   }
   .filter-toggle { cursor: pointer; border: 1.5px solid transparent; transition: opacity 0.15s; }
   .filter-toggle.off { opacity: 0.3; }
-  .quick-country {
+  /* One shared pill style — a one-click filter you can turn on/off
+     (.pill-toggle), a single-select choice among several (.quick-country,
+     .sarah-pill) — so every "small clickable filter chip" in the app looks
+     and behaves the same regardless of which control renders it. */
+  .quick-country, .sarah-pill, .pill-toggle {
     padding: 5px 12px; border-radius: 999px; font-size: 11.5px; font-weight: 500; cursor: pointer;
-    background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text-muted);
-  }
-  .quick-country:hover { border-color: var(--accent); color: var(--accent); }
-  .quick-country.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
-  .quick-country .count { opacity: 0.65; margin-left: 4px; }
-  .sarah-filter { display: inline-flex; gap: 4px; }
-  .sarah-pill {
-    padding: 5px 11px; border-radius: 999px; font-size: 11.5px; font-weight: 500; cursor: pointer;
     background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text-muted);
     transition: opacity 0.15s;
   }
-  .sarah-pill:hover { border-color: var(--accent); color: var(--accent); }
-  .sarah-pill.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
+  .quick-country:hover, .sarah-pill:hover, .pill-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .quick-country.active, .sarah-pill.active, .pill-toggle.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
+  .quick-country .count { opacity: 0.65; margin-left: 4px; }
+  .sarah-filter { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
   .poster-thumb {
     width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
     background: var(--hairline); box-shadow: 0 1px 3px rgba(0,0,0,0.35);
@@ -1243,7 +1254,7 @@ _TEMPLATE = """<!DOCTYPE html>
         <option value="coverage_countries">Sort: Most countries</option>
       </select>
       <span id="filmsFilterToggles"></span>
-      <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
+      <span class="pill-toggle" id="notHaveOnly">Not on a service I have</span>
       <span class="sarah-filter" id="filmsSarahFilter"></span>
     </div>
     <div class="controls" data-view="sarah" id="controls-sarah">
@@ -1477,13 +1488,27 @@ function renderQuickJumpChips(containerId, entries, activeValue, onPick, showAll
 }
 
 // Services you have/could get again, plus any free service in your three
-// home markets, are what you'd actually reach for — shared by the
-// serviceSelect dropdown's "Have or can get" group and the quick-jump chips.
+// home markets, are what you'd actually reach for — used for the
+// serviceSelect dropdown's "Have or can get" group, which is fine to cast
+// this wide since it's just one optgroup among the full alphabetical list.
 function topServiceBrands() {
   return new Set(
     DATA.services
       .filter(r => r.classification === 'have' || r.classification === 'could_get_again' ||
                    (r.classification === 'free' && ['AU', 'GB', 'US'].includes(r.country)))
+      .map(r => r.brand)
+  );
+}
+
+// Just the services you actually have — no free-tier-in-home-markets
+// inclusion — for the quick-jump chips specifically. That looser set
+// balloons to 40+ once every free ad-supported app in GB/US/AU is
+// counted, which defeats "quick": this is the ~19 services that actually
+// match what's configured in Settings.
+function myServiceBrands() {
+  return new Set(
+    DATA.services
+      .filter(r => r.classification === 'have' || r.classification === 'could_get_again')
       .map(r => r.brand)
   );
 }
@@ -2432,6 +2457,11 @@ let activeService = null;
 let activeGenre = null;
 const filmsFilterState = { have: true, free: true, could_get_again: true, subscription: true };
 let filmsSarahFilter = 'all';
+let notHaveOnly = false;
+
+function renderNotHaveOnlyToggle() {
+  document.getElementById('notHaveOnly').classList.toggle('active', notHaveOnly);
+}
 
 // A Sarah filter set to "no"/"yes" only ever filters FOR that status (to
 // review/reconsider it) rather than hiding it by default anywhere —
@@ -2455,6 +2485,13 @@ const SARAH_FILTER_OPTIONS = [
 function renderSarahFilterToggle(containerId, current, onPick) {
   const container = document.getElementById(containerId);
   container.innerHTML = '';
+  // Sits directly under a visually-identical quick-jump chip row on
+  // Services/Country (same shared pill styling) — a label makes it clear
+  // at a glance this row filters by Sarah's verdict, not by service/country.
+  const hint = document.createElement('span');
+  hint.className = 'hint';
+  hint.textContent = 'Sarah:';
+  container.appendChild(hint);
   SARAH_FILTER_OPTIONS.forEach(opt => {
     const pill = document.createElement('span');
     pill.className = 'sarah-pill' + (current === opt.value ? ' active' : '');
@@ -2466,7 +2503,6 @@ function renderSarahFilterToggle(containerId, current, onPick) {
 
 function baseFilteredFilms() {
   const q = document.getElementById('search').value.trim().toLowerCase();
-  const notHaveOnly = document.getElementById('notHaveOnly').checked;
   return DATA.films.filter(row => {
     if (q && !searchHaystack(row).includes(q)) return false;
     if (notHaveOnly && row.have_service) return false;
@@ -2541,7 +2577,6 @@ function renderActiveFilmFilters() {
   const container = document.getElementById('activeFilmFilters');
   container.innerHTML = '';
   const searchVal = document.getElementById('search').value.trim();
-  const notHaveOnly = document.getElementById('notHaveOnly').checked;
   const anyToggleOff = CLASSIFICATIONS.some(k => !filmsFilterState[k]);
   if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly && filmsSarahFilter === 'all' && !anyToggleOff) return;
   if (activeCountry) {
@@ -2581,7 +2616,7 @@ function renderActiveFilmFilters() {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
     chip.textContent = 'Not on a service I have ✕';
-    chip.addEventListener('click', () => { document.getElementById('notHaveOnly').checked = false; renderFilms(); });
+    chip.addEventListener('click', () => { notHaveOnly = false; renderNotHaveOnlyToggle(); renderFilms(); });
     container.appendChild(chip);
   }
   if (filmsSarahFilter !== 'all') {
@@ -2611,7 +2646,8 @@ function renderActiveFilmFilters() {
     activeGenre = null;
     document.getElementById('search').value = '';
     document.getElementById('searchClear').classList.add('hidden');
-    document.getElementById('notHaveOnly').checked = false;
+    notHaveOnly = false;
+    renderNotHaveOnlyToggle();
     filmsSarahFilter = 'all';
     renderFilmSarahFilter();
     CLASSIFICATIONS.forEach(k => { filmsFilterState[k] = true; });
@@ -2741,7 +2777,11 @@ function renderFilmCards(processed, columnBrands, showOtherServices) {
 
 document.getElementById('search').addEventListener('input', renderFilms);
 wireSearchClear('search', 'searchClear', renderFilms);
-document.getElementById('notHaveOnly').addEventListener('change', renderFilms);
+document.getElementById('notHaveOnly').addEventListener('click', () => {
+  notHaveOnly = !notHaveOnly;
+  renderNotHaveOnlyToggle();
+  renderFilms();
+});
 document.getElementById('filmsCountrySelect').addEventListener('change', e => {
   activeCountry = e.target.value || null;
   renderFilms();
@@ -2808,11 +2848,11 @@ function populateServiceSelects() {
 }
 
 function renderServiceQuickJump() {
-  const topBrands = topServiceBrands();
-  const entries = [...topBrands].sort((a, b) => a.localeCompare(b)).map(brand => ({
+  const myBrands = myServiceBrands();
+  const entries = [...myBrands].map(brand => ({
     value: brand, label: brand,
     count: new Set(DATA.services.filter(r => r.brand === brand).flatMap(r => r.slugs)).size,
-  }));
+  })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   const active = document.getElementById('serviceSelect').value;
   renderQuickJumpChips('serviceQuickJump', entries, active, value => {
     document.getElementById('serviceSelect').value = value;
@@ -3271,6 +3311,7 @@ window.addEventListener('resize', updateAppBarOffset);
 renderHome();
 renderFilmFilterToggles();
 renderFilmSarahFilter();
+renderNotHaveOnlyToggle();
 renderFilms();
 renderReview();
 renderSarah();

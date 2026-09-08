@@ -181,6 +181,39 @@ def test_quick_watch_respects_exclude_set():
     assert section["films"] == []
 
 
+# ---------- _build_home_sections director/cast section cap ----------
+
+def _discovery_entry(slug: str) -> dict:
+    return {"slug": slug, "title": slug.title(), "year": 2020, "rating": 4.0, "poster_url": None,
+            "director": "Someone", "genre": ["Drama"]}
+
+
+def test_build_home_sections_caps_person_sections_across_director_and_cast():
+    # A run with several multi-cast recent watches can genuinely generate a
+    # dozen+ director/cast sections (see main.py) — Home should only ever
+    # show a handful, not a wall of near-identical "More starring X" rows.
+    state = StateDoc(films={})
+    state.recommendation_sections = [
+        {"key": f"director:Person {i}", "header": f"More from Person {i}", "slugs": [f"d{i}"]}
+        for i in range(3)
+    ] + [
+        {"key": f"cast:Person {i}", "header": f"More starring Person {i}", "slugs": [f"c{i}"]}
+        for i in range(5)
+    ]
+    films_by_slug = {f"d{i}": _discovery_entry(f"d{i}") for i in range(3)}
+    films_by_slug |= {f"c{i}": _discovery_entry(f"c{i}") for i in range(5)}
+
+    sections = _build_home_sections(state, films_all_offers={}, films_by_slug=films_by_slug,
+                                     dismissed_recommendations=set(), watch_together={})
+
+    person_sections = [s for s in sections if s["key"].startswith(("director:", "cast:"))]
+    assert len(person_sections) == 4
+    # All 3 director sections show before any cast section fills the
+    # remaining slot — same "directors first" order main.py generates them in.
+    assert [s["key"] for s in person_sections] == ["director:Person 0", "director:Person 1",
+                                                     "director:Person 2", "cast:Person 0"]
+
+
 # ---------- _build_home_sections cross-section exclusion ----------
 
 def test_build_home_sections_does_not_repeat_a_film_across_sections():

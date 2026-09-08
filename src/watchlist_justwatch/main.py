@@ -18,6 +18,7 @@ from .analysis import (
     render_favorite_recommendations,
     render_ranking,
 )
+from .cinemas import fetch_barbican, fetch_prince_charles, fetch_riverside, fetch_vue
 from .config import (
     load_config, load_dismissed_recommendations, load_favorites, load_global_subscriptions,
     load_main_services, load_revisitable_services,
@@ -375,6 +376,26 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     current_state.diary = current_state_diary
     current_state.josh_watchlist = josh_watchlist_slugs
     current_state.sarah_watchlist = sarah_watchlist_slugs
+
+    # Cinema showtimes: independent of the watchlist refresh above, and
+    # each venue's own site is a separate point of failure — one venue's
+    # markup changing shouldn't cost the other three, so each gets its own
+    # try/except and falls back to yesterday's listing for just that venue
+    # rather than the whole feature going blank for a day.
+    cinema_fetchers = [
+        ("Prince Charles Cinema", fetch_prince_charles),
+        ("Barbican", fetch_barbican),
+        ("Vue Fulham Broadway", fetch_vue),
+        ("Riverside Studios", fetch_riverside),
+    ]
+    cinema_showtimes: list[dict] = []
+    for cinema_name, fetcher in cinema_fetchers:
+        try:
+            cinema_showtimes.extend(fetcher())
+        except Exception as exc:
+            _warn(f"cinema showtimes fetch failed for {cinema_name!r}, carrying forward yesterday's ({exc})")
+            cinema_showtimes.extend(s for s in previous_state.cinema_showtimes if s["cinema"] == cinema_name)
+    current_state.cinema_showtimes = cinema_showtimes
 
     # Auto-queue every watchlist film missing a watch-together decision for
     # Sarah's review — covers both the one-time backfill of the existing

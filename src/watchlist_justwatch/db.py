@@ -60,6 +60,22 @@ CREATE TABLE IF NOT EXISTS watch_together (
 ALTER TABLE films ADD COLUMN IF NOT EXISTS genre JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE films ADD COLUMN IF NOT EXISTS original_language TEXT;
 ALTER TABLE films ADD COLUMN IF NOT EXISTS runtime_minutes INTEGER;
+-- Raw scraped showtimes for the cinemas in cinemas.py — no stored
+-- watchlist match (see dashboard.py, which matches fresh at build time
+-- from state.films, same "recompute rather than let a derived field go
+-- stale" principle as everything else the dashboard builds).
+CREATE TABLE IF NOT EXISTS cinema_showtimes (
+    id SERIAL PRIMARY KEY,
+    cinema TEXT NOT NULL,
+    title TEXT NOT NULL,
+    year INTEGER,
+    showtime TEXT NOT NULL,
+    duration_minutes INTEGER,
+    director TEXT,
+    synopsis TEXT,
+    poster_url TEXT,
+    booking_url TEXT
+);
 """
 
 
@@ -137,6 +153,16 @@ def load_state(database_url: str) -> StateDoc:
         ]
         josh_watchlist = {row[0] for row in conn.execute("SELECT slug FROM josh_watchlist").fetchall()}
         sarah_watchlist = {row[0] for row in conn.execute("SELECT slug FROM sarah_watchlist").fetchall()}
+        cinema_showtimes = [
+            {"cinema": cinema, "title": title, "year": year, "showtime": showtime,
+             "duration_minutes": duration_minutes, "director": director, "synopsis": synopsis,
+             "poster_url": poster_url, "booking_url": booking_url}
+            for (cinema, title, year, showtime, duration_minutes, director, synopsis, poster_url,
+                 booking_url) in conn.execute(
+                "SELECT cinema, title, year, showtime, duration_minutes, director, synopsis, "
+                "poster_url, booking_url FROM cinema_showtimes"
+            ).fetchall()
+        ]
 
     return StateDoc(
         schema_version=meta.get("schema_version", SCHEMA_VERSION),
@@ -151,6 +177,7 @@ def load_state(database_url: str) -> StateDoc:
         diary=diary,
         josh_watchlist=josh_watchlist,
         sarah_watchlist=sarah_watchlist,
+        cinema_showtimes=cinema_showtimes,
     )
 
 
@@ -169,6 +196,7 @@ def save_state(database_url: str, state: StateDoc) -> None:
         conn.execute("DELETE FROM recommendation_sections")
         conn.execute("DELETE FROM josh_watchlist")
         conn.execute("DELETE FROM sarah_watchlist")
+        conn.execute("DELETE FROM cinema_showtimes")
         conn.execute("DELETE FROM meta")
         # watch_together is deliberately NOT wiped here — it's written
         # incrementally by seed_pending_watch_together/set_watch_together_status,
@@ -217,6 +245,17 @@ def save_state(database_url: str, state: StateDoc) -> None:
             conn.cursor().executemany(
                 "INSERT INTO sarah_watchlist (slug) VALUES (%s)",
                 [(slug,) for slug in state.sarah_watchlist],
+            )
+
+        if state.cinema_showtimes:
+            conn.cursor().executemany(
+                "INSERT INTO cinema_showtimes (cinema, title, year, showtime, duration_minutes, "
+                "director, synopsis, poster_url, booking_url) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                [
+                    (s["cinema"], s["title"], s["year"], s["showtime"], s["duration_minutes"],
+                     s["director"], s["synopsis"], s["poster_url"], s["booking_url"])
+                    for s in state.cinema_showtimes
+                ],
             )
 
         conn.cursor().executemany(

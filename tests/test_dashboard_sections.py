@@ -1,7 +1,8 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from watchlist_justwatch.dashboard import (
     _build_home_sections,
+    _cinema_section,
     _leaving_soon_section,
     _quick_watch_section,
     _recently_added_section,
@@ -177,6 +178,62 @@ def test_quick_watch_respects_exclude_set():
     state = StateDoc(films={"a": _film("a", runtime_minutes=90, rating=4.0)})
 
     section = _quick_watch_section(state, films_all_offers={}, exclude={"a"})
+
+    assert section["films"] == []
+
+
+# ---------- _cinema_section ----------
+
+def _showing(title: str, year: int, showtime: str, cinema: str = "Prince Charles Cinema") -> dict:
+    return {"cinema": cinema, "title": title, "year": year, "showtime": showtime,
+            "duration_minutes": 100, "director": None, "synopsis": None,
+            "poster_url": None, "booking_url": None}
+
+
+def test_cinema_section_only_includes_matched_upcoming_showings():
+    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
+    state.cinema_showtimes = [
+        _showing("Taxi Driver", 1976, "2026-09-09T18:00:00"),
+        _showing("Some Unmatched Film", 2020, "2026-09-09T20:00:00"),
+    ]
+    now = datetime(2026, 9, 8, 12, 0)
+
+    section = _cinema_section(state, exclude=set(), now=now)
+
+    assert [f["slug"] for f in section["films"]] == ["taxi-driver"]
+    assert "Prince Charles Cinema" in section["films"][0]["cinema_note"]
+
+
+def test_cinema_section_excludes_showings_already_in_the_past():
+    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
+    state.cinema_showtimes = [_showing("Taxi Driver", 1976, "2026-09-07T18:00:00")]
+    now = datetime(2026, 9, 8, 12, 0)
+
+    section = _cinema_section(state, exclude=set(), now=now)
+
+    assert section["films"] == []
+
+
+def test_cinema_section_picks_soonest_showing_per_film():
+    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
+    state.cinema_showtimes = [
+        _showing("Taxi Driver", 1976, "2026-09-12T18:00:00"),
+        _showing("Taxi Driver", 1976, "2026-09-09T15:00:00"),
+    ]
+    now = datetime(2026, 9, 8, 12, 0)
+
+    section = _cinema_section(state, exclude=set(), now=now)
+
+    assert len(section["films"]) == 1
+    assert "9 Sep" in section["films"][0]["cinema_note"]
+
+
+def test_cinema_section_respects_exclude_set():
+    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
+    state.cinema_showtimes = [_showing("Taxi Driver", 1976, "2026-09-09T18:00:00")]
+    now = datetime(2026, 9, 8, 12, 0)
+
+    section = _cinema_section(state, exclude={"taxi-driver"}, now=now)
 
     assert section["films"] == []
 

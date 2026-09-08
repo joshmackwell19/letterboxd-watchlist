@@ -1,9 +1,10 @@
 import dataclasses
 import json
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 
 from .brands import canonical_brand_name, group_offers_by_brand_and_country, is_major_brand
+from .cinemas import match_watchlist_film
 from .config import CountryConfig, is_have_anywhere
 from .countries import country_name
 from .languages import is_subtitled, language_name
@@ -435,6 +436,41 @@ def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12)
     }
 
 
+def _format_cinema_datetime(iso: str) -> str:
+    dt = datetime.fromisoformat(iso)
+    return dt.strftime("%a %-d %b") + ", " + dt.strftime("%-I:%M%p").lower()
+
+
+def _cinema_section(state: StateDoc, exclude: set[str], now: datetime | None = None,
+                     limit: int = RECOMMENDED_COUNT) -> dict:
+    """Watchlist films with an upcoming screening at one of the four
+    cinemas in cinemas.py — soonest showing first. A specific tonight/
+    tomorrow screening is a harder deadline than a streaming offer merely
+    expiring within 30 days, so this leads Home ahead of leaving_soon."""
+    now_iso = (now or datetime.now()).isoformat()
+    soonest_by_slug: dict[str, dict] = {}
+
+    for showing in state.cinema_showtimes:
+        if showing["showtime"] < now_iso:
+            continue
+        slug = match_watchlist_film(showing["title"], showing["year"], state.films)
+        if slug is None or slug not in state.films or slug in exclude:
+            continue
+        current = soonest_by_slug.get(slug)
+        if current is None or showing["showtime"] < current["showtime"]:
+            soonest_by_slug[slug] = showing
+
+    chosen = sorted(soonest_by_slug.items(), key=lambda kv: kv[1]["showtime"])[:limit]
+
+    films = []
+    for slug, showing in chosen:
+        card = _mini_card(state.films[slug])
+        card["cinema_note"] = f"{showing['cinema']} — {_format_cinema_datetime(showing['showtime'])}"
+        films.append(card)
+
+    return {"key": "cinema", "header": "At the cinema", "films": films}
+
+
 LEAVING_SOON_WINDOW_DAYS = 30
 
 
@@ -498,10 +534,13 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
             sections.append(section)
             used.update(f["slug"] for f in section["films"])
 
-    # Leaving soon leads — losing access to something you already know you
-    # want is a bigger deal than a delayed discovery, so it outranks even
-    # recently-added. Recent service additions next — the most immediately
-    # actionable ("this is now watchable") signal after that.
+    # A specific tonight/tomorrow cinema screening leads everything — the
+    # hardest deadline on the whole page. Leaving soon next — losing
+    # access to something you already know you want is a bigger deal than
+    # a delayed discovery, so it outranks even recently-added. Recent
+    # service additions next — the most immediately actionable ("this is
+    # now watchable") signal after that.
+    add(_cinema_section(state, used))
     add(_leaving_soon_section(state, films_all_offers, used))
     add(_recently_added_section(state, used))
     add(_watch_together_section(state, watch_together, used))
@@ -570,6 +609,40 @@ def _settings_data(config: dict[str, CountryConfig], global_subscriptions: list[
     }
 
 
+def _cinema_listings(state: StateDoc) -> list[dict]:
+    """One row per (cinema, title) with every showtime attached, for the
+    full Cinemas tab — unlike _cinema_section (Home, watchlist-only),
+    this includes everything showing regardless of a match, since
+    browsing "what's on generally" is the whole point of the tab.
+    Matched films use whatever richer poster/rating/genre is already
+    tracked on the watchlist instead of the venue's own (same
+    don't-duplicate-data-we-already-have principle as everywhere else)."""
+    grouped: dict[tuple[str, str], dict] = {}
+
+    for showing in state.cinema_showtimes:
+        key = (showing["cinema"], showing["title"])
+        entry = grouped.setdefault(key, {
+            "cinema": showing["cinema"], "title": showing["title"], "year": showing["year"],
+            "duration_minutes": showing["duration_minutes"], "director": showing["director"],
+            "synopsis": showing["synopsis"], "poster_url": showing["poster_url"],
+            "showtimes": [],
+        })
+        entry["showtimes"].append({"showtime": showing["showtime"], "booking_url": showing["booking_url"]})
+
+    rows = list(grouped.values())
+    for row in rows:
+        row["showtimes"].sort(key=lambda s: s["showtime"])
+        slug = match_watchlist_film(row["title"], row["year"], state.films)
+        row["matched_slug"] = slug
+        film = state.films.get(slug) if slug else None
+        row["poster_url"] = (film.poster_url if film else None) or row["poster_url"]
+        row["rating"] = film.rating if film else None
+        row["genre"] = film.genre if film else []
+
+    rows.sort(key=lambda r: r["showtimes"][0]["showtime"] if r["showtimes"] else "9999")
+    return rows
+
+
 def build_dashboard_data(
     state: StateDoc,
     favorites: set[tuple[str, str]],
@@ -627,6 +700,7 @@ def build_dashboard_data(
         "countries": _country_rows(josh_state, josh_offers),
         "films_by_slug": {**films_by_slug, **state.discovery_films},
         "sarah_films": sarah_films,
+        "cinemas": _cinema_listings(state),
         "settings": _settings_data(config, global_subscriptions),
     }
 
@@ -858,11 +932,14 @@ _TEMPLATE = """<!DOCTYPE html>
   .quick-country, .sarah-pill, .pill-toggle {
     padding: 5px 12px; border-radius: 999px; font-size: 11.5px; font-weight: 500; cursor: pointer;
     background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text-muted);
-    transition: opacity 0.15s;
+    transition: opacity 0.15s; white-space: nowrap;
   }
   .quick-country:hover, .sarah-pill:hover, .pill-toggle:hover { border-color: var(--accent); color: var(--accent); }
   .quick-country.active, .sarah-pill.active, .pill-toggle.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
   .quick-country .count { opacity: 0.65; margin-left: 4px; }
+  #cinemaVenueToggles, #cinemaDateFilter {
+    display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  }
   .sarah-filter { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
   .poster-thumb {
     width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
@@ -1044,6 +1121,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-card-genre { font-size: 11px; color: #c98a7d; }
   .film-card-added-service { font-size: 11px; color: var(--accent); font-weight: 500; margin-top: 2px; }
   .film-card-leaving-note { font-size: 11px; color: #fbbf24; font-weight: 500; margin-top: 2px; }
+  .film-card-cinema-note { font-size: 11px; color: #c084fc; font-weight: 500; margin-top: 2px; }
   .service-group { margin-top: 7px; }
   .service-group-name {
     font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
@@ -1139,6 +1217,13 @@ _TEMPLATE = """<!DOCTYPE html>
           <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
         </svg>
         Films
+      </button>
+      <button class="tab-btn" id="tab-cinemas">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="6" width="19" height="14" rx="1.5"></rect>
+          <path d="M2.5 9.5h19M6 6V3.5M11 6V3.5M16 6V3.5"></path>
+        </svg>
+        Cinemas
       </button>
       <button class="tab-btn" id="tab-review">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -1257,6 +1342,14 @@ _TEMPLATE = """<!DOCTYPE html>
       <span class="pill-toggle" id="notHaveOnly">Not on a service I have</span>
       <span class="sarah-filter" id="filmsSarahFilter"></span>
     </div>
+    <div class="controls" data-view="cinemas" id="controls-cinemas">
+      <div class="search-wrap">
+        <input type="text" id="cinemaSearch" placeholder="Search title, director...">
+        <span class="search-clear hidden" id="cinemaSearchClear">✕</span>
+      </div>
+      <span id="cinemaVenueToggles"></span>
+      <span id="cinemaDateFilter"></span>
+    </div>
     <div class="controls" data-view="sarah" id="controls-sarah">
       <div class="search-wrap">
         <input type="text" id="sarahSearch" placeholder="Search title, year, director, cast...">
@@ -1329,6 +1422,11 @@ _TEMPLATE = """<!DOCTYPE html>
   <div id="filmsGrid" class="film-cards"></div>
 </section>
 
+<section class="view" id="view-cinemas">
+  <div class="active-filters" id="activeCinemaFilters"></div>
+  <div id="cinemasGrid" class="film-cards"></div>
+</section>
+
 <section class="view" id="view-review">
   <div id="reviewScreen"></div>
 </section>
@@ -1369,6 +1467,13 @@ _TEMPLATE = """<!DOCTYPE html>
     </svg>
     Films
   </button>
+  <button class="bottom-nav-btn" id="nav-cinemas">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2.5" y="6" width="19" height="14" rx="1.5"></rect>
+      <path d="M2.5 9.5h19M6 6V3.5M11 6V3.5M16 6V3.5"></path>
+    </svg>
+    Cinemas
+  </button>
 </nav>
 
 <div class="modal-overlay" id="quickLookOverlay">
@@ -1382,7 +1487,7 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <script>
 const DATA = __DATA__;
-const TABS = ['home', 'country', 'services', 'films'];
+const TABS = ['home', 'country', 'services', 'films', 'cinemas'];
 
 function esc(text) {
   if (text == null) return '';
@@ -1550,6 +1655,7 @@ document.getElementById('tab-home').addEventListener('click', () => showView('ho
 document.getElementById('tab-country').addEventListener('click', () => showView('country'));
 document.getElementById('tab-services').addEventListener('click', () => showView('services'));
 document.getElementById('tab-films').addEventListener('click', () => showView('films'));
+document.getElementById('tab-cinemas').addEventListener('click', () => showView('cinemas'));
 document.getElementById('tab-review').addEventListener('click', () => showView('review'));
 document.getElementById('tab-sarah').addEventListener('click', () => showView('sarah'));
 document.getElementById('tab-settings').addEventListener('click', () => { renderSettings(); showView('settings'); });
@@ -1557,6 +1663,7 @@ document.getElementById('nav-home').addEventListener('click', () => showView('ho
 document.getElementById('nav-country').addEventListener('click', () => showView('country'));
 document.getElementById('nav-services').addEventListener('click', () => showView('services'));
 document.getElementById('nav-films').addEventListener('click', () => showView('films'));
+document.getElementById('nav-cinemas').addEventListener('click', () => showView('cinemas'));
 document.getElementById('backToServices').addEventListener('click', () => showView('services'));
 // Mobile keeps small standalone icons for Review/Sarah/Settings (none of
 // them are among the bottom-nav's 4 destinations) — desktop's peer tab
@@ -1855,6 +1962,8 @@ function filmCardShell(row, servicesHtml) {
     ? '<div class="film-card-added-service">Added to ' + esc(row.added_service) + '</div>' : '';
   const leavingNote = row.leaving_note
     ? '<div class="film-card-leaving-note">' + esc(row.leaving_note) + '</div>' : '';
+  const cinemaNote = row.cinema_note
+    ? '<div class="film-card-cinema-note">🎬 ' + esc(row.cinema_note) + '</div>' : '';
   const div = document.createElement('div');
   div.className = 'film-card';
   div.dataset.slug = row.slug;
@@ -1865,7 +1974,7 @@ function filmCardShell(row, servicesHtml) {
           esc(row.title) + year + '</a>' +
         '<span class="film-card-end"><span class="film-card-rating">' + rating + '</span></span>' +
       '</div>' +
-      director + genre + addedService + leavingNote + servicesHtml +
+      director + genre + addedService + leavingNote + cinemaNote + servicesHtml +
     '</div>';
   return div;
 }
@@ -2796,6 +2905,184 @@ document.getElementById('filmsSortSelect').addEventListener('change', e => {
   renderFilms();
 });
 document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateClick);
+
+// ---------- Cinemas ----------
+
+const CINEMA_VENUES = ['Prince Charles Cinema', 'Barbican', 'Vue Fulham Broadway', 'Riverside Studios'];
+const cinemaVenueState = Object.fromEntries(CINEMA_VENUES.map(v => [v, true]));
+let cinemaDateMode = 'all';
+
+function renderCinemaVenueToggles() {
+  const container = document.getElementById('cinemaVenueToggles');
+  container.innerHTML = '';
+  CINEMA_VENUES.forEach(venue => {
+    const pill = document.createElement('span');
+    pill.className = 'pill-toggle' + (cinemaVenueState[venue] ? ' active' : '');
+    pill.textContent = venue;
+    pill.addEventListener('click', () => {
+      cinemaVenueState[venue] = !cinemaVenueState[venue];
+      renderCinemaVenueToggles();
+      renderCinemas();
+    });
+    container.appendChild(pill);
+  });
+}
+
+const CINEMA_DATE_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'today', label: 'Today' },
+  { value: 'tomorrow', label: 'Tomorrow' },
+];
+
+function renderCinemaDateFilter() {
+  const container = document.getElementById('cinemaDateFilter');
+  container.innerHTML = '';
+  CINEMA_DATE_OPTIONS.forEach(opt => {
+    const pill = document.createElement('span');
+    pill.className = 'pill-toggle' + (cinemaDateMode === opt.value ? ' active' : '');
+    pill.textContent = opt.label;
+    pill.addEventListener('click', () => {
+      cinemaDateMode = opt.value;
+      renderCinemaDateFilter();
+      renderCinemas();
+    });
+    container.appendChild(pill);
+  });
+}
+
+function formatShowtimeChip(showtime, bookingUrl) {
+  const d = new Date(showtime);
+  const label = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) +
+    ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  if (!bookingUrl) return '<span class="badge badge-subscription">' + esc(label) + '</span>';
+  return '<a class="badge badge-have badge-link" href="' + escAttr(bookingUrl) + '" target="_blank" rel="noopener">' +
+    esc(label) + ' ↗</a>';
+}
+
+function cinemaCardHtml(row) {
+  const year = row.year ? ' (' + row.year + ')' : '';
+  const rating = row.rating != null ? row.rating.toFixed(2) + '★' : '—';
+  const poster = row.poster_url
+    ? '<img class="poster-thumb" loading="lazy" src="' + escAttr(row.poster_url) + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
+    : '<div class="poster-placeholder"></div>';
+  const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
+  const metaParts = [];
+  if (row.genre && row.genre.length) metaParts.push(esc(row.genre.join(', ')));
+  if (row.duration_minutes != null) metaParts.push(formatRuntime(row.duration_minutes));
+  const genre = metaParts.length ? '<div class="film-card-genre">' + metaParts.join(' · ') + '</div>' : '';
+  const cinemaLine = '<div class="film-card-cinema-note">🎬 ' + esc(row.cinema) + '</div>';
+  const showtimeChips = capBadges(row.showtimes.map(s => formatShowtimeChip(s.showtime, s.booking_url)), BADGE_CAP);
+
+  const titleHtml = row.matched_slug
+    ? '<a class="film-link film-card-title" target="_blank" href="https://letterboxd.com/film/' + row.matched_slug + '/">' +
+      esc(row.title) + year + '</a>'
+    : '<span class="film-card-title">' + esc(row.title) + year + '</span>';
+
+  const div = document.createElement('div');
+  div.className = 'film-card';
+  if (row.matched_slug) div.dataset.slug = row.matched_slug;
+  div.innerHTML = poster +
+    '<div class="film-card-body">' +
+      '<div class="film-card-title-row">' + titleHtml +
+        '<span class="film-card-end"><span class="film-card-rating">' + rating + '</span></span>' +
+      '</div>' +
+      cinemaLine + director + genre +
+      '<div class="service-group">' + showtimeChips + '</div>' +
+    '</div>';
+  return div;
+}
+
+function cinemaSearchHaystack(row) {
+  return [row.title, row.director, row.cinema].filter(Boolean).join(' ').toLowerCase();
+}
+
+function renderActiveCinemaFilters() {
+  const container = document.getElementById('activeCinemaFilters');
+  container.innerHTML = '';
+  const q = document.getElementById('cinemaSearch').value.trim();
+  const anyVenueOff = CINEMA_VENUES.some(v => !cinemaVenueState[v]);
+  if (!q && cinemaDateMode === 'all' && !anyVenueOff) return;
+
+  if (q) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = '"' + q + '" ✕';
+    chip.addEventListener('click', () => {
+      document.getElementById('cinemaSearch').value = '';
+      document.getElementById('cinemaSearchClear').classList.add('hidden');
+      renderCinemas();
+    });
+    container.appendChild(chip);
+  }
+  if (cinemaDateMode !== 'all') {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = (cinemaDateMode === 'today' ? 'Today' : 'Tomorrow') + ' ✕';
+    chip.addEventListener('click', () => { cinemaDateMode = 'all'; renderCinemaDateFilter(); renderCinemas(); });
+    container.appendChild(chip);
+  }
+  if (anyVenueOff) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = 'Venue filters ✕';
+    chip.addEventListener('click', () => {
+      CINEMA_VENUES.forEach(v => { cinemaVenueState[v] = true; });
+      renderCinemaVenueToggles();
+      renderCinemas();
+    });
+    container.appendChild(chip);
+  }
+  const clearAll = document.createElement('span');
+  clearAll.className = 'filter-chip clear-all-chip';
+  clearAll.textContent = 'Clear all ✕';
+  clearAll.addEventListener('click', () => {
+    document.getElementById('cinemaSearch').value = '';
+    document.getElementById('cinemaSearchClear').classList.add('hidden');
+    cinemaDateMode = 'all';
+    renderCinemaDateFilter();
+    CINEMA_VENUES.forEach(v => { cinemaVenueState[v] = true; });
+    renderCinemaVenueToggles();
+    renderCinemas();
+  });
+  container.appendChild(clearAll);
+}
+
+function renderCinemas() {
+  const container = document.getElementById('cinemasGrid');
+  container.innerHTML = '';
+  const q = document.getElementById('cinemaSearch').value.trim().toLowerCase();
+  renderActiveCinemaFilters();
+
+  const now = new Date();
+  const todayIso = now.toISOString().slice(0, 10);
+  const tomorrowIso = new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
+
+  const frag = document.createDocumentFragment();
+  DATA.cinemas.forEach(row => {
+    if (!cinemaVenueState[row.cinema]) return;
+    if (q && !cinemaSearchHaystack(row).includes(q)) return;
+    let showtimes = row.showtimes;
+    if (cinemaDateMode === 'today') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === todayIso);
+    else if (cinemaDateMode === 'tomorrow') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === tomorrowIso);
+    if (!showtimes.length) return;
+    frag.appendChild(cinemaCardHtml({ ...row, showtimes }));
+  });
+  container.appendChild(frag);
+  ensureNotEmpty(container, 'No showtimes match your search and filters.');
+}
+
+function onCinemaCardClick(event) {
+  if (event.target.closest('a')) return;
+  const card = event.target.closest('.film-card');
+  if (card && card.dataset.slug) openQuickLook(card.dataset.slug);
+}
+document.getElementById('cinemasGrid').addEventListener('click', onCinemaCardClick);
+document.getElementById('cinemaSearch').addEventListener('input', renderCinemas);
+wireSearchClear('cinemaSearch', 'cinemaSearchClear', renderCinemas);
+
+renderCinemaVenueToggles();
+renderCinemaDateFilter();
+renderCinemas();
 
 // ---------- Services cards ----------
 

@@ -54,6 +54,10 @@ class StateDoc:
     # dedicated watch_together table for that.
     josh_watchlist: set[str] = field(default_factory=set)
     sarah_watchlist: set[str] = field(default_factory=set)
+    # Raw showtimes from cinemas.py's four fetchers, refreshed each run —
+    # matching against the watchlist happens fresh at dashboard-build time
+    # (see dashboard.py), not stored here.
+    cinema_showtimes: list[dict] = field(default_factory=list)
 
 
 def get_cached_entry_id(state: StateDoc, slug: str) -> tuple[str | None, str | None]:

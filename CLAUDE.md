@@ -39,6 +39,7 @@ tables — never a full rescan.
 | `models.py` | `FilmState`/`OfferRecord`/`WatchlistFilm` — the core data shapes |
 | `diff.py` | Classifies what's new since yesterday (`have`/`free_tier`/`new_possible`/new films/unmatched) for the daily email |
 | `similar.py` | TMDB-correlated discovery (`because_you_watched`, by director/cast/genre, hidden gems, popular, rewatch) |
+| `cinemas.py` | Scrapes showtimes for 4 London cinemas (Prince Charles, Barbican, Vue Fulham Broadway, Riverside Studios) — one fetcher per venue, each a different mechanism (plain HTML, a JSON API, an opaque-token AJAX endpoint); `match_watchlist_film` fuzzy-matches a listing against the watchlist by title |
 | `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file) |
 | `report.py` / `html_email.py` / `weekly_digest.py` | Email rendering (plain text / HTML / the Friday digest) |
 | `notify.py` | Resend API wrapper |
@@ -57,6 +58,7 @@ tables — never a full rescan.
 | `josh_watchlist` / `sarah_watchlist` | `run()`, full replace | Membership only (slugs) — offer data lives in `films` regardless of which list |
 | `meta` | `run()`, full replace | `last_run_at`, `last_justwatch_check_date`, `last_seen_diary_guid`, `recent_watches`, `recent_additions` |
 | `watch_together` | **Incrementally** — `seed_pending_watch_together` (new pending rows) / `set_watch_together_statuses_batch` (Review tab decisions) | Deliberately *not* part of the full-replace — see `db.py`'s own comment on `save_state` |
+| `cinema_showtimes` | `run()`, full replace | Raw scraped rows from `cinemas.py` only — matching against the watchlist happens fresh in `dashboard.py` at build time, not stored |
 
 ## GitHub Actions workflows (`.github/workflows/`)
 
@@ -118,14 +120,18 @@ JustWatch/Letterboxd calls).
   (both fixed by reading less per run, not by removing the underlying
   pattern) — current usage is small (~14MB DB, batched writes since the
   Review tab's debounce), but worth watching if usage patterns change.
-- **`.git` history carries ~400MB of old `dashboard.html` blobs** from
-  before it stopped being committed — growth is stopped, the historical
-  weight itself needs a deliberate `git filter-repo` + force-push to
-  reclaim (see git log around September 2026 for when this was last
-  discussed/attempted).
 - **GitHub Actions cron has no DST awareness** — `daily.yml`/
   `weekly-digest.yml`'s schedules drift an hour during UK summer time,
   accepted and documented in those files rather than worked around.
+- **Riverside Studios' showtimes come from a captured, opaque filter
+  token** (see `cinemas.py`'s `RIVERSIDE_FILTER_TOKEN` comment) — their
+  listing page only loads via a JS-encrypted filter widget with no
+  derivable encoding, so if Riverside ever changes that widget the token
+  stops working. Fails soft (that venue's fetch warns and carries
+  forward yesterday's listing, same as any other cinema fetch failure)
+  rather than breaking the run; fixing it for real means re-capturing
+  the token by hand (open the site, click the Cinema filter, copy the
+  new `/ajax/filter_stream/<token>/` request from devtools).
 
 ## Testing
 

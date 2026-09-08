@@ -159,6 +159,7 @@ def _film_row(film, main_brands: set[str], all_offers: list[dict]) -> dict:
         "director": _truncate_joined(", ".join(film.director) if film.director else None),
         "starring": ", ".join(film.starring) if film.starring else None,
         "genre": film.genre,
+        "runtime_minutes": film.runtime_minutes,
         # Not used by the small tile cards (filmCardShell), but the Review
         # screen's much bigger card reads DATA.films directly (not
         # films_by_slug, which is quick-look's own separate copy) and needs
@@ -240,6 +241,7 @@ def _country_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> l
                 "director": _truncate_joined(", ".join(film.director) if film.director else None),
                 "starring": ", ".join(film.starring) if film.starring else None,
                 "genre": film.genre,
+                "runtime_minutes": film.runtime_minutes,
                 "services": services,
                 "has_have": any(s["classification"] == "have" for s in services),
             })
@@ -266,6 +268,7 @@ def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> 
             "starring": film.starring,
             "synopsis": film.synopsis,
             "genre": film.genre,
+            "runtime_minutes": film.runtime_minutes,
             "language_name": language_name(film.original_language),
             "is_subtitled": is_subtitled(film.original_language),
             "all_offers": all_offers,
@@ -285,6 +288,7 @@ def _mini_card(film) -> dict:
         "poster_url": film.poster_url,
         "director": _truncate_joined(", ".join(film.director) if film.director else None),
         "genre": film.genre,
+        "runtime_minutes": film.runtime_minutes,
     }
 
 
@@ -312,6 +316,43 @@ def _top_rated_section(state: StateDoc, films_all_offers: dict[str, list[dict]],
     }
 
 
+QUICK_WATCH_MIN_MINUTES = 80
+QUICK_WATCH_MAX_MINUTES = 100
+
+
+def _quick_watch_section(state: StateDoc, films_all_offers: dict[str, list[dict]], exclude: set[str],
+                          limit: int = RECOMMENDED_COUNT) -> dict:
+    """Same ranking approach as _top_rated_section (watchable-now on a have
+    service first, then highest-rated fallback), narrowed to films whose
+    runtime falls in the "around 90 minutes" window — a distinct enough cut
+    of the watchlist (short films skew toward different genres/eras than
+    the list as a whole) that it's worth its own section rather than just
+    another Films-tab filter."""
+    def has_have(slug: str) -> bool:
+        return any(o["classification"] == "have" for o in films_all_offers.get(slug, []))
+
+    candidates = [
+        slug for slug, film in state.films.items()
+        if slug not in exclude and film.runtime_minutes is not None
+        and QUICK_WATCH_MIN_MINUTES <= film.runtime_minutes <= QUICK_WATCH_MAX_MINUTES
+    ]
+
+    def sort_key(slug: str) -> tuple:
+        film = state.films[slug]
+        return (-(film.rating or 0), film.title)
+
+    watchable_now = sorted((s for s in candidates if has_have(s)), key=sort_key)
+    chosen = watchable_now[:limit]
+    if len(chosen) < limit:
+        fallback = sorted((s for s in candidates if s not in chosen), key=sort_key)
+        chosen += fallback[: limit - len(chosen)]
+
+    return {
+        "key": "quick_watch", "header": "Got 90 minutes?",
+        "films": [_mini_card(state.films[s]) for s in chosen],
+    }
+
+
 def _mini_card_from_lookup(entry: dict) -> dict:
     """Same shape as _mini_card, but from a films_by_slug-shaped dict (either
     a watchlist film or a discovered one — see _build_home_sections). The
@@ -323,6 +364,7 @@ def _mini_card_from_lookup(entry: dict) -> dict:
         "rating": entry["rating"], "poster_url": entry["poster_url"],
         "director": _truncate_joined(entry["director"]),
         "genre": entry.get("genre") or [],
+        "runtime_minutes": entry.get("runtime_minutes"),
     }
 
 
@@ -466,6 +508,7 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     # under however many per-director/per-cast sections exist this run.
     add(_cached_section(state, lookup, "because_you_watched", used))
     add(_top_rated_section(state, films_all_offers, used))
+    add(_quick_watch_section(state, films_all_offers, used))
 
     # One section per unique director/cast member from your last few
     # watches — however many that turns out to be (see main.py) — the most
@@ -802,6 +845,14 @@ _TEMPLATE = """<!DOCTYPE html>
   .quick-country:hover { border-color: var(--accent); color: var(--accent); }
   .quick-country.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
   .quick-country .count { opacity: 0.65; margin-left: 4px; }
+  .sarah-filter { display: inline-flex; gap: 4px; }
+  .sarah-pill {
+    padding: 5px 11px; border-radius: 999px; font-size: 11.5px; font-weight: 500; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--text-muted);
+    transition: opacity 0.15s;
+  }
+  .sarah-pill:hover { border-color: var(--accent); color: var(--accent); }
+  .sarah-pill.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
   .poster-thumb {
     width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
     background: var(--hairline); box-shadow: 0 1px 3px rgba(0,0,0,0.35);
@@ -1160,7 +1211,7 @@ _TEMPLATE = """<!DOCTYPE html>
         <option value="year">Sort: Year (newest)</option>
       </select>
       <span id="countryFilterToggles"></span>
-      <label><input type="checkbox" id="countryDeclinedOnly"> Only films Sarah said no to</label>
+      <span class="sarah-filter" id="countrySarahFilter"></span>
     </div>
     <div class="controls" data-view="services" id="controls-services">
       <select id="serviceSelect"></select>
@@ -1176,7 +1227,7 @@ _TEMPLATE = """<!DOCTYPE html>
         <option value="unique_film_count">Sort: # unique (most)</option>
       </select>
       <span id="serviceFilterToggles"></span>
-      <label><input type="checkbox" id="serviceDeclinedOnly"> Only films Sarah said no to</label>
+      <span class="sarah-filter" id="serviceSarahFilter"></span>
     </div>
     <div class="controls" data-view="films" id="controls-films">
       <select id="filmsCountrySelect"></select>
@@ -1193,7 +1244,7 @@ _TEMPLATE = """<!DOCTYPE html>
       </select>
       <span id="filmsFilterToggles"></span>
       <label><input type="checkbox" id="notHaveOnly"> Only films not on a service I have</label>
-      <label><input type="checkbox" id="filmsDeclinedOnly"> Only films Sarah said no to</label>
+      <span class="sarah-filter" id="filmsSarahFilter"></span>
     </div>
     <div class="controls" data-view="sarah" id="controls-sarah">
       <div class="search-wrap">
@@ -1219,11 +1270,13 @@ _TEMPLATE = """<!DOCTYPE html>
 </section>
 
 <section class="view" id="view-country">
+  <div class="quick-filters" id="countryQuickJump"></div>
   <div class="active-filters" id="activeCountryFilters"></div>
   <div id="countryGrid" class="film-cards"></div>
 </section>
 
 <section class="view" id="view-services">
+  <div class="quick-filters" id="serviceQuickJump"></div>
   <div class="active-filters" id="activeServiceFilters"></div>
   <div id="servicesGrid" class="service-cards"></div>
 </section>
@@ -1329,6 +1382,12 @@ function escAttr(text) {
   return esc(text).replace(/"/g, '&quot;');
 }
 
+function formatRuntime(minutes) {
+  if (minutes == null) return '';
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  return h ? (m ? h + 'h ' + m + 'm' : h + 'h') : m + 'm';
+}
+
 function formatLastChecked(iso) {
   if (!iso) return 'never';
   const d = new Date(iso);
@@ -1389,6 +1448,44 @@ function renderClassificationToggles(containerId, filterState, onChange) {
 function classificationBadgeLabel(key) {
   const label = CLASSIFICATION_LABELS[key];
   return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+// One-click jump chips (Services: your own services; Country: your three
+// home markets) — entries: [{value, label, count}]. "All" clears back to
+// the unfiltered view — skip it (showAll: false) for a tab like Country
+// where exactly one value is always selected, so there's no "unfiltered"
+// state to clear back to. Reused across both tabs, same way
+// renderClassificationToggles is.
+function renderQuickJumpChips(containerId, entries, activeValue, onPick, showAll = true) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  const hint = document.createElement('span');
+  hint.className = 'hint';
+  hint.textContent = 'Jump to:';
+  container.appendChild(hint);
+
+  const makeChip = (value, label, count) => {
+    const chip = document.createElement('span');
+    chip.className = 'quick-country' + (activeValue === value ? ' active' : '');
+    chip.innerHTML = esc(label) + (count != null ? ' <span class="count">' + count + '</span>' : '');
+    chip.addEventListener('click', () => onPick(value));
+    container.appendChild(chip);
+  };
+  if (showAll) makeChip('', 'All', null);
+  entries.forEach(e => makeChip(e.value, e.label, e.count));
+}
+
+// Services you have/could get again, plus any free service in your three
+// home markets, are what you'd actually reach for — shared by the
+// serviceSelect dropdown's "Have or can get" group and the quick-jump chips.
+function topServiceBrands() {
+  return new Set(
+    DATA.services
+      .filter(r => r.classification === 'have' || r.classification === 'could_get_again' ||
+                   (r.classification === 'free' && ['AU', 'GB', 'US'].includes(r.country)))
+      .map(r => r.brand)
+  );
 }
 
 // Searches title, year, director and starring cast so a query like "1994" or
@@ -1725,8 +1822,10 @@ function filmCardShell(row, servicesHtml) {
     ? '<img class="poster-thumb" loading="lazy" src="' + escAttr(row.poster_url) + '" onerror="this.outerHTML=\\'<div class=&quot;poster-placeholder&quot;></div>\\'">'
     : '<div class="poster-placeholder"></div>';
   const director = row.director ? '<div class="film-card-director">' + esc(row.director) + '</div>' : '';
-  const genre = (row.genre && row.genre.length)
-    ? '<div class="film-card-genre">' + esc(row.genre.join(', ')) + '</div>' : '';
+  const metaParts = [];
+  if (row.genre && row.genre.length) metaParts.push(esc(row.genre.join(', ')));
+  if (row.runtime_minutes != null) metaParts.push(formatRuntime(row.runtime_minutes));
+  const genre = metaParts.length ? '<div class="film-card-genre">' + metaParts.join(' · ') + '</div>' : '';
   const addedService = row.added_service
     ? '<div class="film-card-added-service">Added to ' + esc(row.added_service) + '</div>' : '';
   const leavingNote = row.leaving_note
@@ -1986,6 +2085,8 @@ function reviewCardHtml(film) {
     : '<div class="review-poster-placeholder"></div>';
   const rating = film.rating != null ? '<div class="review-rating-badge">' + film.rating.toFixed(2) + '★</div>' : '';
   const director = film.director ? '<p class="review-director"><b>Director</b> ' + esc(film.director) + '</p>' : '';
+  const runtime = film.runtime_minutes != null
+    ? '<p class="review-director"><b>Runtime</b> ' + formatRuntime(film.runtime_minutes) + '</p>' : '';
   // The explicit call-out Sarah asked for — only shown when the film's
   // original language isn't English (see languages.is_subtitled), never a
   // "not subtitled" badge for the common case, same "only show when it's
@@ -2008,7 +2109,7 @@ function reviewCardHtml(film) {
       '<div class="review-body">' +
         '<h2 class="review-title">' + esc(film.title) +
           (film.year ? ' <span class="year">' + film.year + '</span>' : '') + '</h2>' +
-        director + subtitled + genre + synopsis + cast +
+        director + runtime + subtitled + genre + synopsis + cast +
         '<div class="review-actions">' +
           '<button type="button" class="review-btn review-btn-no">✕ Not for us</button>' +
           '<button type="button" class="review-btn review-btn-yes">♥ Watch together</button>' +
@@ -2216,6 +2317,8 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     ? '<img class="detail-poster" loading="lazy" src="' + escAttr(film.poster_url) + '">'
     : '<div class="detail-poster-placeholder"></div>';
   const director = film.director ? '<p class="detail-meta"><strong>Director:</strong> ' + esc(film.director) + '</p>' : '';
+  const runtimeLine = film.runtime_minutes != null
+    ? '<p class="detail-meta"><strong>Runtime:</strong> ' + formatRuntime(film.runtime_minutes) + '</p>' : '';
   const starring = (film.starring && film.starring.length)
     ? '<p class="detail-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '';
   const genreLine = (film.genre && film.genre.length)
@@ -2273,7 +2376,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     '<div class="detail-body">' +
       '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
       '<p class="detail-rating">' + rating + '</p>' +
-      director + starring + genreLine + languageLine + synopsis + primaryHtml +
+      director + runtimeLine + starring + genreLine + languageLine + synopsis + primaryHtml +
       '<div class="other-services-section">' +
         '<p class="detail-meta"><strong>' + otherLabel + '</strong></p>' +
         '<div class="badge-wrap">' + otherHtml + '</div>' +
@@ -2328,24 +2431,46 @@ let activeCountry = null;
 let activeService = null;
 let activeGenre = null;
 const filmsFilterState = { have: true, free: true, could_get_again: true, subscription: true };
+let filmsSarahFilter = 'all';
 
-// Declining only ever means "not to watch together" — it says nothing about
-// whether the film is still worth watching solo, so this filters FOR the
-// declined ones (to review/reconsider them) rather than hiding them by
-// default anywhere; nothing disappears from a tab unless this is switched on.
-function isDeclined(slug) {
-  const f = DATA.films_by_slug[slug];
-  return !!f && f.watch_together_status === 'declined';
+// A Sarah filter set to "no"/"yes" only ever filters FOR that status (to
+// review/reconsider it) rather than hiding it by default anywhere —
+// nothing disappears from a tab unless this is switched away from "all".
+function sarahFilterMatches(status, mode) {
+  if (mode === 'yes') return status === 'confirmed';
+  if (mode === 'no') return status === 'declined';
+  return true;
+}
+
+const SARAH_FILTER_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'yes', label: '♥ Sarah yes' },
+  { value: 'no', label: '✕ Sarah no' },
+];
+
+// Single-select 3-way pill group (All / Sarah yes / Sarah no), replacing
+// the old "only show declined" checkbox — same visual pattern as
+// renderClassificationToggles/renderQuickJumpChips, reused across all
+// three tabs that filter on watch_together_status.
+function renderSarahFilterToggle(containerId, current, onPick) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  SARAH_FILTER_OPTIONS.forEach(opt => {
+    const pill = document.createElement('span');
+    pill.className = 'sarah-pill' + (current === opt.value ? ' active' : '');
+    pill.textContent = opt.label;
+    pill.addEventListener('click', () => onPick(opt.value));
+    container.appendChild(pill);
+  });
 }
 
 function baseFilteredFilms() {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const notHaveOnly = document.getElementById('notHaveOnly').checked;
-  const declinedOnly = document.getElementById('filmsDeclinedOnly').checked;
   return DATA.films.filter(row => {
     if (q && !searchHaystack(row).includes(q)) return false;
     if (notHaveOnly && row.have_service) return false;
-    if (declinedOnly && row.watch_together_status !== 'declined') return false;
+    if (!sarahFilterMatches(row.watch_together_status, filmsSarahFilter)) return false;
     if (activeService && !row.main[activeService]) return false;
     return true;
   });
@@ -2417,9 +2542,8 @@ function renderActiveFilmFilters() {
   container.innerHTML = '';
   const searchVal = document.getElementById('search').value.trim();
   const notHaveOnly = document.getElementById('notHaveOnly').checked;
-  const declinedOnly = document.getElementById('filmsDeclinedOnly').checked;
   const anyToggleOff = CLASSIFICATIONS.some(k => !filmsFilterState[k]);
-  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly && !declinedOnly && !anyToggleOff) return;
+  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly && filmsSarahFilter === 'all' && !anyToggleOff) return;
   if (activeCountry) {
     const name = (DATA.countryNames && DATA.countryNames[activeCountry]) || activeCountry;
     const chip = document.createElement('span');
@@ -2460,11 +2584,11 @@ function renderActiveFilmFilters() {
     chip.addEventListener('click', () => { document.getElementById('notHaveOnly').checked = false; renderFilms(); });
     container.appendChild(chip);
   }
-  if (declinedOnly) {
+  if (filmsSarahFilter !== 'all') {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = 'Sarah said no ✕';
-    chip.addEventListener('click', () => { document.getElementById('filmsDeclinedOnly').checked = false; renderFilms(); });
+    chip.textContent = (filmsSarahFilter === 'yes' ? 'Sarah said yes' : 'Sarah said no') + ' ✕';
+    chip.addEventListener('click', () => { filmsSarahFilter = 'all'; renderFilmSarahFilter(); renderFilms(); });
     container.appendChild(chip);
   }
   if (anyToggleOff) {
@@ -2488,7 +2612,8 @@ function renderActiveFilmFilters() {
     document.getElementById('search').value = '';
     document.getElementById('searchClear').classList.add('hidden');
     document.getElementById('notHaveOnly').checked = false;
-    document.getElementById('filmsDeclinedOnly').checked = false;
+    filmsSarahFilter = 'all';
+    renderFilmSarahFilter();
     CLASSIFICATIONS.forEach(k => { filmsFilterState[k] = true; });
     renderFilmFilterToggles();
     renderFilms();
@@ -2498,6 +2623,14 @@ function renderActiveFilmFilters() {
 
 function renderFilmFilterToggles() {
   renderClassificationToggles('filmsFilterToggles', filmsFilterState, renderFilms);
+}
+
+function renderFilmSarahFilter() {
+  renderSarahFilterToggle('filmsSarahFilter', filmsSarahFilter, value => {
+    filmsSarahFilter = value;
+    renderFilmSarahFilter();
+    renderFilms();
+  });
 }
 
 function renderFilms() {
@@ -2609,7 +2742,6 @@ function renderFilmCards(processed, columnBrands, showOtherServices) {
 document.getElementById('search').addEventListener('input', renderFilms);
 wireSearchClear('search', 'searchClear', renderFilms);
 document.getElementById('notHaveOnly').addEventListener('change', renderFilms);
-document.getElementById('filmsDeclinedOnly').addEventListener('change', renderFilms);
 document.getElementById('filmsCountrySelect').addEventListener('change', e => {
   activeCountry = e.target.value || null;
   renderFilms();
@@ -2633,19 +2765,14 @@ const serviceCols = [
   { key: 'unique_film_count', sort: r => r.unique_film_count, dir: -1 },
 ];
 const serviceFilterState = { have: true, could_get_again: true, free: true, subscription: true };
+let serviceSarahFilter = 'all';
 
 let serviceSortKey = 'film_count', serviceSortDir = -1;
 
 function populateServiceSelects() {
-  // Services you have/could get again, plus any free service in your three
-  // home markets, are what you'd actually reach for — surfaced in their own
-  // group above the long tail of everything else this film happens to be on.
-  const topBrands = new Set(
-    DATA.services
-      .filter(r => r.classification === 'have' || r.classification === 'could_get_again' ||
-                   (r.classification === 'free' && ['AU', 'GB', 'US'].includes(r.country)))
-      .map(r => r.brand)
-  );
+  // Surfaced in their own group above the long tail of everything else
+  // this film happens to be on.
+  const topBrands = topServiceBrands();
   const serviceNames = [...new Set(DATA.services.map(r => r.brand))].sort((a, b) => a.localeCompare(b));
   const topNames = serviceNames.filter(n => topBrands.has(n));
   const restNames = serviceNames.filter(n => !topBrands.has(n));
@@ -2680,6 +2807,19 @@ function populateServiceSelects() {
     genres.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
 }
 
+function renderServiceQuickJump() {
+  const topBrands = topServiceBrands();
+  const entries = [...topBrands].sort((a, b) => a.localeCompare(b)).map(brand => ({
+    value: brand, label: brand,
+    count: new Set(DATA.services.filter(r => r.brand === brand).flatMap(r => r.slugs)).size,
+  }));
+  const active = document.getElementById('serviceSelect').value;
+  renderQuickJumpChips('serviceQuickJump', entries, active, value => {
+    document.getElementById('serviceSelect').value = value;
+    renderServicesRows();
+  });
+}
+
 function renderActiveServiceFilters() {
   const container = document.getElementById('activeServiceFilters');
   container.innerHTML = '';
@@ -2687,9 +2827,8 @@ function renderActiveServiceFilters() {
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim();
-  const declinedOnly = document.getElementById('serviceDeclinedOnly').checked;
   const anyToggleOff = CLASSIFICATIONS.some(k => !serviceFilterState[k]);
-  if (!serviceQ && !countryQ && !genreQ && !filmQ && !declinedOnly && !anyToggleOff) return;
+  if (!serviceQ && !countryQ && !genreQ && !filmQ && serviceSarahFilter === 'all' && !anyToggleOff) return;
 
   if (genreQ) {
     const chip = document.createElement('span');
@@ -2723,11 +2862,11 @@ function renderActiveServiceFilters() {
     });
     container.appendChild(chip);
   }
-  if (declinedOnly) {
+  if (serviceSarahFilter !== 'all') {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = 'Sarah said no ✕';
-    chip.addEventListener('click', () => { document.getElementById('serviceDeclinedOnly').checked = false; renderServicesRows(); });
+    chip.textContent = (serviceSarahFilter === 'yes' ? 'Sarah said yes' : 'Sarah said no') + ' ✕';
+    chip.addEventListener('click', () => { serviceSarahFilter = 'all'; renderServiceSarahFilter(); renderServicesRows(); });
     container.appendChild(chip);
   }
   if (anyToggleOff) {
@@ -2750,7 +2889,8 @@ function renderActiveServiceFilters() {
     document.getElementById('serviceGenreSelect').value = '';
     document.getElementById('serviceFilmSearch').value = '';
     document.getElementById('serviceFilmSearchClear').classList.add('hidden');
-    document.getElementById('serviceDeclinedOnly').checked = false;
+    serviceSarahFilter = 'all';
+    renderServiceSarahFilter();
     CLASSIFICATIONS.forEach(k => { serviceFilterState[k] = true; });
     renderServiceFilterToggles();
     renderServicesRows();
@@ -2762,6 +2902,14 @@ function renderServiceFilterToggles() {
   renderClassificationToggles('serviceFilterToggles', serviceFilterState, renderServicesRows);
 }
 
+function renderServiceSarahFilter() {
+  renderSarahFilterToggle('serviceSarahFilter', serviceSarahFilter, value => {
+    serviceSarahFilter = value;
+    renderServiceSarahFilter();
+    renderServicesRows();
+  });
+}
+
 function renderServicesRows() {
   const container = document.getElementById('servicesGrid');
   container.innerHTML = '';
@@ -2769,10 +2917,10 @@ function renderServicesRows() {
   const countryQ = document.getElementById('serviceCountrySelect').value;
   const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
-  const declinedOnly = document.getElementById('serviceDeclinedOnly').checked;
+  const sarahActive = serviceSarahFilter !== 'all';
   renderActiveServiceFilters();
 
-  // Service rows aren't per-film, so a genre/declined filter here means
+  // Service rows aren't per-film, so a genre/Sarah filter here means
   // "narrow each service's own film list down to that criterion" —
   // recomputing film_count/unique_film_count from the narrowed list (rather
   // than just hiding non-matching services outright) so the counts on
@@ -2781,15 +2929,16 @@ function renderServicesRows() {
   // shows everything — scoped to keep this a top-level-grid filter, not a
   // deeper feature.
   let rows = DATA.services.map(row => {
-    if (!genreQ && !declinedOnly) return row;
+    if (!genreQ && !sarahActive) return row;
     const uniqueSet = new Set(row.unique_slugs);
     let matchingSlugs = row.slugs;
     if (genreQ) matchingSlugs = matchingSlugs.filter(s => (DATA.films_by_slug[s]?.genre || []).includes(genreQ));
-    if (declinedOnly) matchingSlugs = matchingSlugs.filter(isDeclined);
+    if (sarahActive) matchingSlugs = matchingSlugs.filter(s =>
+      sarahFilterMatches(DATA.films_by_slug[s]?.watch_together_status, serviceSarahFilter));
     const matchingUniqueCount = matchingSlugs.filter(s => uniqueSet.has(s)).length;
     return { ...row, slugs: matchingSlugs, film_count: matchingSlugs.length, unique_film_count: matchingUniqueCount };
   });
-  if (genreQ || declinedOnly) rows = rows.filter(row => row.film_count > 0);
+  if (genreQ || sarahActive) rows = rows.filter(row => row.film_count > 0);
 
   const col = serviceCols.find(c => c.key === serviceSortKey);
   // Services you have/can-get-again always lead, regardless of the chosen
@@ -2823,6 +2972,7 @@ function renderServicesRows() {
   });
   container.appendChild(frag);
   ensureNotEmpty(container, 'No services match your search and filters.');
+  renderServiceQuickJump();
 }
 
 function openServiceDetail(brand, country, countryName) {
@@ -2842,7 +2992,6 @@ document.getElementById('serviceCountrySelect').addEventListener('change', rende
 document.getElementById('serviceGenreSelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
 wireSearchClear('serviceFilmSearch', 'serviceFilmSearchClear', renderServicesRows);
-document.getElementById('serviceDeclinedOnly').addEventListener('change', renderServicesRows);
 document.getElementById('servicesSortSelect').addEventListener('change', e => {
   serviceSortKey = e.target.value;
   serviceSortDir = serviceCols.find(c => c.key === serviceSortKey).dir;
@@ -2851,6 +3000,7 @@ document.getElementById('servicesSortSelect').addEventListener('change', e => {
 
 populateServiceSelects();
 renderServiceFilterToggles();
+renderServiceSarahFilter();
 renderServicesRows();
 
 // ---------- By VPN country ----------
@@ -2862,6 +3012,7 @@ const countryCols = [
 ];
 
 const countryFilterState = { have: true, could_get_again: true, free: true, subscription: true };
+let countrySarahFilter = 'all';
 
 let countrySortKey = 'rating', countrySortDir = -1;
 
@@ -2917,9 +3068,36 @@ function renderCountryFilterToggles() {
   renderClassificationToggles('countryFilterToggles', countryFilterState, renderCountryRows);
 }
 
+function renderCountrySarahFilter() {
+  renderSarahFilterToggle('countrySarahFilter', countrySarahFilter, value => {
+    countrySarahFilter = value;
+    renderCountrySarahFilter();
+    renderCountryRows();
+  });
+}
+
 function currentCountry() {
   const code = document.getElementById('countrySelect').value;
   return DATA.countries.find(c => c.code === code);
+}
+
+// Your three home markets — same set as FREE_TIER_COUNTRIES server-side —
+// as one-click chips instead of hunting for them in the countrySelect
+// dropdown's alphabetical "All other countries" group.
+const HOME_COUNTRY_CODES = ['GB', 'US', 'AU'];
+
+function renderCountryQuickJump() {
+  const entries = HOME_COUNTRY_CODES
+    .map(code => DATA.countries.find(c => c.code === code))
+    .filter(Boolean)
+    .map(c => ({ value: c.code, label: c.name, count: c.films.length }));
+  const active = document.getElementById('countrySelect').value;
+  renderQuickJumpChips('countryQuickJump', entries, active, value => {
+    document.getElementById('countrySelect').value = value;
+    populateCountryServiceSelect();
+    populateCountryGenreSelect();
+    renderCountryRows();
+  }, false);
 }
 
 function renderActiveCountryFilters() {
@@ -2928,9 +3106,8 @@ function renderActiveCountryFilters() {
   const q = document.getElementById('countryFilmSearch').value.trim();
   const serviceQ = document.getElementById('countryServiceSelect').value;
   const genreQ = document.getElementById('countryGenreSelect').value;
-  const declinedOnly = document.getElementById('countryDeclinedOnly').checked;
   const anyToggleOff = CLASSIFICATIONS.some(k => !countryFilterState[k]);
-  if (!q && !serviceQ && !genreQ && !declinedOnly && !anyToggleOff) return;
+  if (!q && !serviceQ && !genreQ && countrySarahFilter === 'all' && !anyToggleOff) return;
 
   if (genreQ) {
     const chip = document.createElement('span');
@@ -2957,11 +3134,11 @@ function renderActiveCountryFilters() {
     chip.addEventListener('click', () => { document.getElementById('countryServiceSelect').value = ''; renderCountryRows(); });
     container.appendChild(chip);
   }
-  if (declinedOnly) {
+  if (countrySarahFilter !== 'all') {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = 'Sarah said no ✕';
-    chip.addEventListener('click', () => { document.getElementById('countryDeclinedOnly').checked = false; renderCountryRows(); });
+    chip.textContent = (countrySarahFilter === 'yes' ? 'Sarah said yes' : 'Sarah said no') + ' ✕';
+    chip.addEventListener('click', () => { countrySarahFilter = 'all'; renderCountrySarahFilter(); renderCountryRows(); });
     container.appendChild(chip);
   }
   if (anyToggleOff) {
@@ -2983,7 +3160,8 @@ function renderActiveCountryFilters() {
     document.getElementById('countryFilmSearchClear').classList.add('hidden');
     document.getElementById('countryServiceSelect').value = '';
     document.getElementById('countryGenreSelect').value = '';
-    document.getElementById('countryDeclinedOnly').checked = false;
+    countrySarahFilter = 'all';
+    renderCountrySarahFilter();
     CLASSIFICATIONS.forEach(k => { countryFilterState[k] = true; });
     renderCountryFilterToggles();
     renderCountryRows();
@@ -2996,12 +3174,12 @@ function renderCountryRows() {
   container.innerHTML = '';
   const country = currentCountry();
   renderActiveCountryFilters();
+  renderCountryQuickJump();
   if (!country) return;
 
   const q = document.getElementById('countryFilmSearch').value.trim().toLowerCase();
   const serviceQ = document.getElementById('countryServiceSelect').value;
   const genreQ = document.getElementById('countryGenreSelect').value;
-  const declinedOnly = document.getElementById('countryDeclinedOnly').checked;
 
   let rows = country.films.slice();
   const col = countryCols.find(c => c.key === countrySortKey);
@@ -3017,7 +3195,7 @@ function renderCountryRows() {
     if (q && !searchHaystack(row).includes(q)) return;
     if (serviceQ && !row.services.some(s => s.brand === serviceQ)) return;
     if (genreQ && !(row.genre || []).includes(genreQ)) return;
-    if (declinedOnly && !isDeclined(row.slug)) return;
+    if (!sarahFilterMatches(DATA.films_by_slug[row.slug]?.watch_together_status, countrySarahFilter)) return;
     const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
     if (!visibleServices.length) return;
 
@@ -3055,7 +3233,6 @@ document.getElementById('countryServiceSelect').addEventListener('change', rende
 document.getElementById('countryGenreSelect').addEventListener('change', renderCountryRows);
 document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
 wireSearchClear('countryFilmSearch', 'countryFilmSearchClear', renderCountryRows);
-document.getElementById('countryDeclinedOnly').addEventListener('change', renderCountryRows);
 document.getElementById('countrySortSelect').addEventListener('change', e => {
   countrySortKey = e.target.value;
   countrySortDir = countryCols.find(c => c.key === countrySortKey).dir;
@@ -3066,6 +3243,7 @@ populateCountrySelect();
 populateCountryServiceSelect();
 populateCountryGenreSelect();
 renderCountryFilterToggles();
+renderCountrySarahFilter();
 renderCountryRows();
 
 // ---------- Init ----------
@@ -3092,6 +3270,7 @@ window.addEventListener('resize', updateAppBarOffset);
 
 renderHome();
 renderFilmFilterToggles();
+renderFilmSarahFilter();
 renderFilms();
 renderReview();
 renderSarah();

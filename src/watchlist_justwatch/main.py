@@ -334,13 +334,15 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
             cached_entry_id, cached_confidence = get_cached_entry_id(previous_state, film.slug)
             film_state = resolve_and_fetch(film, cached_entry_id, cached_confidence, now_iso=now_iso)
 
-            # original_language was added after most films were already
-            # enriched — checking for it here (not just poster_url) means
-            # every film missing it gets backfilled the next time its own
-            # stale-rotation turn comes up (see STALE_BATCH_FRACTION above),
-            # rather than needing a separate one-off backfill pass.
+            # original_language/runtime_minutes were added after most films
+            # were already enriched — checking for them here (not just
+            # poster_url) means every film missing either gets backfilled
+            # the next time its own stale-rotation turn comes up (see
+            # STALE_BATCH_FRACTION above), rather than needing a separate
+            # one-off backfill pass.
             if (previous_film is not None and previous_film.poster_url is not None
-                    and previous_film.original_language is not None):
+                    and previous_film.original_language is not None
+                    and previous_film.runtime_minutes is not None):
                 film_state.rating = previous_film.rating
                 film_state.poster_url = previous_film.poster_url
                 film_state.director = previous_film.director
@@ -348,6 +350,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 film_state.synopsis = previous_film.synopsis
                 film_state.genre = previous_film.genre
                 film_state.original_language = previous_film.original_language
+                film_state.runtime_minutes = previous_film.runtime_minutes
             else:
                 details = get_film_details_by_slug(film.slug)
                 film_state.rating = details["rating"]
@@ -357,6 +360,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 film_state.synopsis = details["synopsis"]
                 film_state.genre = details["genre"]
                 film_state.original_language = _fetch_original_language(film.title, film.year)
+                film_state.runtime_minutes = details["runtime_minutes"]
         except Exception as exc:
             _warn(f"failed to check {film.slug!r}, skipping it this run ({exc})")
             if previous_film is not None:
@@ -514,6 +518,12 @@ def main() -> None:
                               "missing it (normally fills in gradually via the stale-checking rotation, "
                               "see run()) — no JustWatch/Letterboxd calls, just one TMDB search per film, "
                               "then exit.")
+    parser.add_argument("--backfill-runtime", action="store_true",
+                         help="One-time backfill of runtime_minutes for every watchlist film missing it "
+                              "(normally fills in gradually via the stale-checking rotation, see run()) "
+                              "— one Letterboxd film-page fetch per film (not the blocked "
+                              "/username/films/ path, so safe from GitHub Actions too), no JustWatch/TMDB "
+                              "calls, then exit.")
     parser.add_argument("--set-watch-together-status", nargs=2, metavar=("SLUG", "STATUS"),
                          help="Set one film's watch-with-Sarah review status to 'confirmed' or "
                               "'declined', then exit. No network calls — for manual/one-off use; the "
@@ -607,6 +617,23 @@ def main() -> None:
             time.sleep(0.1)
         save_state(args.database_url, state)
         print(f"Backfilled {updated}/{len(missing)} films (the rest had no TMDB match), written to the database.")
+        sys.exit(0)
+
+    if args.backfill_runtime:
+        state = load_state(args.database_url)
+        missing = [f for f in state.films.values() if f.runtime_minutes is None]
+        print(f"Backfilling runtime_minutes for {len(missing)}/{len(state.films)} films...")
+        updated = 0
+        for i, film in enumerate(missing, start=1):
+            details = get_film_details_by_slug(film.slug)
+            film.runtime_minutes = details["runtime_minutes"]
+            if film.runtime_minutes is not None:
+                updated += 1
+            if i % 25 == 0:
+                print(f"...checked {i}/{len(missing)}", file=sys.stderr)
+            time.sleep(0.1)
+        save_state(args.database_url, state)
+        print(f"Backfilled {updated}/{len(missing)} films, written to the database.")
         sys.exit(0)
 
     if args.set_watch_together_status:

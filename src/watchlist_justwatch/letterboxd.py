@@ -23,6 +23,7 @@ DIARY_REWATCH_RE = re.compile(r'js-td-rewatch icon-status-(on|off)')
 DIARY_DATE_RE = re.compile(r"/diary/films/for/(\d{4})/(\d{2})/(\d{2})/")
 _RSS_NS = {"letterboxd": "https://letterboxd.com"}
 MAX_STARRING = 5
+DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?$")
 
 
 class LetterboxdFetchError(Exception):
@@ -100,8 +101,22 @@ def _parse_film_json_ld(html: str) -> dict | None:
 
 _EMPTY_FILM_DETAILS = {
     "rating": None, "rating_count": None, "poster_url": None, "director": [], "starring": [], "synopsis": None,
-    "genre": [],
+    "genre": [], "runtime_minutes": None,
 }
+
+
+def _parse_duration_minutes(duration: str | None) -> int | None:
+    """schema.org's ISO-8601 duration format, e.g. "PT2H13M" -> 133. Only
+    the H/M components appear in practice (films aren't measured in days),
+    and either can be absent (a sub-hour short is just "PT45M")."""
+    if not duration:
+        return None
+    match = DURATION_RE.match(duration)
+    if not match:
+        return None
+    hours, minutes = match.groups()
+    total = int(hours or 0) * 60 + int(minutes or 0)
+    return total or None
 
 
 def _film_details_from_json_ld(html: str) -> dict:
@@ -129,6 +144,7 @@ def _film_details_from_json_ld(html: str) -> dict:
         "starring": [p["name"] for p in data.get("actor", [])[:MAX_STARRING] if p.get("name")],
         "synopsis": data.get("description"),
         "genre": genre,
+        "runtime_minutes": _parse_duration_minutes(data.get("duration")),
     }
 
 

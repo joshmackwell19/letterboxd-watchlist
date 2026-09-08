@@ -53,3 +53,4 @@ class FilmState:
     # ISO 639-1 code (TMDB's "original_language", not Letterboxd's own
     # inLanguage list — see tmdb_client.original_language for why).
     original_language: str | None = None
+    runtime_minutes: int | None = None

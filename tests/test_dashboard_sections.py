@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from watchlist_justwatch.dashboard import (
     _build_home_sections,
     _leaving_soon_section,
+    _quick_watch_section,
     _recently_added_section,
     _watch_together_section,
 )
@@ -141,6 +142,41 @@ def test_watch_together_skips_slugs_no_longer_on_the_watchlist():
     }
 
     section = _watch_together_section(state, watch_together, exclude=set())
+
+    assert section["films"] == []
+
+
+# ---------- _quick_watch_section ----------
+
+def test_quick_watch_excludes_films_outside_the_90_minute_window():
+    state = StateDoc(films={
+        "short": _film("short", runtime_minutes=95, rating=4.0),
+        "too_short": _film("too_short", runtime_minutes=70, rating=4.0),
+        "too_long": _film("too_long", runtime_minutes=140, rating=4.0),
+        "unknown": _film("unknown", runtime_minutes=None, rating=4.0),
+    })
+
+    section = _quick_watch_section(state, films_all_offers={}, exclude=set())
+
+    assert [f["slug"] for f in section["films"]] == ["short"]
+
+
+def test_quick_watch_prefers_watchable_now_then_falls_back_to_rating():
+    state = StateDoc(films={
+        "watchable": _film("watchable", runtime_minutes=90, rating=3.0),
+        "unwatchable_higher_rated": _film("unwatchable_higher_rated", runtime_minutes=90, rating=4.5),
+    })
+    offers = {"watchable": [_offer("Netflix", "AU", "have")]}
+
+    section = _quick_watch_section(state, offers, exclude=set())
+
+    assert [f["slug"] for f in section["films"]] == ["watchable", "unwatchable_higher_rated"]
+
+
+def test_quick_watch_respects_exclude_set():
+    state = StateDoc(films={"a": _film("a", runtime_minutes=90, rating=4.0)})
+
+    section = _quick_watch_section(state, films_all_offers={}, exclude={"a"})
 
     assert section["films"] == []
 

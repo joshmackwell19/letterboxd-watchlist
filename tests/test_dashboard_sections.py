@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 
 from watchlist_justwatch.dashboard import (
     _build_home_sections,
+    _cinema_listings,
     _cinema_section,
     _leaving_soon_section,
     _quick_watch_section,
@@ -236,6 +237,62 @@ def test_cinema_section_respects_exclude_set():
     section = _cinema_section(state, exclude={"taxi-driver"}, now=now)
 
     assert section["films"] == []
+
+
+# ---------- _cinema_listings ----------
+
+def test_cinema_listings_merges_a_matched_film_across_cinemas_into_one_row():
+    # The same watchlist film showing at two different cinemas should be
+    # ONE row with both cinemas' showtimes attached, not two cards.
+    state = StateDoc(films={
+        "taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976, rating=4.2,
+                              genre=["Crime", "Drama"], runtime_minutes=113,
+                              director=["Martin Scorsese"], synopsis="A cabbie's descent."),
+    })
+    state.cinema_showtimes = [
+        _showing("Taxi Driver", 1976, "2026-09-09T18:00:00", cinema="Prince Charles Cinema"),
+        _showing("TAXI DRIVER!", 1976, "2026-09-10T20:00:00", cinema="Barbican"),
+    ]
+
+    rows = _cinema_listings(state)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["matched_slug"] == "taxi-driver"
+    assert {s["cinema"] for s in row["showtimes"]} == {"Prince Charles Cinema", "Barbican"}
+    # Matched rows use the watchlist's own richer metadata, not the venue's.
+    assert row["rating"] == 4.2
+    assert row["genre"] == ["Crime", "Drama"]
+    assert row["director"] == "Martin Scorsese"
+    assert row["synopsis"] == "A cabbie's descent."
+
+
+def test_cinema_listings_keeps_unmatched_same_title_films_separate_per_cinema():
+    # No reliable cross-cinema identity for an unmatched title — merging
+    # by title alone risks conflating two different films that share a
+    # name, so these stay one row per (cinema, title) as before.
+    state = StateDoc(films={})
+    state.cinema_showtimes = [
+        _showing("Mystery Film", None, "2026-09-09T18:00:00", cinema="Prince Charles Cinema"),
+        _showing("Mystery Film", None, "2026-09-10T20:00:00", cinema="Riverside Studios"),
+    ]
+
+    rows = _cinema_listings(state)
+
+    assert len(rows) == 2
+    assert all(row["matched_slug"] is None for row in rows)
+
+
+def test_cinema_listings_sorts_by_soonest_showtime():
+    state = StateDoc(films={})
+    state.cinema_showtimes = [
+        _showing("Later Film", None, "2026-09-12T18:00:00"),
+        _showing("Sooner Film", None, "2026-09-09T18:00:00"),
+    ]
+
+    rows = _cinema_listings(state)
+
+    assert [r["title"] for r in rows] == ["Sooner Film", "Later Film"]
 
 
 # ---------- _build_home_sections director/cast section cap ----------

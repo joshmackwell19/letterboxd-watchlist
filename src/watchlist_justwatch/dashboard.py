@@ -441,12 +441,11 @@ def _format_cinema_datetime(iso: str) -> str:
     return dt.strftime("%a %-d %b") + ", " + dt.strftime("%-I:%M%p").lower()
 
 
-def _cinema_section(state: StateDoc, exclude: set[str], now: datetime | None = None,
-                     limit: int = RECOMMENDED_COUNT) -> dict:
-    """Watchlist films with an upcoming screening at one of the four
-    cinemas in cinemas.py — soonest showing first. A specific tonight/
-    tomorrow screening is a harder deadline than a streaming offer merely
-    expiring within 30 days, so this leads Home ahead of leaving_soon."""
+def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> dict[str, dict]:
+    """Every watchlist film with an upcoming screening at one of the four
+    cinemas in cinemas.py, mapped to its single soonest showing — shared
+    by the Home section below and the Films tab's own per-card note, so
+    both agree on which showing counts as "next" for a given film."""
     now_iso = (now or datetime.now()).isoformat()
     soonest_by_slug: dict[str, dict] = {}
 
@@ -454,18 +453,35 @@ def _cinema_section(state: StateDoc, exclude: set[str], now: datetime | None = N
         if showing["showtime"] < now_iso:
             continue
         slug = match_watchlist_film(showing["title"], showing["year"], state.films)
-        if slug is None or slug not in state.films or slug in exclude:
+        if slug is None or slug not in state.films:
             continue
         current = soonest_by_slug.get(slug)
         if current is None or showing["showtime"] < current["showtime"]:
             soonest_by_slug[slug] = showing
 
+    return soonest_by_slug
+
+
+def _cinema_note(showing: dict) -> str:
+    return f"{showing['cinema']} — {_format_cinema_datetime(showing['showtime'])}"
+
+
+def _cinema_section(state: StateDoc, exclude: set[str], now: datetime | None = None,
+                     limit: int = RECOMMENDED_COUNT) -> dict:
+    """Watchlist films with an upcoming screening at one of the four
+    cinemas in cinemas.py — soonest showing first. A specific tonight/
+    tomorrow screening is a harder deadline than a streaming offer merely
+    expiring within 30 days, so this leads Home ahead of leaving_soon."""
+    soonest_by_slug = {
+        slug: showing for slug, showing in _soonest_cinema_showings(state, now).items()
+        if slug not in exclude
+    }
     chosen = sorted(soonest_by_slug.items(), key=lambda kv: kv[1]["showtime"])[:limit]
 
     films = []
     for slug, showing in chosen:
         card = _mini_card(state.films[slug])
-        card["cinema_note"] = f"{showing['cinema']} — {_format_cinema_datetime(showing['showtime'])}"
+        card["cinema_note"] = _cinema_note(showing)
         films.append(card)
 
     return {"key": "cinema", "header": "At the cinema", "films": films}
@@ -610,34 +626,49 @@ def _settings_data(config: dict[str, CountryConfig], global_subscriptions: list[
 
 
 def _cinema_listings(state: StateDoc) -> list[dict]:
-    """One row per (cinema, title) with every showtime attached, for the
-    full Cinemas tab — unlike _cinema_section (Home, watchlist-only),
-    this includes everything showing regardless of a match, since
-    browsing "what's on generally" is the whole point of the tab.
-    Matched films use whatever richer poster/rating/genre is already
+    """One row per film for the full Cinemas tab — a matched watchlist
+    film showing at several of the four cinemas merges into a single row
+    (grouped by slug, the one reliable cross-cinema identity a match
+    gives us) with every cinema's showtimes attached, rather than one
+    card per (cinema, title) like an unmatched film still gets (title
+    alone isn't a safe enough identity to merge across cinemas without a
+    match — two different films can share a name). Unlike _cinema_section
+    (Home, watchlist-only), this includes everything showing regardless
+    of a match, since browsing "what's on generally" is the whole point
+    of the tab. Matched films use whatever richer metadata is already
     tracked on the watchlist instead of the venue's own (same
     don't-duplicate-data-we-already-have principle as everywhere else)."""
-    grouped: dict[tuple[str, str], dict] = {}
+    grouped: dict[tuple, dict] = {}
 
     for showing in state.cinema_showtimes:
-        key = (showing["cinema"], showing["title"])
+        slug = match_watchlist_film(showing["title"], showing["year"], state.films)
+        key = ("matched", slug) if slug else ("unmatched", showing["cinema"], showing["title"])
         entry = grouped.setdefault(key, {
-            "cinema": showing["cinema"], "title": showing["title"], "year": showing["year"],
+            "matched_slug": slug, "title": showing["title"], "year": showing["year"],
             "duration_minutes": showing["duration_minutes"], "director": showing["director"],
             "synopsis": showing["synopsis"], "poster_url": showing["poster_url"],
             "showtimes": [],
         })
-        entry["showtimes"].append({"showtime": showing["showtime"], "booking_url": showing["booking_url"]})
+        entry["showtimes"].append({
+            "cinema": showing["cinema"], "showtime": showing["showtime"], "booking_url": showing["booking_url"],
+        })
 
     rows = list(grouped.values())
     for row in rows:
         row["showtimes"].sort(key=lambda s: s["showtime"])
-        slug = match_watchlist_film(row["title"], row["year"], state.films)
-        row["matched_slug"] = slug
-        film = state.films.get(slug) if slug else None
-        row["poster_url"] = (film.poster_url if film else None) or row["poster_url"]
-        row["rating"] = film.rating if film else None
-        row["genre"] = film.genre if film else []
+        film = state.films.get(row["matched_slug"]) if row["matched_slug"] else None
+        if film is not None:
+            row["title"] = film.title
+            row["year"] = film.year
+            row["poster_url"] = film.poster_url or row["poster_url"]
+            row["rating"] = film.rating
+            row["genre"] = film.genre
+            row["director"] = ", ".join(film.director) if film.director else row["director"]
+            row["synopsis"] = film.synopsis or row["synopsis"]
+            row["duration_minutes"] = film.runtime_minutes or row["duration_minutes"]
+        else:
+            row["rating"] = None
+            row["genre"] = []
 
     rows.sort(key=lambda r: r["showtimes"][0]["showtime"] if r["showtimes"] else "9999")
     return rows
@@ -677,10 +708,14 @@ def build_dashboard_data(
     main_brand_set = set(main_brands)
 
     rows = [_film_row(film, main_brand_set, josh_offers[slug]) for slug, film in josh_films.items()]
+    soonest_cinema_showings = _soonest_cinema_showings(josh_state)
     for r in rows:
         info = watch_together.get(r["slug"], {})
         r["watch_together_status"] = info.get("status")
         r["watch_together_added_at"] = info.get("added_at")
+        showing = soonest_cinema_showings.get(r["slug"])
+        if showing is not None:
+            r["cinema_note"] = _cinema_note(showing)
     rows.sort(key=lambda r: r["title"].lower())
 
     sarah_films = [
@@ -2504,13 +2539,20 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
       }).join('') + '</div>'
     : '';
 
+  // At the cinema now/soon — surfaced ahead of streaming info, same
+  // priority a specific screening gets everywhere else in the dashboard.
+  const cinemaListing = DATA.cinemas.find(r => r.matched_slug === film.slug);
+  const cinemaSection = (cinemaListing && cinemaListing.showtimes.length)
+    ? '<div class="detail-meta"><strong>🎬 At the cinema</strong></div>' + cinemaShowtimesHtml(cinemaListing.showtimes)
+    : '';
+
   const otherLabel = excludeBrand ? 'Other services' : 'Where to watch';
   div.innerHTML =
     '<div style="flex-shrink:0;">' + poster + '</div>' +
     '<div class="detail-body">' +
       '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
       '<p class="detail-rating">' + rating + '</p>' +
-      director + runtimeLine + starring + genreLine + languageLine + synopsis + primaryHtml +
+      director + runtimeLine + starring + genreLine + languageLine + synopsis + cinemaSection + primaryHtml +
       '<div class="other-services-section">' +
         '<p class="detail-meta"><strong>' + otherLabel + '</strong></p>' +
         '<div class="badge-wrap">' + otherHtml + '</div>' +
@@ -2909,22 +2951,21 @@ document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateCl
 // ---------- Cinemas ----------
 
 const CINEMA_VENUES = ['Prince Charles Cinema', 'Barbican', 'Vue Fulham Broadway', 'Riverside Studios'];
-const cinemaVenueState = Object.fromEntries(CINEMA_VENUES.map(v => [v, true]));
+// Single-select, same as Services/Country's quick-jump chips — one click
+// on a venue shows only that venue (not "toggle this one off"), '' means
+// no filter.
+let cinemaVenueFilter = '';
 let cinemaDateMode = 'all';
 
-function renderCinemaVenueToggles() {
-  const container = document.getElementById('cinemaVenueToggles');
-  container.innerHTML = '';
-  CINEMA_VENUES.forEach(venue => {
-    const pill = document.createElement('span');
-    pill.className = 'pill-toggle' + (cinemaVenueState[venue] ? ' active' : '');
-    pill.textContent = venue;
-    pill.addEventListener('click', () => {
-      cinemaVenueState[venue] = !cinemaVenueState[venue];
-      renderCinemaVenueToggles();
-      renderCinemas();
-    });
-    container.appendChild(pill);
+function renderCinemaVenueFilter() {
+  const entries = CINEMA_VENUES.map(venue => ({
+    value: venue, label: venue,
+    count: DATA.cinemas.filter(r => r.showtimes.some(s => s.cinema === venue)).length,
+  }));
+  renderQuickJumpChips('cinemaVenueToggles', entries, cinemaVenueFilter, value => {
+    cinemaVenueFilter = value;
+    renderCinemaVenueFilter();
+    renderCinemas();
   });
 }
 
@@ -2959,6 +3000,30 @@ function formatShowtimeChip(showtime, bookingUrl) {
     esc(label) + ' ↗</a>';
 }
 
+// A merged (matched) row can span several of the four cinemas — grouped
+// here so both the Cinemas-tab card and quick-look's showtimes section
+// render "one sub-list per cinema" instead of one flat, unlabeled list.
+// Groups are ordered by their own soonest showing, same "soonest first"
+// priority as everywhere else cinema data is ranked.
+function groupShowtimesByCinema(showtimes) {
+  const byCinema = new Map();
+  showtimes.forEach(s => {
+    if (!byCinema.has(s.cinema)) byCinema.set(s.cinema, []);
+    byCinema.get(s.cinema).push(s);
+  });
+  return [...byCinema.entries()].sort((a, b) => a[1][0].showtime < b[1][0].showtime ? -1 : 1);
+}
+
+function cinemaShowtimesHtml(showtimes) {
+  return groupShowtimesByCinema(showtimes).map(([cinema, times]) => {
+    const chips = capBadges(times.map(s => formatShowtimeChip(s.showtime, s.booking_url)), BADGE_CAP);
+    return '<div class="cinema-venue-group">' +
+      '<div class="film-card-cinema-note">🎬 ' + esc(cinema) + '</div>' +
+      '<div class="service-group">' + chips + '</div>' +
+    '</div>';
+  }).join('');
+}
+
 function cinemaCardHtml(row) {
   const year = row.year ? ' (' + row.year + ')' : '';
   const rating = row.rating != null ? row.rating.toFixed(2) + '★' : '—';
@@ -2970,8 +3035,6 @@ function cinemaCardHtml(row) {
   if (row.genre && row.genre.length) metaParts.push(esc(row.genre.join(', ')));
   if (row.duration_minutes != null) metaParts.push(formatRuntime(row.duration_minutes));
   const genre = metaParts.length ? '<div class="film-card-genre">' + metaParts.join(' · ') + '</div>' : '';
-  const cinemaLine = '<div class="film-card-cinema-note">🎬 ' + esc(row.cinema) + '</div>';
-  const showtimeChips = capBadges(row.showtimes.map(s => formatShowtimeChip(s.showtime, s.booking_url)), BADGE_CAP);
 
   const titleHtml = row.matched_slug
     ? '<a class="film-link film-card-title" target="_blank" href="https://letterboxd.com/film/' + row.matched_slug + '/">' +
@@ -2986,22 +3049,21 @@ function cinemaCardHtml(row) {
       '<div class="film-card-title-row">' + titleHtml +
         '<span class="film-card-end"><span class="film-card-rating">' + rating + '</span></span>' +
       '</div>' +
-      cinemaLine + director + genre +
-      '<div class="service-group">' + showtimeChips + '</div>' +
+      director + genre + cinemaShowtimesHtml(row.showtimes) +
     '</div>';
   return div;
 }
 
 function cinemaSearchHaystack(row) {
-  return [row.title, row.director, row.cinema].filter(Boolean).join(' ').toLowerCase();
+  const cinemas = [...new Set(row.showtimes.map(s => s.cinema))];
+  return [row.title, row.director, ...cinemas].filter(Boolean).join(' ').toLowerCase();
 }
 
 function renderActiveCinemaFilters() {
   const container = document.getElementById('activeCinemaFilters');
   container.innerHTML = '';
   const q = document.getElementById('cinemaSearch').value.trim();
-  const anyVenueOff = CINEMA_VENUES.some(v => !cinemaVenueState[v]);
-  if (!q && cinemaDateMode === 'all' && !anyVenueOff) return;
+  if (!q && cinemaDateMode === 'all' && !cinemaVenueFilter) return;
 
   if (q) {
     const chip = document.createElement('span');
@@ -3021,15 +3083,11 @@ function renderActiveCinemaFilters() {
     chip.addEventListener('click', () => { cinemaDateMode = 'all'; renderCinemaDateFilter(); renderCinemas(); });
     container.appendChild(chip);
   }
-  if (anyVenueOff) {
+  if (cinemaVenueFilter) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = 'Venue filters ✕';
-    chip.addEventListener('click', () => {
-      CINEMA_VENUES.forEach(v => { cinemaVenueState[v] = true; });
-      renderCinemaVenueToggles();
-      renderCinemas();
-    });
+    chip.textContent = cinemaVenueFilter + ' ✕';
+    chip.addEventListener('click', () => { cinemaVenueFilter = ''; renderCinemaVenueFilter(); renderCinemas(); });
     container.appendChild(chip);
   }
   const clearAll = document.createElement('span');
@@ -3040,8 +3098,8 @@ function renderActiveCinemaFilters() {
     document.getElementById('cinemaSearchClear').classList.add('hidden');
     cinemaDateMode = 'all';
     renderCinemaDateFilter();
-    CINEMA_VENUES.forEach(v => { cinemaVenueState[v] = true; });
-    renderCinemaVenueToggles();
+    cinemaVenueFilter = '';
+    renderCinemaVenueFilter();
     renderCinemas();
   });
   container.appendChild(clearAll);
@@ -3059,9 +3117,9 @@ function renderCinemas() {
 
   const frag = document.createDocumentFragment();
   DATA.cinemas.forEach(row => {
-    if (!cinemaVenueState[row.cinema]) return;
     if (q && !cinemaSearchHaystack(row).includes(q)) return;
     let showtimes = row.showtimes;
+    if (cinemaVenueFilter) showtimes = showtimes.filter(s => s.cinema === cinemaVenueFilter);
     if (cinemaDateMode === 'today') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === todayIso);
     else if (cinemaDateMode === 'tomorrow') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === tomorrowIso);
     if (!showtimes.length) return;
@@ -3080,7 +3138,7 @@ document.getElementById('cinemasGrid').addEventListener('click', onCinemaCardCli
 document.getElementById('cinemaSearch').addEventListener('input', renderCinemas);
 wireSearchClear('cinemaSearch', 'cinemaSearchClear', renderCinemas);
 
-renderCinemaVenueToggles();
+renderCinemaVenueFilter();
 renderCinemaDateFilter();
 renderCinemas();
 

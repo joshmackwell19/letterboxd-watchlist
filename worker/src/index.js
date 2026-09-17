@@ -229,33 +229,50 @@ query SearchTitles($filter: TitleFilter!, $country: Country!, $language: Languag
   }
 }`;
 
+function normalizeTitle(title) {
+  return (title || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 // justwatch_client.search_film picks a match by year alone (exact, then ±1,
-// then nearest) because that's all its search response carries. This one can
-// do better: JustWatch exposes each title's own TMDB id, and the film was
-// picked from TMDB in the first place, so the two can be matched outright
-// and the year ladder is only a fallback for titles JustWatch hasn't mapped.
-function pickJustWatchMatch(nodes, tmdbId, year) {
-  const wanted = String(tmdbId);
-  const byTmdbId = nodes.find((n) => n.content.externalIds && n.content.externalIds.tmdbId === wanted);
+// then nearest year, then whatever came back first) because that's all its
+// search response carries. This one can do better, and has to.
+//
+// Better: JustWatch exposes each title's own TMDB id and the film was picked
+// from TMDB in the first place, so the two match outright.
+//
+// Has to: search_film's last two rungs answer with SOME film whenever the
+// API answers at all, which is a reasonable bet for a watchlist film (it
+// genuinely exists and JustWatch almost certainly has it) and a bad one
+// here. A search for a film JustWatch doesn't carry was matched to "PAW
+// Patrol: The Movie" in testing and would have shown its offers on the
+// card. Claiming a film is on Paramount+ when it isn't is worse than
+// saying it isn't available anywhere tracked, so an unconvincing match is
+// no match: title and year both have to agree when the TMDB ids don't.
+function pickJustWatchMatch(nodes, tmdbId, title, year) {
+  const wantedId = String(tmdbId);
+  const byTmdbId = nodes.find((n) => n.content.externalIds && n.content.externalIds.tmdbId === wantedId);
   if (byTmdbId) return { node: byTmdbId, confidence: "tmdb_exact" };
 
-  if (year != null) {
-    const exact = nodes.find((n) => n.content.originalReleaseYear === year);
-    if (exact) return { node: exact, confidence: "exact" };
-    const tolerant = nodes.find(
-      (n) => n.content.originalReleaseYear != null && Math.abs(n.content.originalReleaseYear - year) <= 1
-    );
-    if (tolerant) return { node: tolerant, confidence: "year_tolerant" };
-    const withYear = nodes.filter((n) => n.content.originalReleaseYear != null);
-    if (withYear.length) {
-      const closest = withYear.reduce((best, n) =>
-        Math.abs(n.content.originalReleaseYear - year) < Math.abs(best.content.originalReleaseYear - year) ? n : best
-      );
-      return { node: closest, confidence: "low_confidence" };
-    }
-  }
+  // Only reached for a title JustWatch hasn't mapped to a TMDB id.
+  const wantedTitle = normalizeTitle(title);
+  const sameTitle = nodes.filter((n) => normalizeTitle(n.content.title) === wantedTitle);
+  if (!sameTitle.length) return { node: null, confidence: "unmatched" };
 
-  return nodes.length ? { node: nodes[0], confidence: "low_confidence" } : { node: null, confidence: "unmatched" };
+  if (year == null) {
+    // No year to check against (TMDB had no release date) — an exact title
+    // match on its own is as much confidence as is available.
+    return { node: sameTitle[0], confidence: "title_only" };
+  }
+  const exact = sameTitle.find((n) => n.content.originalReleaseYear === year);
+  if (exact) return { node: exact, confidence: "title_year_exact" };
+  // ±1 covers festival-vs-release-year disagreements, the same tolerance
+  // justwatch_client.search_film allows.
+  const tolerant = sameTitle.find(
+    (n) => n.content.originalReleaseYear != null && Math.abs(n.content.originalReleaseYear - year) <= 1
+  );
+  if (tolerant) return { node: tolerant, confidence: "title_year_tolerant" };
+
+  return { node: null, confidence: "unmatched" };
 }
 
 function buildOffersQuery(countries) {
@@ -282,7 +299,7 @@ async function fetchJustWatchOffers(title, year, tmdbId, countries) {
       first: 10,
     });
     const nodes = ((data.popularTitles || {}).edges || []).map((edge) => edge.node);
-    match = pickJustWatchMatch(nodes, tmdbId, year);
+    match = pickJustWatchMatch(nodes, tmdbId, title, year);
   } catch (err) {
     return { matched: false, confidence: "unmatched", offers: [], error: String(err).slice(0, 300) };
   }

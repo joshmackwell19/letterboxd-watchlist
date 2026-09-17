@@ -1169,6 +1169,7 @@ _TEMPLATE = """<!DOCTYPE html>
     box-shadow: var(--shadow); cursor: pointer; display: flex; flex-direction: column; gap: 8px;
   }
   .service-card:hover { border-color: var(--accent); }
+  .service-card-aggregate { border-color: var(--accent); background: var(--accent-soft); grid-column: 1 / -1; }
   .service-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
   .service-card-name { font-weight: 600; font-size: 13.5px; }
   .service-card-name i { color: var(--text-faint); font-style: italic; font-weight: 400; display: block; font-size: 11.5px; }
@@ -2508,15 +2509,24 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
       '" target="_blank" rel="noopener">' + label + ' ↗</a>';
   }
 
-  const primaryOffer = excludeBrand
-    ? film.all_offers.find(o => o.brand === excludeBrand && o.country === excludeCountry)
-    : null;
-  const primaryHtml = (primaryOffer && primaryOffer.url)
-    ? '<p class="detail-meta">' + offerBadgeHtml(primaryOffer, 'watch-now-btn') + '</p>'
+  // excludeCountry === null means "this brand, any country" (the Services
+  // tab's merged "All countries" view) — every offer on that brand is
+  // pulled out of "other services" and shown up top, url or not, since the
+  // whole point there is "here's everywhere this is on the service you
+  // picked". For a single country (the normal case), keep the original,
+  // stricter behaviour: only a link-bearing match gets the prominent
+  // watch-now treatment, so a url-less match still falls through to
+  // "other services" as a plain badge rather than vanishing.
+  const brandOffers = excludeBrand ? film.all_offers.filter(o => o.brand === excludeBrand) : [];
+  const primaryOffers = excludeCountry == null
+    ? brandOffers
+    : brandOffers.filter(o => o.country === excludeCountry && o.url);
+  const primaryHtml = primaryOffers.length
+    ? '<p class="detail-meta">' + primaryOffers.map(o => offerBadgeHtml(o, 'watch-now-btn')).join(' ') + '</p>'
     : '';
 
   const others = film.all_offers
-    .filter(o => !(o.brand === excludeBrand && o.country === excludeCountry))
+    .filter(o => !primaryOffers.includes(o) && !(excludeCountry != null && o.brand === excludeBrand && o.country === excludeCountry))
     .slice()
     .sort((a, b) => CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification]);
   const otherHtml = others.length
@@ -3337,13 +3347,41 @@ function renderServicesRows() {
     return av < bv ? -serviceSortDir : av > bv ? serviceSortDir : 0;
   });
 
-  const frag = document.createDocumentFragment();
-  rows.forEach(row => {
-    if (serviceQ && row.brand !== serviceQ) return;
-    if (countryQ && row.country_name !== countryQ) return;
-    if (filmQ && !row.slugs.some(s => searchHaystack(DATA.films_by_slug[s]).includes(filmQ))) return;
-    if (!serviceFilterState[row.classification]) return;
+  const visibleRows = rows.filter(row => {
+    if (serviceQ && row.brand !== serviceQ) return false;
+    if (countryQ && row.country_name !== countryQ) return false;
+    if (filmQ && !row.slugs.some(s => searchHaystack(DATA.films_by_slug[s]).includes(filmQ))) return false;
+    if (!serviceFilterState[row.classification]) return false;
+    return true;
+  });
 
+  const frag = document.createDocumentFragment();
+
+  // One service picked, no specific country, and still more than one
+  // country showing — offer a merged card so "what's on MUBI, anywhere"
+  // doesn't mean opening every country's card and cross-referencing by
+  // hand, which was the actual complaint this view exists to fix.
+  if (serviceQ && !countryQ && visibleRows.length > 1) {
+    const slugSet = new Set(), uniqueSet = new Set();
+    let bestClass = visibleRows[0].classification;
+    visibleRows.forEach(row => {
+      row.slugs.forEach(s => slugSet.add(s));
+      row.unique_slugs.forEach(s => uniqueSet.add(s));
+      if (CLASSIFICATION_PRIORITY[row.classification] < CLASSIFICATION_PRIORITY[bestClass]) bestClass = row.classification;
+    });
+    const card = document.createElement('div');
+    card.className = 'service-card service-card-aggregate';
+    card.innerHTML =
+      '<div class="service-card-head">' +
+        '<span class="service-card-name">' + esc(serviceQ) + '<i>All countries</i></span>' +
+        '<span class="badge badge-' + bestClass + '">' + classificationBadgeLabel(bestClass) + '</span>' +
+      '</div>' +
+      '<div class="service-card-stats">' + slugSet.size + ' films tracked · ' + uniqueSet.size + ' unique</div>';
+    card.addEventListener('click', () => openServiceDetailAllCountries(serviceQ));
+    frag.appendChild(card);
+  }
+
+  visibleRows.forEach(row => {
     const card = document.createElement('div');
     card.className = 'service-card';
     card.innerHTML =
@@ -3358,6 +3396,21 @@ function renderServicesRows() {
   container.appendChild(frag);
   ensureNotEmpty(container, 'No services match your search and filters.');
   renderServiceQuickJump();
+}
+
+function openServiceDetailAllCountries(brand) {
+  const slugSet = new Set();
+  DATA.services.filter(r => r.brand === brand).forEach(r => r.slugs.forEach(s => slugSet.add(s)));
+  const slugs = [...slugSet].sort((a, b) =>
+    (DATA.films_by_slug[a]?.title || '').localeCompare(DATA.films_by_slug[b]?.title || ''));
+  document.getElementById('serviceDetailTitle').innerHTML = esc(brand) + ' <i>All countries</i>';
+  const container = document.getElementById('serviceDetailCards');
+  container.innerHTML = '';
+  slugs.forEach(slug => {
+    const film = DATA.films_by_slug[slug];
+    container.appendChild(buildFilmDetailCard(film, brand, null, true));
+  });
+  showView('service-detail');
 }
 
 function openServiceDetail(brand, country, countryName) {

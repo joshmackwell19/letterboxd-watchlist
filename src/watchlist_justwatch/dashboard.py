@@ -1107,6 +1107,45 @@ _TEMPLATE = """<!DOCTYPE html>
   .detail-card.collapsible { cursor: pointer; }
   .detail-card.collapsible .other-services-section { display: none; }
   .detail-card.collapsible.expanded .other-services-section { display: block; }
+  /* Quick search — the picker list lives in the same modal the result card
+     does, so choosing a film swaps the panel rather than opening a second
+     layer on top of the first. */
+  .search-modal-input {
+    width: 100%; box-sizing: border-box; padding: 11px 14px; font-size: 14px;
+    border: 1px solid var(--hairline-strong); border-radius: 10px;
+    background: var(--bg); color: var(--text); outline: none; transition: border-color 0.15s;
+  }
+  .search-modal-input:focus { border-color: var(--accent); }
+  .search-section-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-faint); font-weight: 600; margin: 16px 0 6px;
+  }
+  .search-row {
+    display: flex; gap: 11px; align-items: center; padding: 7px 8px;
+    border-radius: 10px; cursor: pointer; transition: background 0.12s;
+  }
+  .search-row:hover { background: var(--hairline); }
+  .search-row-poster {
+    width: 34px; height: 50px; object-fit: cover; border-radius: 4px;
+    background: var(--hairline); flex-shrink: 0;
+  }
+  .search-row-body { min-width: 0; }
+  .search-row-title {
+    font-size: 13px; font-weight: 600; margin: 0 0 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .search-row-meta {
+    font-size: 11.5px; color: var(--text-muted); margin: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .search-on-list {
+    display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+    background: var(--accent); color: var(--bg); font-size: 9.5px; font-weight: 700;
+    vertical-align: middle;
+  }
+  .search-note { font-size: 11.5px; color: var(--text-faint); margin: 10px 0 0; }
+  .search-note-warn { color: #fbbf24; }
+  .search-status { font-size: 12px; color: var(--text-faint); padding: 10px 2px; }
   .modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 50;
     align-items: center; justify-content: center; padding: 20px;
@@ -1273,7 +1312,11 @@ _TEMPLATE = """<!DOCTYPE html>
     .app-bar-title { display: block; }
     .app-bar-controls { padding: 0; margin-bottom: 11px; }
     .tabs { display: none; }
-    .header-actions { display: flex; }
+    /* Search made this a six-control row, one more than fits across a
+       phone: the row measured 419px inside a 366px header and gave the
+       whole page a horizontal scroll. It wraps now instead — nothing
+       truncated, nothing off the edge. */
+    .header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
     .mobile-only-bar { display: block; }
     .controls { gap: 7px; }
     /* iOS Safari zooms the whole page in on focus of any input/select whose
@@ -1369,6 +1412,12 @@ _TEMPLATE = """<!DOCTYPE html>
       </button>
     </div>
     <div class="tabs tabs-right">
+      <button class="tab-btn" id="filmSearchBtn" title="Search any film on Letterboxd (/)">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4.3-4.3"></path>
+        </svg>
+        Search
+      </button>
       <button class="tab-btn" id="reloadPageBtn" title="Reload this page">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M23 4v6h-6"></path>
@@ -1408,6 +1457,7 @@ _TEMPLATE = """<!DOCTYPE html>
       <!-- Reload has no separate mobile button — pull-to-refresh (below)
            already does a plain page reload here. Refresh-data has no mobile
            gesture equivalent, so it still needs an explicit control. -->
+      <button class="icon-btn" id="filmSearchBtnMobile" aria-label="Search films" title="Search any film on Letterboxd">🔍</button>
       <button class="icon-btn" id="triggerRefreshBtnMobile" aria-label="Refresh data" title="Re-run the daily check and redeploy">☁</button>
       <button class="icon-btn" id="reviewBtnMobile" aria-label="Review" title="Films to review with Sarah">✓<span class="new-badge review-count-badge-mobile hidden"></span></button>
       <button class="icon-btn" id="sarahBtnMobile" aria-label="Sarah's list" title="Sarah's watchlist">♥</button>
@@ -1602,6 +1652,21 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="modal-card">
     <button class="modal-close" id="quickLookClose">✕</button>
     <div id="quickLookContent"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="searchOverlay">
+  <div class="modal-card">
+    <button class="modal-close" id="searchClose">✕</button>
+    <div id="searchPanel">
+      <input type="text" class="search-modal-input" id="filmSearchInput" autocomplete="off"
+             placeholder="Search any film on Letterboxd...">
+      <div id="searchResults"></div>
+    </div>
+    <div id="searchDetailPanel" hidden>
+      <button class="back-btn" id="searchBackBtn">← Back to results</button>
+      <div id="searchDetailContent"></div>
+    </div>
   </div>
 </div>
 
@@ -2650,6 +2715,9 @@ function buildSearchedFilm(row, lookup) {
   const language = row.original_language || null;
   return {
     slug: letterboxd ? letterboxd.slug : null,
+    // Letterboxd resolves /tmdb/<id>/ to the film's own page, so this links
+    // correctly even when reading that page failed a moment ago.
+    letterboxd_url: 'https://letterboxd.com/tmdb/' + row.tmdb_id + '/',
     tmdb_id: row.tmdb_id,
     title: (letterboxd && letterboxd.title) || row.title,
     year: row.year,
@@ -2668,6 +2736,14 @@ function buildSearchedFilm(row, lookup) {
     // couldn't be asked" — the two must not read the same on the card.
     offers_unavailable: Boolean(lookup.justwatch.error),
   };
+}
+
+// Every watchlist film has a slug; a searched one only has it once
+// Letterboxd resolved, and falls back to the /tmdb/<id>/ redirect (which
+// lands on the same page) rather than linking to /film/null/.
+function filmLetterboxdUrl(film) {
+  if (film.slug) return 'https://letterboxd.com/film/' + film.slug + '/';
+  return film.letterboxd_url || 'https://letterboxd.com/';
 }
 
 // ---------- Film detail card (shared: quick look + service detail) ----------
@@ -2745,7 +2821,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
   div.innerHTML =
     '<div style="flex-shrink:0;">' + poster + '</div>' +
     '<div class="detail-body">' +
-      '<a class="film-link" target="_blank" href="https://letterboxd.com/film/' + film.slug + '/"><h3>' + esc(film.title) + year + '</h3></a>' +
+      '<a class="film-link" target="_blank" href="' + escAttr(filmLetterboxdUrl(film)) + '"><h3>' + esc(film.title) + year + '</h3></a>' +
       '<p class="detail-rating">' + rating + '</p>' +
       director + runtimeLine + starring + genreLine + languageLine + synopsis + cinemaSection + primaryHtml +
       '<div class="other-services-section">' +
@@ -2786,6 +2862,272 @@ document.getElementById('quickLookOverlay').addEventListener('click', event => {
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') closeQuickLook();
+});
+
+// ---------- Quick search ----------
+//
+// Two steps on purpose (see the Worker's own note): typing searches, and
+// nothing expensive happens until a specific film is picked. Four films
+// share the title "Parasite", so picking for the user would be wrong often
+// enough to matter.
+//
+// The watchlist is searched first, locally and instantly, because a film
+// already tracked has better data stored than any live lookup would return
+// — and that costs no request at all.
+
+const SEARCH_DEBOUNCE_MS = 250;
+const LOCAL_RESULT_CAP = 5;
+
+let searchDebounceTimer = null;
+// Responses can land out of order once someone types faster than the
+// network answers; only the newest query's results may render.
+let searchSequence = 0;
+let lastSearchResults = [];
+
+function searchWorker(path, body) {
+  return fetch(DATA.settings.refresh_worker_url + path, {
+    method: 'POST',
+    headers: {
+      'X-Trigger-Secret': DATA.settings.refresh_trigger_secret,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  }).then(response => response.json());
+}
+
+function localFilmMatches(query) {
+  const needle = query.toLowerCase();
+  const matches = [];
+  for (const [slug, film] of Object.entries(DATA.films_by_slug)) {
+    if (film.title.toLowerCase().includes(needle)) {
+      matches.push({ slug, film, onWatchlist: !isDiscoveryOnly(slug) });
+    }
+    if (matches.length >= LOCAL_RESULT_CAP * 3) break;
+  }
+  // A film actually on the watchlist outranks one only ever surfaced as a
+  // recommendation, and an earlier match outranks a mid-title one.
+  matches.sort((a, b) =>
+    (b.onWatchlist - a.onWatchlist) ||
+    (a.film.title.toLowerCase().indexOf(needle) - b.film.title.toLowerCase().indexOf(needle)) ||
+    a.film.title.localeCompare(b.film.title));
+  return matches.slice(0, LOCAL_RESULT_CAP);
+}
+
+function searchRowElement({ posterUrl, title, year, meta, badge, onPick }) {
+  const row = document.createElement('div');
+  row.className = 'search-row';
+  const poster = posterUrl
+    ? '<img class="search-row-poster" loading="lazy" src="' + escAttr(posterUrl) + '">'
+    : '<div class="search-row-poster"></div>';
+  row.innerHTML =
+    poster +
+    '<div class="search-row-body">' +
+      '<p class="search-row-title">' + esc(title) + (year ? ' <span class="muted">(' + year + ')</span>' : '') +
+        (badge ? '<span class="search-on-list">' + esc(badge) + '</span>' : '') + '</p>' +
+      (meta ? '<p class="search-row-meta">' + esc(meta) + '</p>' : '') +
+    '</div>';
+  row.addEventListener('click', onPick);
+  return row;
+}
+
+function renderSearchResults(query, localMatches, remote) {
+  const container = document.getElementById('searchResults');
+  container.innerHTML = '';
+
+  if (localMatches.length) {
+    const label = document.createElement('p');
+    label.className = 'search-section-label';
+    label.textContent = 'Already tracked';
+    container.appendChild(label);
+    localMatches.forEach(({ slug, film, onWatchlist }) => {
+      container.appendChild(searchRowElement({
+        posterUrl: film.poster_url, title: film.title, year: film.year,
+        meta: film.director, badge: onWatchlist ? 'On your watchlist' : 'Recommended',
+        // Stored data, already classified — no lookup needed.
+        onPick: () => showSearchDetail(film, { alreadyTracked: true }),
+      }));
+    });
+  }
+
+  const label = document.createElement('p');
+  label.className = 'search-section-label';
+  label.textContent = 'Everything else on Letterboxd';
+  container.appendChild(label);
+
+  if (remote === 'loading') {
+    const status = document.createElement('p');
+    status.className = 'search-status';
+    status.textContent = 'Searching…';
+    container.appendChild(status);
+    return;
+  }
+  if (remote === 'error') {
+    const status = document.createElement('p');
+    status.className = 'search-status';
+    status.textContent = "Couldn't reach the search service just now.";
+    container.appendChild(status);
+    return;
+  }
+  // A film listed above as tracked shouldn't also appear down here as
+  // something to look up — it's the same film, and the stored copy is the
+  // better one. Title and year are the only identity the two lists share
+  // (one is keyed by Letterboxd slug, the other by TMDB id), which is the
+  // same match similar.py makes for the same reason.
+  const trackedKeys = new Set(localMatches.map(m => searchIdentity(m.film.title, m.film.year)));
+  const fresh = remote.filter(row => !trackedKeys.has(searchIdentity(row.title, row.year)));
+
+  if (!fresh.length) {
+    const status = document.createElement('p');
+    status.className = 'search-status';
+    status.textContent = localMatches.length
+      ? 'Nothing else — every match is already tracked above.'
+      : 'No films found for "' + query + '".';
+    container.appendChild(status);
+    return;
+  }
+
+  fresh.forEach(row => {
+    container.appendChild(searchRowElement({
+      posterUrl: row.poster_url, title: row.title, year: row.year,
+      // Year and director are what actually separate two films sharing a
+      // title, so they carry the row rather than the synopsis.
+      meta: row.director,
+      onPick: () => lookUpSearchResult(row),
+    }));
+  });
+}
+
+function searchIdentity(title, year) {
+  return (title || '').toLowerCase().replace(/[^a-z0-9]/g, '') + '|' + (year || '');
+}
+
+function runSearch(query) {
+  const sequence = ++searchSequence;
+  const localMatches = localFilmMatches(query);
+  renderSearchResults(query, localMatches, 'loading');
+
+  searchWorker('/search-films', { query })
+    .then(body => {
+      if (sequence !== searchSequence) return;  // a newer query has since run
+      if (!body || !body.ok) {
+        renderSearchResults(query, localMatches, 'error');
+        if (body && body.error) showToast('Search failed: ' + body.error);
+        return;
+      }
+      lastSearchResults = body.results || [];
+      renderSearchResults(query, localMatches, lastSearchResults);
+    })
+    .catch(() => {
+      if (sequence !== searchSequence) return;
+      renderSearchResults(query, localMatches, 'error');
+    });
+}
+
+function lookUpSearchResult(row) {
+  showSearchDetailPanel();
+  const content = document.getElementById('searchDetailContent');
+  content.innerHTML = '<p class="search-status">Looking up ' + esc(row.title) + '…</p>';
+
+  searchWorker('/film-lookup', {
+    tmdb_id: row.tmdb_id,
+    title: row.title,
+    year: row.year,
+    countries: DATA.search_taxonomy.justwatch_countries,
+  })
+    .then(body => {
+      if (!body || !body.ok) throw new Error((body && body.error) || 'lookup failed');
+      showSearchDetail(buildSearchedFilm(row, body), {
+        alreadyTracked: false,
+        letterboxdFailed: !(body.letterboxd && body.letterboxd.ok),
+      });
+    })
+    .catch(() => {
+      content.innerHTML = '<p class="search-status">Couldn\\'t look that film up just now.</p>';
+    });
+}
+
+function showSearchDetail(film, { alreadyTracked, letterboxdFailed }) {
+  showSearchDetailPanel();
+  const content = document.getElementById('searchDetailContent');
+  content.innerHTML = '';
+  content.appendChild(buildFilmDetailCard(film, null, null));
+
+  const notes = [];
+  if (!alreadyTracked) {
+    notes.push({ text: 'Not on your watchlist — this was looked up live.', warn: false });
+  }
+  if (letterboxdFailed) {
+    notes.push({ text: "Letterboxd details couldn't be read, so the rating and cast are missing.", warn: true });
+  }
+  // An empty offer list means two very different things, and they must not
+  // read the same: the card already says "not available anywhere tracked",
+  // which would be a lie when the check itself failed.
+  if (film.offers_unavailable) {
+    notes.push({ text: "Streaming availability couldn't be checked just now — try again in a moment.", warn: true });
+  }
+  notes.forEach(note => {
+    const el = document.createElement('p');
+    el.className = 'search-note' + (note.warn ? ' search-note-warn' : '');
+    el.textContent = note.text;
+    content.appendChild(el);
+  });
+}
+
+function showSearchDetailPanel() {
+  document.getElementById('searchPanel').hidden = true;
+  document.getElementById('searchDetailPanel').hidden = false;
+}
+
+function showSearchResultsPanel() {
+  document.getElementById('searchDetailPanel').hidden = true;
+  document.getElementById('searchPanel').hidden = false;
+}
+
+function openFilmSearch() {
+  document.getElementById('searchOverlay').classList.add('active');
+  showSearchResultsPanel();
+  const input = document.getElementById('filmSearchInput');
+  input.focus();
+  input.select();
+}
+
+function closeFilmSearch() {
+  document.getElementById('searchOverlay').classList.remove('active');
+}
+
+document.getElementById('filmSearchBtn').addEventListener('click', openFilmSearch);
+document.getElementById('filmSearchBtnMobile').addEventListener('click', openFilmSearch);
+document.getElementById('searchClose').addEventListener('click', closeFilmSearch);
+document.getElementById('searchBackBtn').addEventListener('click', showSearchResultsPanel);
+document.getElementById('searchOverlay').addEventListener('click', event => {
+  if (event.target.id === 'searchOverlay') closeFilmSearch();
+});
+
+document.getElementById('filmSearchInput').addEventListener('input', event => {
+  const query = event.target.value.trim();
+  clearTimeout(searchDebounceTimer);
+  if (query.length < 2) {
+    // Nothing useful to search on yet, and it saves a request per keystroke
+    // at the start of every single search.
+    searchSequence++;
+    document.getElementById('searchResults').innerHTML = '';
+    return;
+  }
+  searchDebounceTimer = setTimeout(() => runSearch(query), SEARCH_DEBOUNCE_MS);
+});
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    closeFilmSearch();
+    return;
+  }
+  // "/" is the usual shortcut, but only when it isn't being typed into
+  // something — the Films tab's own filter box is a text input too.
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if ((event.key === '/' && !typing) || (event.key === 'k' && (event.metaKey || event.ctrlKey))) {
+    event.preventDefault();
+    openFilmSearch();
+  }
 });
 
 // ---------- Films cards ----------

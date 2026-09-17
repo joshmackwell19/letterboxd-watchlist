@@ -18,12 +18,19 @@ Dashboard UI writes (Settings save / dismiss / Review tab)
         │
         ▼
 Cloudflare Worker (worker/) ──► GitHub Actions workflow_dispatch ──► main.py (one-off flag) ──► Postgres
+
+Dashboard quick search (any film on Letterboxd, watchlisted or not)
+        │
+        ▼
+Cloudflare Worker (worker/) ──► TMDB + Letterboxd + JustWatch, live ──► rendered client-side
 ```
 
 `main.py`'s `run()` is the only thing that scrapes or writes most of
 Postgres. Everything downstream of the database (the dashboard itself, the
 Worker) only ever reads it or makes small, targeted writes to specific
-tables — never a full rescan.
+tables — never a full rescan. Quick search is the one path that touches the
+database not at all: it reads live and renders, storing nothing, so a
+searched film leaves no trace and costs no Neon quota.
 
 ## Source layout (`src/watchlist_justwatch/`)
 
@@ -40,7 +47,7 @@ tables — never a full rescan.
 | `diff.py` | Classifies what's new since yesterday (`have`/`free_tier`/`new_possible`/new films/unmatched) for the daily email |
 | `similar.py` | TMDB-correlated discovery (`because_you_watched`, by director/cast/genre, hidden gems, popular, rewatch) |
 | `cinemas.py` | Scrapes showtimes for 4 London cinemas (Prince Charles, Barbican, Vue Fulham Broadway, Riverside Studios) — one fetcher per venue, each a different mechanism (plain HTML, a JSON API, an opaque-token AJAX endpoint); `match_watchlist_film` fuzzy-matches a listing against the watchlist by title |
-| `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file) |
+| `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file); `_search_taxonomy` is what lets the page classify a *searched* film's offers without duplicating `brands.py`/`config.py` in JS |
 | `report.py` / `html_email.py` / `weekly_digest.py` | Email rendering (plain text / HTML / the Friday digest) |
 | `notify.py` | Resend API wrapper |
 | `analysis.py` | `--rank-services`/`--recommend-favorites` standalone analyses |

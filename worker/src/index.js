@@ -675,6 +675,15 @@ export default {
       });
     }
 
+    // Anything else is a mistake, and must not fall through to the daily
+    // run below — a typo'd path, or a request sent to an endpoint this
+    // Worker hasn't been redeployed with yet, used to silently kick off a
+    // full scrape-and-deploy pipeline and answer as if it had done what was
+    // asked. Unknown paths say so instead.
+    if (url.pathname !== "/") {
+      return jsonResponse({ ok: false, error: `unknown endpoint: ${url.pathname}` }, 404, cors);
+    }
+
     // Base route ("Refresh data" button) — this one genuinely does need a
     // fresh scrape, so it's the one case that still targets daily.yml.
     const ghResponse = await triggerWorkflow("daily.yml");

@@ -113,6 +113,152 @@ export default {
 
     const url = new URL(request.url);
 
+    // ---- TEMPORARY (quick-search Phase 0 spike) — delete once answered ----
+    //
+    // The quick-search feature needs this Worker to read a Letterboxd film
+    // page live (the JSON-LD block on /film/<slug>/ carries rating, poster,
+    // director, cast, genre, runtime, synopsis in one request, and
+    // /tmdb/<id>/ redirects straight to it — see letterboxd.py's
+    // get_film_details_by_tmdb_id, which does exactly this from Python).
+    //
+    // From an ordinary host that already works with no browser impersonation
+    // at all. The open question is the CLOUDFLARE EDGE: letterboxd.com
+    // is itself behind Cloudflare, and its /search/ and /s/autocompletefilm
+    // paths already serve a "Just a moment..." JS challenge to non-browser
+    // clients. This reports what the edge actually gets back, with and
+    // without a browser User-Agent, so the decision isn't a guess.
+    if (url.pathname === "/_probe-letterboxd") {
+      const BROWSER_UA =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+      // indexOf-sliced rather than regex-matched: the film page is ~330KB
+      // and the Workers free plan allows 10ms CPU per invocation, so the
+      // real lookup endpoint will need to extract this cheaply too — this
+      // doubles as a check that that approach is viable.
+      function readJsonLd(html) {
+        const open = html.indexOf('<script type="application/ld+json">');
+        if (open === -1) return { found: false };
+        const start = open + '<script type="application/ld+json">'.length;
+        const end = html.indexOf("</script>", start);
+        if (end === -1) return { found: false };
+        const raw = html
+          .slice(start, end)
+          .replace("/* <![CDATA[ */", "")
+          .replace("/* ]]> */", "")
+          .trim();
+        try {
+          const data = JSON.parse(raw);
+          return {
+            found: true,
+            name: data.name,
+            rating: data.aggregateRating ? data.aggregateRating.ratingValue : null,
+            ratingCount: data.aggregateRating ? data.aggregateRating.ratingCount : null,
+            duration: data.duration,
+            directors: (data.director || []).map((d) => d.name),
+            posterUrl: data.image,
+          };
+        } catch (err) {
+          return { found: true, parseError: String(err).slice(0, 200) };
+        }
+      }
+
+      async function probeLetterboxd(label, target, useBrowserUa) {
+        const started = Date.now();
+        try {
+          const resp = await fetch(target, {
+            headers: useBrowserUa ? { "User-Agent": BROWSER_UA } : {},
+            redirect: "follow",
+          });
+          const html = await resp.text();
+          const elapsedMs = Date.now() - started;
+          // Cloudflare's managed challenge interstitial is the failure mode
+          // that actually matters here — it answers 403 with a tiny HTML
+          // page titled "Just a moment...", not a normal error.
+          const challenged = html.includes("Just a moment...") || html.includes("cf-browser-verification");
+          return {
+            label,
+            url: target,
+            browserUa: Boolean(useBrowserUa),
+            status: resp.status,
+            finalUrl: resp.url,
+            slug: (resp.url.match(/\/film\/([^/]+)\//) || [])[1] || null,
+            bytes: html.length,
+            elapsedMs,
+            challenged,
+            jsonLd: challenged ? null : readJsonLd(html),
+          };
+        } catch (err) {
+          return { label, url: target, browserUa: Boolean(useBrowserUa), error: String(err).slice(0, 300) };
+        }
+      }
+
+      // JustWatch's GraphQL API needs no auth and no key (verified from an
+      // ordinary host); this confirms the edge can reach it too, since the
+      // real lookup endpoint depends on it for offers.
+      async function probeJustWatch() {
+        const started = Date.now();
+        const query = `query Search($filter: TitleFilter!, $country: Country!, $language: Language!, $first: Int!) {
+  popularTitles(country: $country, filter: $filter, first: $first) {
+    edges { node { id content(country: $country, language: $language) {
+      title originalReleaseYear externalIds { tmdbId } } } }
+  }
+}`;
+        try {
+          const resp = await fetch("https://apis.justwatch.com/graphql", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              operationName: "Search",
+              variables: {
+                filter: { searchQuery: "Parasite", objectTypes: ["MOVIE"] },
+                country: "GB",
+                language: "en",
+                first: 3,
+              },
+              query,
+            }),
+          });
+          const body = await resp.json();
+          const edges = ((body.data || {}).popularTitles || {}).edges || [];
+          return {
+            label: "justwatch-search",
+            status: resp.status,
+            elapsedMs: Date.now() - started,
+            errors: body.errors ? JSON.stringify(body.errors).slice(0, 300) : null,
+            results: edges.map((e) => ({
+              id: e.node.id,
+              title: e.node.content.title,
+              year: e.node.content.originalReleaseYear,
+              tmdbId: e.node.content.externalIds.tmdbId,
+            })),
+          };
+        } catch (err) {
+          return { label: "justwatch-search", error: String(err).slice(0, 300) };
+        }
+      }
+
+      const results = await Promise.all([
+        // The path the real lookup would use: TMDB id -> slug + details.
+        probeLetterboxd("tmdb-redirect (worker UA)", "https://letterboxd.com/tmdb/496243/", false),
+        probeLetterboxd("tmdb-redirect (browser UA)", "https://letterboxd.com/tmdb/496243/", true),
+        // Direct film page, to separate "the redirect is blocked" from
+        // "film pages are blocked".
+        probeLetterboxd("film page (worker UA)", "https://letterboxd.com/film/parasite-2019/", false),
+        probeLetterboxd("film page (browser UA)", "https://letterboxd.com/film/parasite-2019/", true),
+        // Known-blocked from an ordinary host — included as a control, so a
+        // clean result above can't be mistaken for "nothing is challenged".
+        probeLetterboxd("search page (control, expected 403)", "https://letterboxd.com/search/films/parasite/", true),
+        probeJustWatch(),
+      ]);
+
+      return new Response(JSON.stringify({ ok: true, results }, null, 2), {
+        status: 200,
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+    // ---- end TEMPORARY quick-search Phase 0 spike ----
+
     if (url.pathname === "/update-services") {
       let payload;
       try {

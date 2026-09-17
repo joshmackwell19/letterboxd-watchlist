@@ -36,8 +36,11 @@ def test_only_clear_names_that_canonicalize_differently_are_stored():
     taxonomy = _taxonomy(_offer("Netflix Standard with Ads", "GB"), _offer("Netflix", "GB"))
 
     # The ad tier needs a lookup; the plain name is what the page's own
-    # fallback already produces, so storing it would bloat every page load.
-    assert taxonomy["brand_by_clear_name"] == {"Netflix Standard with Ads": "Netflix"}
+    # fallback already produces, so storing it would bloat every page load
+    # to say nothing.
+    assert taxonomy["brand_by_clear_name"]["Netflix Standard with Ads"] == "Netflix"
+    assert "Netflix" not in taxonomy["brand_by_clear_name"]
+    assert not any(clear_name == brand for clear_name, brand in taxonomy["brand_by_clear_name"].items())
 
 
 def test_global_subscription_is_have_everywhere_not_per_country():
@@ -152,3 +155,18 @@ def test_subscription_with_nothing_on_it_today_is_still_have():
     assert "BBC iPlayer" in taxonomy["have_brands_by_country"]["GB"]
     assert "Stan" in taxonomy["have_brands_by_country"]["AU"]
     assert _classify_from_taxonomy(taxonomy, "BBC iPlayer", "GB", {"FLATRATE"}) == "have"
+
+
+def test_variants_of_a_service_you_have_resolve_without_the_corpus():
+    # The corpus supplies the variant names a service turns up under, so a
+    # variant it hasn't happened to see would read as a service of its own —
+    # i.e. "subscribe to this" for something already paid for, which is the
+    # expensive way to be wrong. The qualifiers are known, so the variants of
+    # a configured service don't have to be waited for.
+    taxonomy = _taxonomy(_offer("Some Unrelated Service", "GB"))
+
+    assert taxonomy["brand_by_clear_name"]["Netflix Standard with Ads"] == "Netflix"
+    assert taxonomy["brand_by_clear_name"]["MUBI Amazon Channel"] == "MUBI"
+    assert taxonomy["brand_by_clear_name"]["BBC iPlayer Premium"] == "BBC iPlayer"
+    assert _classify_from_taxonomy(taxonomy, "Netflix Standard with Ads", "US", {"FLATRATE"}) == "have"
+    assert _classify_from_taxonomy(taxonomy, "MUBI Amazon Channel", "DE", {"FLATRATE"}) == "have"

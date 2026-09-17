@@ -3,7 +3,13 @@ import json
 from collections import defaultdict
 from datetime import date, datetime
 
-from .brands import JUNK_BRANDS, canonical_brand_name, group_offers_by_brand_and_country, is_major_brand
+from .brands import (
+    JUNK_BRANDS,
+    KNOWN_VARIANT_SUFFIXES,
+    canonical_brand_name,
+    group_offers_by_brand_and_country,
+    is_major_brand,
+)
 from .cinemas import match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
@@ -673,11 +679,25 @@ def _search_taxonomy(
     # there would read as one more service to pay for. The config *is* the
     # list of services Josh has, so it seeds the universe too — canonicalized
     # on the way in, since that's the form the page looks brands up by.
-    brands.update(canonical_brand_name(name) for name in global_subscriptions)
-    brands.update(revisitable)
+    configured_brands = {canonical_brand_name(name) for name in global_subscriptions}
+    configured_brands.update(revisitable)
     for country_config in config.values():
-        brands.update(canonical_brand_name(name)
-                      for name in country_config.subscriptions + country_config.free_tier)
+        configured_brands.update(canonical_brand_name(name)
+                                 for name in country_config.subscriptions + country_config.free_tier)
+    brands.update(configured_brands)
+
+    # Same problem one level down: the corpus supplies the *variant* names a
+    # service appears under ("Amazon Prime Video with Ads", "MUBI Amazon
+    # Channel"), and a variant missing from it falls back to being read as a
+    # service of its own — which reads as "subscribe to this" for something
+    # already paid for, the most expensive way to be wrong here. The
+    # qualifiers are known (brands.py strips exactly these), so the variants
+    # of a service Josh has can be written down rather than waited for.
+    # Only those services: for anything else the fallback costs a tidier
+    # label at worst, never a wrong classification.
+    for brand in configured_brands:
+        for suffix in KNOWN_VARIANT_SUFFIXES:
+            brand_by_clear_name.setdefault(f"{brand} {suffix}", brand)
 
     # Split global from per-country because a searched film turns up offers in
     # all ~124 JustWatch countries, not just the three configured here: a

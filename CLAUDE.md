@@ -81,8 +81,9 @@ ran).
 
 `letterboxd-refresh-trigger` — the dashboard's only write path, holding the
 real GitHub PAT server-side so the public page never sees it. Deployed via
-`deploy-worker.yml` on push (see above); its two secrets (`GITHUB_TOKEN`,
-`TRIGGER_SECRET`) live on Cloudflare's side and aren't in `wrangler.toml`.
+`deploy-worker.yml` on push (see above); its secrets (`GITHUB_TOKEN`,
+`TRIGGER_SECRET`, and `TMDB_API_KEY` for quick search) live on
+Cloudflare's side and aren't in `wrangler.toml`.
 
 | Endpoint | Does |
 |---|---|
@@ -90,6 +91,19 @@ real GitHub PAT server-side so the public page never sees it. Deployed via
 | `POST /update-services` | Commits `config/services.yaml`, triggers `regenerate-dashboard.yml` |
 | `POST /dismiss-recommendation` | Commits `config/dismissed_recommendations.yaml`, triggers `regenerate-dashboard.yml` |
 | `POST /tag-film` | Takes `{decisions: [{slug, status}]}` (a debounce-batched set from the Review tab), triggers `regenerate-dashboard.yml` with them |
+| `POST /search-films` | Quick search, step 1: TMDB title search (+ a parallel credits call per row for the director) returning the picker list |
+| `POST /film-lookup` | Quick search, step 2: for the picked film, Letterboxd details via `/tmdb/<id>/` and JustWatch offers for every country the page sends |
+
+Anything else 404s. The base route used to be a catch-all, so a typo or a
+call to an endpoint the deployed Worker didn't have yet silently kicked off
+a full `daily.yml` run and answered as if it had worked.
+
+The two quick-search endpoints are the only ones that touch neither GitHub
+nor the database — they read live data and return it, and deliberately
+don't classify anything. Turning raw JustWatch offers into have/free_tier/
+could_get_again/subscription badges stays in Python (`brands.py` +
+`config.py`), reaching the page as a lookup table rather than as logic
+reimplemented in JS.
 
 ## `main.py` CLI flags
 

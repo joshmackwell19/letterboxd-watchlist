@@ -81,6 +81,7 @@ const TMDB_BASE_URL = "https://api.themoviedb.org/3";
 // the full-size poster on the card comes from Letterboxd instead.
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w154";
 const JUSTWATCH_GRAPHQL_URL = "https://apis.justwatch.com/graphql";
+const JUSTWATCH_RETRY_DELAY_MS = 600;
 
 // Enough rows to cover the same-title collisions this exists for (TMDB
 // knows four films called "Parasite") without turning the picker into a
@@ -213,16 +214,33 @@ async function fetchLetterboxdFilm(tmdbId) {
   }
 }
 
+// One retry, for the same reason justwatch_client._with_retry exists: this
+// API rate-limits (a burst of lookups earns a 429) and times out
+// occasionally, and here a failed call would otherwise surface as a film
+// with no availability — indistinguishable to a reader from one that
+// genuinely isn't streaming anywhere. Just the one, and a short wait:
+// someone is watching a spinner, so a Python-style five-attempt backoff
+// would be worse than admitting defeat. Waiting is I/O, not CPU, so it
+// doesn't count against the Workers CPU budget.
 async function justWatchGraphql(operationName, query, variables) {
-  const resp = await fetch(JUSTWATCH_GRAPHQL_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ operationName, query, variables }),
-  });
-  if (!resp.ok) throw new Error(`JustWatch GraphQL returned HTTP ${resp.status}`);
-  const body = await resp.json();
-  if (body.errors) throw new Error(`JustWatch GraphQL error: ${JSON.stringify(body.errors).slice(0, 200)}`);
-  return body.data;
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, JUSTWATCH_RETRY_DELAY_MS));
+    try {
+      const resp = await fetch(JUSTWATCH_GRAPHQL_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operationName, query, variables }),
+      });
+      if (!resp.ok) throw new Error(`JustWatch GraphQL returned HTTP ${resp.status}`);
+      const body = await resp.json();
+      if (body.errors) throw new Error(`JustWatch GraphQL error: ${JSON.stringify(body.errors).slice(0, 200)}`);
+      return body.data;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
 }
 
 const JUSTWATCH_SEARCH_QUERY = `
@@ -292,6 +310,10 @@ fragment O on Offer {
 }`;
 }
 
+// Returns { matched, confidence, offers, error? }. The error field is the
+// difference between "JustWatch has nothing for this film" and "JustWatch
+// couldn't be asked" — an empty offers list means the former only when no
+// error rides along, and the page has to say so differently in each case.
 async function fetchJustWatchOffers(title, year, tmdbId, countries) {
   if (!title) return { matched: false, confidence: "unmatched", offers: [] };
 

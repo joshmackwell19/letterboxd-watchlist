@@ -164,6 +164,11 @@ function parseFilmJsonLd(html) {
   const directors = (data.director || []).map((p) => p.name).filter(Boolean);
 
   return {
+    // Letterboxd's own title for the film that TMDB id actually resolved to
+    // — the caller supplied a title too, and the two disagreeing means they
+    // aren't talking about the same film (see the cross-check in
+    // /film-lookup).
+    title: data.name || null,
     rating: aggregate.ratingValue != null ? Number(aggregate.ratingValue) : null,
     rating_count: aggregate.ratingCount != null ? Number(aggregate.ratingCount) : null,
     poster_url: data.image || null,
@@ -502,7 +507,31 @@ export default {
         fetchJustWatchOffers(title, year, tmdbId, countries),
       ]);
 
-      return jsonResponse({ ok: true, tmdb_id: tmdbId, letterboxd, justwatch }, 200, cors);
+      // Running those two in parallel means the JustWatch half is searched
+      // by the title the caller sent rather than the one the TMDB id really
+      // resolves to, and a caller that sends a title and an id belonging to
+      // different films would get one film's details next to another film's
+      // offers. A tmdb_exact match can't drift that way — it is anchored to
+      // the same id the Letterboxd page came from — but a title-based match
+      // is only ever as good as the title it was handed, so it has to agree
+      // with what Letterboxd resolved. Dropping the offers (rather than
+      // trusting them) keeps the response about one film, which is the same
+      // call pickJustWatchMatch makes about weak matches.
+      let offers = justwatch;
+      if (
+        letterboxd.ok && letterboxd.title &&
+        justwatch.matched && justwatch.confidence !== "tmdb_exact" &&
+        normalizeTitle(letterboxd.title) !== normalizeTitle(title)
+      ) {
+        offers = {
+          matched: false,
+          confidence: "unmatched",
+          offers: [],
+          error: `title mismatch: TMDB id ${tmdbId} is "${letterboxd.title}" on Letterboxd, not "${title}"`,
+        };
+      }
+
+      return jsonResponse({ ok: true, tmdb_id: tmdbId, letterboxd, justwatch: offers }, 200, cors);
     }
 
     if (url.pathname === "/update-services") {

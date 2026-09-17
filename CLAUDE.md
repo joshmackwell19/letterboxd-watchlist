@@ -155,7 +155,9 @@ pytest
 ```
 
 Covers the pure classification/section-building logic (`config.py`,
-`diff.py`, `languages.py`, `dashboard.py`'s home-section builders) — not an
+`diff.py`, `languages.py`, `dashboard.py`'s home-section builders and its
+`_search_taxonomy` — that one checks the table the page classifies searched
+films from still agrees with `_classify` itself) — not an
 integration suite against a real database, which would need a Postgres
 fixture and is a bigger lift for less immediate value than covering the
 logic most likely to silently regress.

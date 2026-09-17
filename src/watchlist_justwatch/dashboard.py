@@ -3,11 +3,11 @@ import json
 from collections import defaultdict
 from datetime import date, datetime
 
-from .brands import canonical_brand_name, group_offers_by_brand_and_country, is_major_brand
+from .brands import JUNK_BRANDS, canonical_brand_name, group_offers_by_brand_and_country, is_major_brand
 from .cinemas import match_watchlist_film
-from .config import CountryConfig, is_have_anywhere
-from .countries import country_name
-from .languages import is_subtitled, language_name
+from .config import CountryConfig, is_have_anywhere, service_matches
+from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
+from .languages import LANGUAGE_NAMES, is_subtitled, language_name
 from .state import StateDoc
 
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
@@ -625,6 +625,92 @@ def _settings_data(config: dict[str, CountryConfig], global_subscriptions: list[
     }
 
 
+
+def _search_taxonomy(
+    state: StateDoc, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
+) -> dict:
+    """Everything the page needs to classify a *searched* film's offers the
+    same way this module classifies a watchlist film's.
+
+    Quick search gets its offers live from the Worker, raw from JustWatch and
+    deliberately unclassified (see worker/src/index.js), because the
+    have/free/could_get_again/subscription taxonomy is real logic —
+    brands.py's suffix stripping and aliasing, config.py's fuzzy service
+    matching, _classify's precedence — and a JS reimplementation of it would
+    drift silently, with no test on that side to catch it.
+
+    So this ships the *answers* instead of the rules. Every lookup below is
+    computed here by the same functions the rest of the dashboard uses, over
+    every service name the corpus has actually seen, leaving the page with
+    set membership and no string logic at all.
+
+    The fallback for a service that isn't in the corpus (a small regional
+    one, on some film nobody has watchlisted) is to treat its name as its own
+    brand and classify it from its monetization type. That's the right answer
+    for a service you don't subscribe to, and every service you *do* is here
+    by construction — so the degradation is invisible in practice, and heals
+    on the next run that sees the name.
+    """
+    # Only variants worth a lookup: a clear name that canonicalizes to itself
+    # is exactly what the page's fallback already does, so storing it would
+    # add weight to every page load to say nothing. What's left is the ad
+    # tiers and channel bundles ("Paramount Plus Basic with Ads" ->
+    # "Paramount Plus"), which the page can't work out on its own.
+    brand_by_clear_name: dict[str, str] = {}
+    brands: set[str] = set()
+    for film in state.films.values():
+        for offer in film.offers:
+            clear_name = offer.package_clear_name
+            brand = canonical_brand_name(clear_name)
+            brands.add(brand)
+            if brand != clear_name:
+                brand_by_clear_name[clear_name] = brand
+
+    # The corpus alone isn't enough to answer "do I have this?". It only
+    # contains services some watchlist film currently happens to stream on,
+    # so a subscription with nothing on it today (or nothing in that country)
+    # would be missing from the lists below, and a searched film streaming
+    # there would read as one more service to pay for. The config *is* the
+    # list of services Josh has, so it seeds the universe too — canonicalized
+    # on the way in, since that's the form the page looks brands up by.
+    brands.update(canonical_brand_name(name) for name in global_subscriptions)
+    brands.update(revisitable)
+    for country_config in config.values():
+        brands.update(canonical_brand_name(name)
+                      for name in country_config.subscriptions + country_config.free_tier)
+
+    # Split global from per-country because a searched film turns up offers in
+    # all ~124 JustWatch countries, not just the three configured here: a
+    # VPN-portable subscription is "have" in every one of them, while
+    # everything else only counts in its own country. Matches
+    # is_have_anywhere's own two halves.
+    have_brands_global = sorted(
+        brand for brand in brands
+        if any(service_matches(name, brand) for name in global_subscriptions)
+    )
+    have_brands_by_country = {
+        code: sorted(
+            brand for brand in brands
+            if is_have_anywhere(brand, code, config, global_subscriptions)
+            and brand not in set(have_brands_global)
+        )
+        for code in sorted(config)
+    }
+
+    return {
+        "brand_by_clear_name": brand_by_clear_name,
+        "have_brands_global": have_brands_global,
+        "have_brands_by_country": {k: v for k, v in have_brands_by_country.items() if v},
+        "revisitable_brands": sorted(revisitable),
+        # Lowercased, the way is_junk_brand compares them.
+        "junk_brands": sorted(JUNK_BRANDS),
+        "language_names": LANGUAGE_NAMES,
+        # The page hands this to the Worker rather than the Worker keeping a
+        # second copy of countries.py's list to fall out of step with.
+        "justwatch_countries": sorted(ALL_JUSTWATCH_COUNTRIES),
+    }
+
+
 def _cinema_listings(state: StateDoc) -> list[dict]:
     """One row per film for the full Cinemas tab — a matched watchlist
     film showing at several of the four cinemas merges into a single row
@@ -737,6 +823,7 @@ def build_dashboard_data(
         "sarah_films": sarah_films,
         "cinemas": _cinema_listings(state),
         "settings": _settings_data(config, global_subscriptions),
+        "search_taxonomy": _search_taxonomy(state, config, global_subscriptions, revisitable),
     }
 
 
@@ -2474,6 +2561,114 @@ function handleSurpriseMeClick() {
 }
 document.getElementById('surpriseMeBtnDesktop').addEventListener('click', handleSurpriseMeClick);
 document.getElementById('surpriseMeBtnMobile').addEventListener('click', handleSurpriseMeClick);
+
+// ---------- Quick search: classifying a searched film's offers ----------
+//
+// A watchlist film arrives with its offers already classified by
+// _all_offers_for_film; a searched one arrives raw from the Worker, because
+// the Worker has no business knowing what Josh subscribes to and a JS
+// reimplementation of brands.py/config.py would drift with nothing to catch
+// it. What follows is the same shape-building as _all_offers_for_film, but
+// every judgement in it is a lookup into the table dashboard.py computed
+// with the real Python functions (see _search_taxonomy) — no name
+// normalization, no fuzzy matching, no precedence rules of its own.
+
+// Mirrors _MONETIZATION_PRIORITY: when one service in one country has
+// several qualifying offers, the most watchable one supplies the link.
+const MONETIZATION_PRIORITY = { FLATRATE: 0, FREE: 1, ADS: 2 };
+
+function searchTaxonomySets() {
+  const taxonomy = DATA.search_taxonomy;
+  return {
+    brands: taxonomy.brand_by_clear_name,
+    // A service name the corpus has never seen isn't one on Josh's own
+    // config, so falling back to the raw name and its monetization type
+    // lands on the right answer anyway.
+    globalHave: new Set(taxonomy.have_brands_global),
+    countryHave: taxonomy.have_brands_by_country,
+    revisitable: new Set(taxonomy.revisitable_brands),
+    junk: new Set(taxonomy.junk_brands),
+  };
+}
+
+function classifySearchOffers(rawOffers) {
+  const sets = searchTaxonomySets();
+  const grouped = new Map();
+
+  rawOffers.forEach(offer => {
+    const brand = sets.brands[offer.clear_name] || offer.clear_name;
+    // Dropped outright, exactly as group_offers_by_brand_and_country does —
+    // JustWatch's own aggregator placeholder isn't a service anyone watches.
+    if (sets.junk.has(brand.toLowerCase())) return;
+
+    const key = brand + '|' + offer.country;
+    let entry = grouped.get(key);
+    if (!entry) {
+      entry = { brand, country: offer.country, monetizations: new Set(), available_to: null, url: null, urlRank: 99 };
+      grouped.set(key, entry);
+    }
+    entry.monetizations.add(offer.monetization_type);
+    if (offer.available_to && (!entry.available_to || offer.available_to < entry.available_to)) {
+      entry.available_to = offer.available_to;
+    }
+    const rank = MONETIZATION_PRIORITY[offer.monetization_type];
+    if (offer.url && (rank === undefined ? 9 : rank) < entry.urlRank) {
+      entry.url = offer.url;
+      entry.urlRank = rank === undefined ? 9 : rank;
+    }
+  });
+
+  // Same precedence as _classify: a service you have wins over one you could
+  // get again, which wins over free-vs-subscription.
+  return [...grouped.values()].map(entry => {
+    const countryHave = sets.countryHave[entry.country] || [];
+    let classification;
+    if (sets.globalHave.has(entry.brand) || countryHave.includes(entry.brand)) {
+      classification = 'have';
+    } else if (sets.revisitable.has(entry.brand)) {
+      classification = 'could_get_again';
+    } else if (entry.monetizations.has('FLATRATE')) {
+      classification = 'subscription';
+    } else {
+      classification = 'free';
+    }
+    return {
+      brand: entry.brand, country: entry.country, classification,
+      available_to: entry.available_to, url: entry.url,
+    };
+  });
+}
+
+// Assembles the films_by_slug-shaped object buildFilmDetailCard expects out
+// of the two halves a lookup returns: the picker's TMDB row (which is where
+// the language comes from — Letterboxd's own JSON-LD lists every language
+// heard in the film, not its primary one, see tmdb_client.original_language)
+// and the Worker's Letterboxd + JustWatch response. Letterboxd wins on
+// anything both carry, so a searched film reads exactly like a watchlist one.
+function buildSearchedFilm(row, lookup) {
+  const letterboxd = lookup.letterboxd && lookup.letterboxd.ok ? lookup.letterboxd : null;
+  const language = row.original_language || null;
+  return {
+    slug: letterboxd ? letterboxd.slug : null,
+    tmdb_id: row.tmdb_id,
+    title: (letterboxd && letterboxd.title) || row.title,
+    year: row.year,
+    rating: letterboxd ? letterboxd.rating : null,
+    poster_url: letterboxd ? letterboxd.poster_url : row.poster_url,
+    director: (letterboxd && letterboxd.director) || row.director,
+    starring: letterboxd ? letterboxd.starring : [],
+    synopsis: (letterboxd && letterboxd.synopsis) || row.overview,
+    genre: letterboxd ? letterboxd.genre : [],
+    runtime_minutes: letterboxd ? letterboxd.runtime_minutes : null,
+    language_name: language ? (DATA.search_taxonomy.language_names[language] || language) : null,
+    // Mirrors languages.is_subtitled.
+    is_subtitled: Boolean(language) && language !== 'en',
+    all_offers: classifySearchOffers(lookup.justwatch.offers),
+    // Distinguishes "JustWatch has nothing for this film" from "JustWatch
+    // couldn't be asked" — the two must not read the same on the card.
+    offers_unavailable: Boolean(lookup.justwatch.error),
+  };
+}
 
 // ---------- Film detail card (shared: quick look + service detail) ----------
 

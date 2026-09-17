@@ -74,6 +74,309 @@ const WATCH_TOGETHER_STATUSES = new Set(["confirmed", "declined"]);
 // going to be this large in one sitting.
 const MAX_BATCH_SIZE = 500;
 
+// ---------- Quick search helpers ----------
+
+const TMDB_BASE_URL = "https://api.themoviedb.org/3";
+// w154 is the smallest TMDB size that still looks right in the picker list;
+// the full-size poster on the card comes from Letterboxd instead.
+const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w154";
+const JUSTWATCH_GRAPHQL_URL = "https://apis.justwatch.com/graphql";
+const JUSTWATCH_RETRY_DELAY_MS = 600;
+
+// Enough rows to cover the same-title collisions this exists for (TMDB
+// knows four films called "Parasite") without turning the picker into a
+// list to scroll — and each row costs its own TMDB credits call.
+const SEARCH_RESULT_CAP = 6;
+const MAX_QUERY_LENGTH = 100;
+// A sanity bound on the country list the page sends, not a real limit —
+// countries.py currently tracks 124.
+const MAX_COUNTRIES = 200;
+// Keep in step with countries.py's QUALIFYING_MONETIZATION_TYPES: the
+// watchlist only ever counts subscription and free/ad-supported offers, so
+// rentals and purchases are filtered out by JustWatch itself rather than
+// fetched and discarded here (it cuts the response from ~190KB to ~60KB).
+const QUALIFYING_MONETIZATION_TYPES = ["FLATRATE", "ADS", "FREE"];
+// Mirrors letterboxd.py's MAX_STARRING.
+const MAX_STARRING = 5;
+
+const JSON_LD_OPEN_TAG = '<script type="application/ld+json">';
+const ISO_DURATION_RE = /^PT(?:(\d+)H)?(?:(\d+)M)?$/;
+
+function jsonResponse(body, status, cors) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+}
+
+function releaseYear(releaseDate) {
+  if (!releaseDate || releaseDate.length < 4) return null;
+  const year = Number(releaseDate.slice(0, 4));
+  return Number.isInteger(year) ? year : null;
+}
+
+async function tmdbGet(env, path, params) {
+  const target = new URL(TMDB_BASE_URL + path);
+  target.searchParams.set("api_key", env.TMDB_API_KEY);
+  Object.entries(params || {}).forEach(([key, value]) => target.searchParams.set(key, value));
+  const resp = await fetch(target.toString(), { headers: { Accept: "application/json" } });
+  if (!resp.ok) {
+    // Never include the URL in the message — it carries the API key.
+    throw new Error(`TMDB ${path} failed (HTTP ${resp.status})`);
+  }
+  return resp.json();
+}
+
+// schema.org's ISO-8601 duration, e.g. "PT2H13M" -> 133. Mirrors
+// letterboxd.py's _parse_duration_minutes.
+function parseDurationMinutes(duration) {
+  if (!duration) return null;
+  const match = ISO_DURATION_RE.exec(duration);
+  if (!match) return null;
+  const total = Number(match[1] || 0) * 60 + Number(match[2] || 0);
+  return total || null;
+}
+
+// Sliced out with indexOf rather than matched with a regex: the film page is
+// ~330KB and the Workers free plan allows 10ms CPU per invocation, so it's
+// worth not scanning the whole document. Mirrors letterboxd.py's
+// _film_details_from_json_ld field for field, so a searched film's card data
+// is shaped exactly like a watchlist film's.
+function parseFilmJsonLd(html) {
+  const open = html.indexOf(JSON_LD_OPEN_TAG);
+  if (open === -1) return null;
+  const start = open + JSON_LD_OPEN_TAG.length;
+  const end = html.indexOf("</script>", start);
+  if (end === -1) return null;
+
+  let data;
+  try {
+    data = JSON.parse(
+      html.slice(start, end).replace("/* <![CDATA[ */", "").replace("/* ]]> */", "").trim()
+    );
+  } catch {
+    return null;
+  }
+
+  const aggregate = data.aggregateRating || {};
+  // schema.org allows a single string for genre; Letterboxd emits a list for
+  // every film seen so far, but normalize rather than trust that.
+  const genre = typeof data.genre === "string" ? [data.genre] : data.genre || [];
+  const directors = (data.director || []).map((p) => p.name).filter(Boolean);
+
+  return {
+    // Letterboxd's own title for the film that TMDB id actually resolved to
+    // — the caller supplied a title too, and the two disagreeing means they
+    // aren't talking about the same film (see the cross-check in
+    // /film-lookup).
+    title: data.name || null,
+    rating: aggregate.ratingValue != null ? Number(aggregate.ratingValue) : null,
+    rating_count: aggregate.ratingCount != null ? Number(aggregate.ratingCount) : null,
+    poster_url: data.image || null,
+    // Joined, because that's the shape films_by_slug uses and the card reads.
+    director: directors.length ? directors.join(", ") : null,
+    starring: (data.actor || []).slice(0, MAX_STARRING).map((p) => p.name).filter(Boolean),
+    synopsis: data.description || null,
+    genre,
+    runtime_minutes: parseDurationMinutes(data.duration),
+  };
+}
+
+// Letterboxd redirects /tmdb/<id>/ straight to the matching /film/<slug>/,
+// so one request resolves both the slug and every detail the card needs —
+// the same trick letterboxd.py's get_film_details_by_tmdb_id uses.
+//
+// Fails soft: the card can still be rendered from the TMDB row the picker
+// already has, minus the Letterboxd rating. Letterboxd serves its /search/
+// paths behind a JS challenge, so it's worth reporting a challenge
+// distinctly from an ordinary failure if that ever spreads to film pages.
+async function fetchLetterboxdFilm(tmdbId) {
+  try {
+    const resp = await fetch(`https://letterboxd.com/tmdb/${tmdbId}/`, { redirect: "follow" });
+    if (!resp.ok) {
+      return { ok: false, status: resp.status, error: `Letterboxd returned HTTP ${resp.status}` };
+    }
+    const html = await resp.text();
+    if (html.includes("Just a moment...") || html.includes("cf-browser-verification")) {
+      return { ok: false, status: resp.status, challenged: true, error: "Letterboxd served a bot challenge" };
+    }
+    const slug = (resp.url.match(/\/film\/([^/]+)\//) || [])[1] || null;
+    if (!slug) {
+      return { ok: false, status: resp.status, error: "no Letterboxd film page for this TMDB id" };
+    }
+    const details = parseFilmJsonLd(html);
+    if (!details) {
+      return { ok: false, status: resp.status, slug, error: "could not read Letterboxd film details" };
+    }
+    return { ok: true, slug, url: resp.url, ...details };
+  } catch (err) {
+    return { ok: false, error: String(err).slice(0, 300) };
+  }
+}
+
+// One retry, for the same reason justwatch_client._with_retry exists: this
+// API rate-limits (a burst of lookups earns a 429) and times out
+// occasionally, and here a failed call would otherwise surface as a film
+// with no availability — indistinguishable to a reader from one that
+// genuinely isn't streaming anywhere. Just the one, and a short wait:
+// someone is watching a spinner, so a Python-style five-attempt backoff
+// would be worse than admitting defeat. Waiting is I/O, not CPU, so it
+// doesn't count against the Workers CPU budget.
+async function justWatchGraphql(operationName, query, variables) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, JUSTWATCH_RETRY_DELAY_MS));
+    try {
+      const resp = await fetch(JUSTWATCH_GRAPHQL_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operationName, query, variables }),
+      });
+      if (!resp.ok) throw new Error(`JustWatch GraphQL returned HTTP ${resp.status}`);
+      const body = await resp.json();
+      if (body.errors) throw new Error(`JustWatch GraphQL error: ${JSON.stringify(body.errors).slice(0, 200)}`);
+      return body.data;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
+const JUSTWATCH_SEARCH_QUERY = `
+query SearchTitles($filter: TitleFilter!, $country: Country!, $language: Language!, $first: Int!) {
+  popularTitles(country: $country, filter: $filter, first: $first) {
+    edges { node { id content(country: $country, language: $language) {
+      title originalReleaseYear externalIds { tmdbId }
+    } } }
+  }
+}`;
+
+function normalizeTitle(title) {
+  return (title || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// justwatch_client.search_film picks a match by year alone (exact, then ±1,
+// then nearest year, then whatever came back first) because that's all its
+// search response carries. This one can do better, and has to.
+//
+// Better: JustWatch exposes each title's own TMDB id and the film was picked
+// from TMDB in the first place, so the two match outright.
+//
+// Has to: search_film's last two rungs answer with SOME film whenever the
+// API answers at all, which is a reasonable bet for a watchlist film (it
+// genuinely exists and JustWatch almost certainly has it) and a bad one
+// here. A search for a film JustWatch doesn't carry was matched to "PAW
+// Patrol: The Movie" in testing and would have shown its offers on the
+// card. Claiming a film is on Paramount+ when it isn't is worse than
+// saying it isn't available anywhere tracked, so an unconvincing match is
+// no match: title and year both have to agree when the TMDB ids don't.
+function pickJustWatchMatch(nodes, tmdbId, title, year) {
+  const wantedId = String(tmdbId);
+  const byTmdbId = nodes.find((n) => n.content.externalIds && n.content.externalIds.tmdbId === wantedId);
+  if (byTmdbId) return { node: byTmdbId, confidence: "tmdb_exact" };
+
+  // Only reached for a title JustWatch hasn't mapped to a TMDB id.
+  const wantedTitle = normalizeTitle(title);
+  const sameTitle = nodes.filter((n) => normalizeTitle(n.content.title) === wantedTitle);
+  if (!sameTitle.length) return { node: null, confidence: "unmatched" };
+
+  if (year == null) {
+    // No year to check against (TMDB had no release date) — an exact title
+    // match on its own is as much confidence as is available.
+    return { node: sameTitle[0], confidence: "title_only" };
+  }
+  const exact = sameTitle.find((n) => n.content.originalReleaseYear === year);
+  if (exact) return { node: exact, confidence: "title_year_exact" };
+  // ±1 covers festival-vs-release-year disagreements, the same tolerance
+  // justwatch_client.search_film allows.
+  const tolerant = sameTitle.find(
+    (n) => n.content.originalReleaseYear != null && Math.abs(n.content.originalReleaseYear - year) <= 1
+  );
+  if (tolerant) return { node: tolerant, confidence: "title_year_tolerant" };
+
+  return { node: null, confidence: "unmatched" };
+}
+
+function buildOffersQuery(countries) {
+  const entries = countries
+    .map((code) => `${code}: offers(country: ${code}, platform: WEB, filter: $filter) { ...O }`)
+    .join("\n");
+  return `query TitleOffers($nodeId: ID!, $filter: OfferFilter!) {
+  node(id: $nodeId) { ... on MovieOrShowOrSeason { ${entries} } }
+}
+fragment O on Offer {
+  monetizationType availableToTime standardWebURL package { clearName technicalName }
+}`;
+}
+
+// Returns { matched, confidence, offers, error? }. The error field is the
+// difference between "JustWatch has nothing for this film" and "JustWatch
+// couldn't be asked" — an empty offers list means the former only when no
+// error rides along, and the page has to say so differently in each case.
+async function fetchJustWatchOffers(title, year, tmdbId, countries) {
+  if (!title) return { matched: false, confidence: "unmatched", offers: [] };
+
+  let match;
+  try {
+    const data = await justWatchGraphql("SearchTitles", JUSTWATCH_SEARCH_QUERY, {
+      filter: { searchQuery: title, objectTypes: ["MOVIE"] },
+      country: "GB",
+      language: "en",
+      first: 10,
+    });
+    const nodes = ((data.popularTitles || {}).edges || []).map((edge) => edge.node);
+    match = pickJustWatchMatch(nodes, tmdbId, title, year);
+  } catch (err) {
+    return { matched: false, confidence: "unmatched", offers: [], error: String(err).slice(0, 300) };
+  }
+  if (!match.node) return { matched: false, confidence: "unmatched", offers: [] };
+
+  let node;
+  try {
+    const data = await justWatchGraphql("TitleOffers", buildOffersQuery(countries), {
+      nodeId: match.node.id,
+      filter: { monetizationTypes: QUALIFYING_MONETIZATION_TYPES, bestOnly: false },
+    });
+    node = data.node || {};
+  } catch (err) {
+    return {
+      matched: true, entry_id: match.node.id, confidence: match.confidence, offers: [],
+      error: String(err).slice(0, 300),
+    };
+  }
+
+  // Deduplicated on (country, service, monetization type) exactly as
+  // justwatch_client.fetch_offers does — JustWatch lists the same offer once
+  // per presentation type (SD/HD/4K), which collapsed ~300 rows to ~155 for
+  // a well-distributed film in testing.
+  const seen = new Set();
+  const offers = [];
+  countries.forEach((country) => {
+    const countryOffers = node[country];
+    if (!Array.isArray(countryOffers)) return;
+    countryOffers.forEach((offer) => {
+      const technicalName = offer.package ? offer.package.technicalName : null;
+      if (!technicalName) return;
+      const key = `${country}|${technicalName}|${offer.monetizationType}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      offers.push({
+        country,
+        monetization_type: offer.monetizationType,
+        clear_name: offer.package.clearName,
+        technical_name: technicalName,
+        url: offer.standardWebURL || null,
+        // Date only: the dashboard's own daysUntil() appends "T00:00:00",
+        // matching how offers are stored for watchlist films.
+        available_to: offer.availableToTime ? offer.availableToTime.slice(0, 10) : null,
+      });
+    });
+  });
+
+  return { matched: true, entry_id: match.node.id, confidence: match.confidence, offers };
+}
+
 export default {
   async fetch(request, env) {
     const cors = {
@@ -112,6 +415,146 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    // ---------- Quick search (the dashboard's search box) ----------
+    //
+    // Two endpoints, deliberately split so the user picks the right film
+    // before anything expensive happens: /search-films is a cheap TMDB
+    // lookup that fills the picker list, /film-lookup does the real work
+    // for the one film chosen. Several films genuinely share a title
+    // (TMDB knows four called "Parasite"), so guessing on the user's
+    // behalf would be wrong often enough to matter.
+    //
+    // Neither endpoint classifies anything. They return raw JustWatch
+    // offers and let the page turn those into have/free/could_get_again/
+    // subscription badges using the taxonomy table dashboard.py emits —
+    // brands.py's canonicalization and config.py's service matching stay
+    // the single source of truth in Python rather than being reimplemented
+    // here, where nothing tests them.
+    if (url.pathname === "/search-films" || url.pathname === "/film-lookup") {
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return jsonResponse({ ok: false, error: "invalid JSON body" }, 400, cors);
+      }
+
+      if (url.pathname === "/search-films") {
+        // Only this half needs TMDB — /film-lookup talks to Letterboxd and
+        // JustWatch, both of which need no key at all.
+        if (!env.TMDB_API_KEY) {
+          return jsonResponse(
+            { ok: false, error: "TMDB_API_KEY is not configured on this Worker" }, 503, cors);
+        }
+
+        const query = typeof payload.query === "string" ? payload.query.trim() : "";
+        if (!query) {
+          return jsonResponse({ ok: false, error: 'missing "query"' }, 400, cors);
+        }
+        if (query.length > MAX_QUERY_LENGTH) {
+          return jsonResponse(
+            { ok: false, error: `query too long (max ${MAX_QUERY_LENGTH} characters)` }, 400, cors);
+        }
+
+        let search;
+        try {
+          search = await tmdbGet(env, "/search/movie", { query, include_adult: "false", language: "en-US" });
+        } catch (err) {
+          return jsonResponse({ ok: false, error: String(err).slice(0, 300) }, 502, cors);
+        }
+
+        const rows = (search.results || []).slice(0, SEARCH_RESULT_CAP);
+        // TMDB's search response carries no crew at all, and the director is
+        // exactly what tells two same-titled films apart in the picker — so
+        // each row gets its own credits call, all in flight at once rather
+        // than one after another. A row whose credits call fails still shows
+        // (just without a director) — it's a disambiguation aid, not data
+        // the card depends on.
+        const results = await Promise.all(rows.map(async (movie) => {
+          let director = null;
+          try {
+            const credits = await tmdbGet(env, `/movie/${movie.id}/credits`, {});
+            const names = (credits.crew || []).filter((c) => c.job === "Director").map((c) => c.name);
+            if (names.length) director = names.join(", ");
+          } catch {
+            // Leave director null — see above.
+          }
+          return {
+            tmdb_id: movie.id,
+            title: movie.title,
+            year: releaseYear(movie.release_date),
+            director,
+            // TMDB's poster, for the picker only. The card itself uses
+            // Letterboxd's, so a picked film looks identical to every other
+            // card on the dashboard.
+            poster_url: movie.poster_path ? TMDB_POSTER_BASE + movie.poster_path : null,
+            original_language: movie.original_language || null,
+            overview: movie.overview || null,
+          };
+        }));
+
+        return jsonResponse({ ok: true, results }, 200, cors);
+      }
+
+      // ---- /film-lookup ----
+      const tmdbId = Number(payload.tmdb_id);
+      if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+        return jsonResponse({ ok: false, error: 'missing or invalid "tmdb_id"' }, 400, cors);
+      }
+      const title = typeof payload.title === "string" ? payload.title.trim() : "";
+      const year = Number.isInteger(payload.year) ? payload.year : null;
+
+      // The country list comes from the page (dashboard.py emits it from
+      // countries.py's ALL_JUSTWATCH_COUNTRIES) rather than being a second
+      // copy maintained here. That list was verified empirically against
+      // this same API and is expected to be re-verified in one place when
+      // JustWatch's coverage changes.
+      const countries = Array.isArray(payload.countries) ? payload.countries : null;
+      if (!countries || !countries.length) {
+        return jsonResponse({ ok: false, error: 'missing "countries"' }, 400, cors);
+      }
+      if (countries.length > MAX_COUNTRIES) {
+        return jsonResponse({ ok: false, error: `too many countries (max ${MAX_COUNTRIES})` }, 400, cors);
+      }
+      const badCountry = countries.find((c) => typeof c !== "string" || !/^[A-Z]{2}$/.test(c));
+      if (badCountry !== undefined) {
+        return jsonResponse(
+          { ok: false, error: `invalid country code: ${JSON.stringify(badCountry)}` }, 400, cors);
+      }
+
+      // Independent of each other, so both are in flight at once — this is
+      // what keeps a lookup at roughly one round trip rather than two.
+      const [letterboxd, justwatch] = await Promise.all([
+        fetchLetterboxdFilm(tmdbId),
+        fetchJustWatchOffers(title, year, tmdbId, countries),
+      ]);
+
+      // Running those two in parallel means the JustWatch half is searched
+      // by the title the caller sent rather than the one the TMDB id really
+      // resolves to, and a caller that sends a title and an id belonging to
+      // different films would get one film's details next to another film's
+      // offers. A tmdb_exact match can't drift that way — it is anchored to
+      // the same id the Letterboxd page came from — but a title-based match
+      // is only ever as good as the title it was handed, so it has to agree
+      // with what Letterboxd resolved. Dropping the offers (rather than
+      // trusting them) keeps the response about one film, which is the same
+      // call pickJustWatchMatch makes about weak matches.
+      let offers = justwatch;
+      if (
+        letterboxd.ok && letterboxd.title &&
+        justwatch.matched && justwatch.confidence !== "tmdb_exact" &&
+        normalizeTitle(letterboxd.title) !== normalizeTitle(title)
+      ) {
+        offers = {
+          matched: false,
+          confidence: "unmatched",
+          offers: [],
+          error: `title mismatch: TMDB id ${tmdbId} is "${letterboxd.title}" on Letterboxd, not "${title}"`,
+        };
+      }
+
+      return jsonResponse({ ok: true, tmdb_id: tmdbId, letterboxd, justwatch: offers }, 200, cors);
+    }
 
     if (url.pathname === "/update-services") {
       let payload;
@@ -298,6 +741,15 @@ export default {
         status: 200,
         headers: { ...cors, "Content-Type": "application/json" },
       });
+    }
+
+    // Anything else is a mistake, and must not fall through to the daily
+    // run below — a typo'd path, or a request sent to an endpoint this
+    // Worker hasn't been redeployed with yet, used to silently kick off a
+    // full scrape-and-deploy pipeline and answer as if it had done what was
+    // asked. Unknown paths say so instead.
+    if (url.pathname !== "/") {
+      return jsonResponse({ ok: false, error: `unknown endpoint: ${url.pathname}` }, 404, cors);
     }
 
     // Base route ("Refresh data" button) — this one genuinely does need a

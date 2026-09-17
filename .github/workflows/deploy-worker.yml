@@ -20,3 +20,17 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           workingDirectory: worker
+          # Quick search's /search-films needs a TMDB key, and the key this
+          # repo already holds for the daily run is the same one — so it's
+          # pushed to the Worker from here (wrangler secret put, on every
+          # deploy, idempotent) rather than being a second copy someone has
+          # to remember to set by hand in Cloudflare's dashboard.
+          #
+          # GITHUB_TOKEN and TRIGGER_SECRET are deliberately NOT listed:
+          # they only exist on Cloudflare's side, this repo has no copy of
+          # them, and naming them here would upload empty values over the
+          # real ones.
+          secrets: |
+            TMDB_API_KEY
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}

@@ -18,12 +18,19 @@ Dashboard UI writes (Settings save / dismiss / Review tab)
         │
         ▼
 Cloudflare Worker (worker/) ──► GitHub Actions workflow_dispatch ──► main.py (one-off flag) ──► Postgres
+
+Dashboard quick search (any film on Letterboxd, watchlisted or not)
+        │
+        ▼
+Cloudflare Worker (worker/) ──► TMDB + Letterboxd + JustWatch, live ──► rendered client-side
 ```
 
 `main.py`'s `run()` is the only thing that scrapes or writes most of
 Postgres. Everything downstream of the database (the dashboard itself, the
 Worker) only ever reads it or makes small, targeted writes to specific
-tables — never a full rescan.
+tables — never a full rescan. Quick search is the one path that touches the
+database not at all: it reads live and renders, storing nothing, so a
+searched film leaves no trace and costs no Neon quota.
 
 ## Source layout (`src/watchlist_justwatch/`)
 
@@ -40,7 +47,7 @@ tables — never a full rescan.
 | `diff.py` | Classifies what's new since yesterday (`have`/`free_tier`/`new_possible`/new films/unmatched) for the daily email |
 | `similar.py` | TMDB-correlated discovery (`because_you_watched`, by director/cast/genre, hidden gems, popular, rewatch) |
 | `cinemas.py` | Scrapes showtimes for 4 London cinemas (Prince Charles, Barbican, Vue Fulham Broadway, Riverside Studios) — one fetcher per venue, each a different mechanism (plain HTML, a JSON API, an opaque-token AJAX endpoint); `match_watchlist_film` fuzzy-matches a listing against the watchlist by title |
-| `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file) |
+| `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file); `_search_taxonomy` is what lets the page classify a *searched* film's offers without duplicating `brands.py`/`config.py` in JS |
 | `report.py` / `html_email.py` / `weekly_digest.py` | Email rendering (plain text / HTML / the Friday digest) |
 | `notify.py` | Resend API wrapper |
 | `analysis.py` | `--rank-services`/`--recommend-favorites` standalone analyses |
@@ -81,8 +88,9 @@ ran).
 
 `letterboxd-refresh-trigger` — the dashboard's only write path, holding the
 real GitHub PAT server-side so the public page never sees it. Deployed via
-`deploy-worker.yml` on push (see above); its two secrets (`GITHUB_TOKEN`,
-`TRIGGER_SECRET`) live on Cloudflare's side and aren't in `wrangler.toml`.
+`deploy-worker.yml` on push (see above); its secrets (`GITHUB_TOKEN`,
+`TRIGGER_SECRET`, and `TMDB_API_KEY` for quick search) live on
+Cloudflare's side and aren't in `wrangler.toml`.
 
 | Endpoint | Does |
 |---|---|
@@ -90,6 +98,19 @@ real GitHub PAT server-side so the public page never sees it. Deployed via
 | `POST /update-services` | Commits `config/services.yaml`, triggers `regenerate-dashboard.yml` |
 | `POST /dismiss-recommendation` | Commits `config/dismissed_recommendations.yaml`, triggers `regenerate-dashboard.yml` |
 | `POST /tag-film` | Takes `{decisions: [{slug, status}]}` (a debounce-batched set from the Review tab), triggers `regenerate-dashboard.yml` with them |
+| `POST /search-films` | Quick search, step 1: TMDB title search (+ a parallel credits call per row for the director) returning the picker list |
+| `POST /film-lookup` | Quick search, step 2: for the picked film, Letterboxd details via `/tmdb/<id>/` and JustWatch offers for every country the page sends |
+
+Anything else 404s. The base route used to be a catch-all, so a typo or a
+call to an endpoint the deployed Worker didn't have yet silently kicked off
+a full `daily.yml` run and answered as if it had worked.
+
+The two quick-search endpoints are the only ones that touch neither GitHub
+nor the database — they read live data and return it, and deliberately
+don't classify anything. Turning raw JustWatch offers into have/free_tier/
+could_get_again/subscription badges stays in Python (`brands.py` +
+`config.py`), reaching the page as a lookup table rather than as logic
+reimplemented in JS.
 
 ## `main.py` CLI flags
 
@@ -141,7 +162,9 @@ pytest
 ```
 
 Covers the pure classification/section-building logic (`config.py`,
-`diff.py`, `languages.py`, `dashboard.py`'s home-section builders) — not an
+`diff.py`, `languages.py`, `dashboard.py`'s home-section builders and its
+`_search_taxonomy` — that one checks the table the page classifies searched
+films from still agrees with `_classify` itself) — not an
 integration suite against a real database, which would need a Postgres
 fixture and is a bigger lift for less immediate value than covering the
 logic most likely to silently regress.

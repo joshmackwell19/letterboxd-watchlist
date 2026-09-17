@@ -28,6 +28,38 @@ def test_service_matches_is_substring_both_directions():
     assert service_matches("Netflix Standard with Ads", "Netflix")
 
 
+def test_service_matches_rejects_a_name_that_merely_ends_with_a_service():
+    # All of these were real: JustWatch carries a Polish service called
+    # "Player" and a Canadian one called "TSN Standard", and squashing names
+    # to a single string made them substrings of "BBC iPlayer" and "Stan" —
+    # so films on them were badged as services Josh subscribes to.
+    assert not service_matches("BBC iPlayer", "Player")
+    assert not service_matches("Stan", "TSN Standard")
+    assert not service_matches("Stan", "Netflix Standard with Ads")
+    assert not service_matches("YouTube", "NFL GamePass on YouTube")
+
+
+def test_service_matches_rejects_separate_products_sharing_a_prefix():
+    # Extra trailing words usually mean a variant of the same service, but
+    # not for these — YouTube TV and YouTube Premium are their own paid
+    # products, and having YouTube doesn't get you either.
+    assert not service_matches("YouTube", "YouTube TV")
+    assert not service_matches("YouTube", "YouTube Premium")
+    assert not service_matches("YouTube", "YouTube Sports")
+    # Naming one in config still matches that exact service, so someone who
+    # does subscribe can just list it.
+    assert service_matches("YouTube Premium", "YouTube Premium")
+
+
+def test_service_matches_keeps_real_variants_of_the_same_service():
+    # The shape every genuine variant takes: the service's name, then extra
+    # words for the tier or the bundle it's sold through.
+    assert service_matches("MUBI", "MUBI Amazon Channel")
+    assert service_matches("Amazon Prime Video", "Amazon Prime Video with Ads")
+    assert service_matches("ITVX", "ITVX Premium")
+    assert service_matches("HBO Max", "HBO Max Amazon Channel")
+
+
 def test_service_matches_short_names_require_exact_match():
     # Guards against a hypothetical short config entry (e.g. "TV") producing
     # false-positive substring matches against unrelated long service names.

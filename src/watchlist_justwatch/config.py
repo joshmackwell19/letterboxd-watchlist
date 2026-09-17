@@ -10,10 +10,34 @@ from .countries import validate_country_code
 from .models import OfferRecord
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 # Guards against short normalized names (e.g. a hypothetical "TV" entry)
-# producing false-positive substring matches against unrelated services.
+# matching unrelated services that merely begin with the same word.
 _MIN_SUBSTRING_MATCH_LENGTH = 4
+
+# Services whose name starts with another service's name but which are a
+# separate product you'd pay for separately — no general rule about strings
+# can know that "YouTube TV" isn't YouTube while "Netflix Kids" *is*
+# Netflix, so the handful that matter are named here. Anything listed only
+# ever matches its own exact name.
+_STANDALONE_SERVICES = frozenset({
+    "youtubetv",
+    "youtubesports",
+    "youtubepremium",
+})
+
+
+def _service_tokens(name: str) -> list[str]:
+    """Service name as its words, e.g. "BBC iPlayer" -> ["bbc", "iplayer"].
+
+    Keeping the word boundaries is the whole point: squashing a name down to
+    one string makes "Stan" a substring of "TSN Standard" and "Player" a
+    substring of "BBC iPlayer", which is how films on Poland's Player and
+    Canada's TSN ended up badged as services Josh subscribes to.
+    """
+    lowered = name.lower().replace("+", " plus ")
+    return [token for token in _TOKEN_SPLIT_RE.split(lowered) if token]
 
 
 @dataclass(frozen=True)
@@ -29,11 +53,33 @@ def normalize_service_name(name: str) -> str:
 
 
 def service_matches(config_name: str, justwatch_clear_name: str) -> bool:
+    """Whether a config entry names the same service as a JustWatch package.
+
+    A match means one name is the other plus trailing words — the shape
+    every real variant takes ("Netflix" / "Netflix Standard with Ads",
+    "MUBI" / "MUBI Amazon Channel"). Extra words in front make it a
+    different service, not a variant of one: "TSN Standard" is not Stan, and
+    "NFL GamePass on YouTube" is not YouTube.
+    """
     a = normalize_service_name(config_name)
     b = normalize_service_name(justwatch_clear_name)
+    if a == b:
+        return True
+    # One of these is its own product despite the shared prefix, and only
+    # the exact-match case above should ever have matched it.
+    if a in _STANDALONE_SERVICES or b in _STANDALONE_SERVICES:
+        return False
+    # A name this short is too easy to collide with as a leading word, so it
+    # only ever matches exactly (which the equality check above covers).
     if len(a) < _MIN_SUBSTRING_MATCH_LENGTH or len(b) < _MIN_SUBSTRING_MATCH_LENGTH:
-        return a == b
-    return a in b or b in a
+        return False
+
+    tokens_a = _service_tokens(config_name)
+    tokens_b = _service_tokens(justwatch_clear_name)
+    if not tokens_a or not tokens_b:
+        return False
+    shorter, longer = sorted((tokens_a, tokens_b), key=len)
+    return longer[:len(shorter)] == shorter
 
 
 def load_config(path: Path) -> dict[str, CountryConfig]:

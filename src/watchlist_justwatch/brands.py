@@ -11,6 +11,14 @@ _SUFFIXES = [
     r" Premium Plus$", r" Premium$", r" Essential$", r" Free$",
 ]
 
+# The same qualifiers as literals. canonical_brand_name strips these from a
+# name it is given; this is for the one caller that needs to work the other
+# way and say, offline, which variant names a service could show up under
+# (see dashboard.py's _search_taxonomy).
+KNOWN_VARIANT_SUFFIXES: tuple[str, ...] = tuple(
+    pattern.removeprefix(" ").removesuffix("$") for pattern in _SUFFIXES
+)
+
 _ALIASES = {
     "amazon video": "Amazon Prime Video",
 }

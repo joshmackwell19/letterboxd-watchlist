@@ -1018,6 +1018,7 @@ _TEMPLATE = """<!DOCTYPE html>
      up here, so mobile's small standalone gear icon and in-section
      surprise button (still needed there) shouldn't double up with these. */
   .header-actions { display: none; }
+  .watchlist-link-inline { display: none; }
   .mobile-only-bar { display: none; }
   .controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
   .quick-filters { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
@@ -1333,11 +1334,39 @@ _TEMPLATE = """<!DOCTYPE html>
     .app-bar-title { display: block; }
     .app-bar-controls { padding: 0; margin-bottom: 11px; }
     .tabs { display: none; }
-    /* Search made this a six-control row, one more than fits across a
-       phone: the row measured 419px inside a 366px header and gave the
-       whole page a horizontal scroll. It wraps now instead — nothing
-       truncated, nothing off the edge. */
-    .header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+    /* Adding search made this six controls, one more than fits across a
+       phone — so the Letterboxd link moved up to the meta line and what's
+       left is five evenly-spread actions, laid out like the bottom nav
+       (icon over label) rather than as a row of bare glyphs. Spread rather
+       than right-aligned because a thumb reaches the left of the screen
+       as easily as the right. */
+    /* width rather than the default content sizing: this is a flex item of
+       .app-bar-top, so without it the row collapses to ~216px and the
+       labels wrap inside 40px buttons. align-items overrides the desktop
+       rule's centring, so all five match height whatever their label. */
+    .header-actions {
+      display: flex; justify-content: space-between; align-items: stretch;
+      gap: 5px; width: 100%; margin-top: 4px;
+    }
+    .header-action {
+      position: relative; flex: 1 1 0; min-width: 0;
+      display: flex; flex-direction: column; align-items: center; gap: 4px;
+      /* 44px of height minimum, per the usual tap-target floor — the 34px
+         circles these replace were under it. */
+      padding: 7px 2px; min-height: 44px; box-sizing: border-box;
+      background: none; border: 1px solid var(--hairline); border-radius: 12px;
+      color: var(--text-muted); font-size: 10.5px; font-weight: 500; cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .header-action svg { width: 19px; height: 19px; stroke: currentColor; }
+    .header-action:active { background: var(--hairline); color: var(--text); }
+    /* Out of the text flow, so a three-digit count can't shove the label
+       sideways (it used to sit inline and push "Review" off-centre). */
+    .header-action .new-badge { position: absolute; top: 3px; right: 6px; margin: 0; }
+    .watchlist-link-inline {
+      display: inline-block; margin-top: 7px;
+      color: var(--accent); text-decoration: none; font-size: 12.5px; font-weight: 500;
+    }
     .mobile-only-bar { display: block; }
     .controls { gap: 7px; }
     /* iOS Safari zooms the whole page in on focus of any input/select whose
@@ -1372,6 +1401,10 @@ _TEMPLATE = """<!DOCTYPE html>
     <div class="app-bar-title">
       <h1>Watchlist streaming dashboard</h1>
       <div class="meta" id="meta"></div>
+      <!-- Mobile only (.app-bar-title is desktop-hidden): the same link the
+           desktop tab row carries, moved out of the action row below so
+           five controls fit across a phone in one row. -->
+      <a class="watchlist-link-inline" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
     </div>
     <div class="tabs">
       <button class="tab-btn active" id="tab-home">
@@ -1473,16 +1506,49 @@ _TEMPLATE = """<!DOCTYPE html>
         Letterboxd
       </a>
     </div>
+    <!-- Five labelled controls spread across the width, built like the
+         bottom nav rather than as a row of bare glyphs: the emoji they used
+         to be rendered differently on every platform, sat at a 34px tap
+         target, and left "☁" to stand for "re-run the daily check". Same
+         icons as the desktop tab row, since these do the same things.
+
+         Reload has no button here — pull-to-refresh already does a plain
+         page reload on a phone. Refresh-data has no gesture equivalent, so
+         it still needs an explicit control. -->
     <div class="header-actions">
-      <a class="watchlist-link" id="watchlistLink" target="_blank">View watchlist on Letterboxd ↗</a>
-      <!-- Reload has no separate mobile button — pull-to-refresh (below)
-           already does a plain page reload here. Refresh-data has no mobile
-           gesture equivalent, so it still needs an explicit control. -->
-      <button class="icon-btn" id="filmSearchBtnMobile" aria-label="Search films" title="Search any film on Letterboxd">🔍</button>
-      <button class="icon-btn" id="triggerRefreshBtnMobile" aria-label="Refresh data" title="Re-run the daily check and redeploy">☁</button>
-      <button class="icon-btn" id="reviewBtnMobile" aria-label="Review" title="Films to review with Sarah">✓<span class="new-badge review-count-badge-mobile hidden"></span></button>
-      <button class="icon-btn" id="sarahBtnMobile" aria-label="Sarah's list" title="Sarah's watchlist">♥</button>
-      <button class="icon-btn" id="settingsBtn" aria-label="Settings" title="Settings">⚙</button>
+      <button class="header-action" id="filmSearchBtnMobile" aria-label="Search films" title="Search any film on Letterboxd">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4.3-4.3"></path>
+        </svg>
+        Search
+      </button>
+      <button class="header-action" id="triggerRefreshBtnMobile" aria-label="Refresh data" title="Re-run the daily check and redeploy">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.4-1.5A5 5 0 0 0 7 19h10.5z"></path>
+          <path d="M12 12v5M9.5 14.5L12 17l2.5-2.5"></path>
+        </svg>
+        Refresh
+      </button>
+      <button class="header-action" id="reviewBtnMobile" aria-label="Review" title="Films to review with Sarah">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3L22 4"></path>
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+        </svg>
+        Review<span class="new-badge review-count-badge-mobile hidden"></span>
+      </button>
+      <button class="header-action" id="sarahBtnMobile" aria-label="Sarah's list" title="Sarah's watchlist">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"></path>
+        </svg>
+        Sarah
+      </button>
+      <button class="header-action" id="settingsBtn" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.2"></circle>
+          <path d="M12 3v3M12 18v3M21 12h-3M6 12H3M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M18.4 18.4l-2.1-2.1M7.7 7.7L5.6 5.6"></path>
+        </svg>
+        Settings
+      </button>
     </div>
   </div>
   <div class="app-bar-controls" id="appBarControls">

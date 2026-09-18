@@ -21,10 +21,15 @@ _MIN_MATCHABLE_NAME_LENGTH = 4
 # can know that "YouTube TV" isn't YouTube while "Netflix Kids" *is*
 # Netflix, so the handful that matter are named here. Anything listed only
 # ever matches its own exact name.
+#
+# "YouTube Premium" deliberately isn't one of them. It reads like it
+# belongs, but brands.py strips " Premium" as a tier qualifier long before
+# this is asked (the same way "ITVX Premium" becomes "ITVX"), so a package
+# by that name arrives here already canonicalized to "YouTube" — listing it
+# would be unreachable in the pipeline and wrong about the tier anyway.
 _STANDALONE_SERVICES = frozenset({
     "youtubetv",
     "youtubesports",
-    "youtubepremium",
 })
 
 

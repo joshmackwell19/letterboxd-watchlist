@@ -1176,6 +1176,26 @@ _TEMPLATE = """<!DOCTYPE html>
     position: relative; background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px;
     max-width: 560px; width: 100%; max-height: 85vh; overflow-y: auto; padding: 20px; box-shadow: var(--shadow);
   }
+  /* Search is the one modal whose height changes while you're using it —
+     every keystroke swaps "Searching..." for a different number of rows.
+     Centred (like the quick-look modal, which is built once and left
+     alone) that re-centres the card on each change and slides the input
+     out from under the cursor mid-type. Anchored to the top instead, the
+     input cannot move: results grow downwards and scroll within the card,
+     which is what the eye expects of a search box anyway.
+
+     dvh after vh on purpose: on a phone the keyboard eats the viewport,
+     and dvh accounts for it where it's supported while vh is the fallback
+     where it isn't. */
+  #searchOverlay { align-items: flex-start; }
+  #searchOverlay .modal-card {
+    display: flex; flex-direction: column;
+    max-height: 85vh; max-height: 85dvh;
+    overflow: hidden;  /* the panels below scroll, not the card */
+  }
+  #searchPanel { display: flex; flex-direction: column; min-height: 0; }
+  #searchResults { overflow-y: auto; min-height: 0; -webkit-overflow-scrolling: touch; }
+  #searchDetailPanel { overflow-y: auto; min-height: 0; }
   .modal-card .detail-card { border-bottom: none; padding: 0; }
   .modal-card .detail-poster, .modal-card .detail-poster-placeholder { width: 120px; height: 176px; }
   .modal-close {

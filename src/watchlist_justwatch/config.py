@@ -14,7 +14,7 @@ _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 # Guards against short normalized names (e.g. a hypothetical "TV" entry)
 # matching unrelated services that merely begin with the same word.
-_MIN_SUBSTRING_MATCH_LENGTH = 4
+_MIN_MATCHABLE_NAME_LENGTH = 4
 
 # Services whose name starts with another service's name but which are a
 # separate product you'd pay for separately — no general rule about strings
@@ -71,7 +71,7 @@ def service_matches(config_name: str, justwatch_clear_name: str) -> bool:
         return False
     # A name this short is too easy to collide with as a leading word, so it
     # only ever matches exactly (which the equality check above covers).
-    if len(a) < _MIN_SUBSTRING_MATCH_LENGTH or len(b) < _MIN_SUBSTRING_MATCH_LENGTH:
+    if len(a) < _MIN_MATCHABLE_NAME_LENGTH or len(b) < _MIN_MATCHABLE_NAME_LENGTH:
         return False
 
     tokens_a = _service_tokens(config_name)

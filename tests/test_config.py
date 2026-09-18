@@ -21,9 +21,10 @@ def test_normalize_service_name_strips_punctuation_and_case():
     assert normalize_service_name("HBO Max") == "hbomax"
 
 
-def test_service_matches_is_substring_both_directions():
-    # config.yaml often has a short name ("Netflix") that should match
-    # JustWatch's longer variant ("Netflix Standard with Ads") either way.
+def test_service_matches_works_whichever_name_is_given_first():
+    # config.yaml often has a short name ("Netflix") where JustWatch has a
+    # longer variant ("Netflix Standard with Ads"); which of the two is the
+    # config side and which the package side shouldn't change the answer.
     assert service_matches("Netflix", "Netflix Standard with Ads")
     assert service_matches("Netflix Standard with Ads", "Netflix")
 

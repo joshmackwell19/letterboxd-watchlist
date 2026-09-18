@@ -1720,6 +1720,7 @@ _TEMPLATE = """<!DOCTYPE html>
       <span id="filmsFilterToggles"></span>
       <span class="pill-toggle" id="notHaveOnly">Not on a service I have</span>
       <span class="sarah-filter" id="filmsSarahFilter"></span>
+      <span class="layout-switch" id="filmsLayoutSwitch"></span>
     </div>
     <div class="controls" data-view="cinemas" id="controls-cinemas">
       <div class="search-wrap">
@@ -3651,6 +3652,19 @@ function onBadgeDelegateClick(event) {
 function renderFilmCards(processed, columnBrands, showOtherServices) {
   const container = document.getElementById('filmsGrid');
   container.innerHTML = '';
+  renderLayoutSwitch('filmsLayoutSwitch', 'films', renderFilms);
+
+  // Posters show whatever the filters and sort left behind, in that order —
+  // the view changes, the list it's showing doesn't. The container's own
+  // class carries the grid, so the two layouts don't need separate elements.
+  if (posterLayout('films') === 'posters' && processed.length) {
+    container.className = 'poster-grid';
+    processed.forEach(({ row }) => container.appendChild(buildPosterTile(row)));
+    return;
+  }
+  // Back to the card grid — and for the empty state too, so "no films match"
+  // lays out as a message rather than as a lone grid cell.
+  container.className = 'film-cards';
 
   const frag = document.createDocumentFragment();
   processed.forEach(({ row, visibleMain, visibleOther }) => {
@@ -4154,25 +4168,32 @@ function renderServicesRows() {
 // Which service is open is held here rather than implied by whatever was
 // last rendered, so flipping the switch can redraw the same films without
 // the caller having to remember how it got here.
-const SERVICE_LAYOUT_KEY = 'watchlist_service_layout_v1';
+// Remembered per page rather than globally: the two lists are read for
+// different reasons — one service's catalogue is browsed by artwork, the
+// whole watchlist is often browsed by what's streaming where — so a choice
+// made on one shouldn't silently change the other.
+const LAYOUT_KEYS = {
+  service: 'watchlist_service_layout_v1',
+  films: 'watchlist_films_layout_v1',
+};
 let currentServiceDetail = null;   // {brand, country, countryName} — country null = all countries
 
-function serviceLayout() {
+function posterLayout(page) {
   try {
-    return localStorage.getItem(SERVICE_LAYOUT_KEY) === 'posters' ? 'posters' : 'detailed';
+    return localStorage.getItem(LAYOUT_KEYS[page]) === 'posters' ? 'posters' : 'detailed';
   } catch {
     return 'detailed';
   }
 }
 
-function setServiceLayout(layout) {
+function setPosterLayout(page, layout, rerender) {
   try {
-    localStorage.setItem(SERVICE_LAYOUT_KEY, layout);
+    localStorage.setItem(LAYOUT_KEYS[page], layout);
   } catch {
     // Private browsing, or storage that's full or blocked — the switch still
     // works for this visit, it just won't be remembered for the next one.
   }
-  renderServiceDetail();
+  rerender();
 }
 
 // Letterboxd serves its posters through a resizer whose dimensions are in
@@ -4219,17 +4240,26 @@ function buildPosterTile(film) {
   return tile;
 }
 
-function renderServiceLayoutSwitch() {
-  const container = document.getElementById('serviceLayoutSwitch');
+function renderLayoutSwitch(containerId, page, rerender) {
+  const container = document.getElementById(containerId);
   container.innerHTML = '';
-  const active = serviceLayout();
+  const active = posterLayout(page);
   [['detailed', 'Detailed'], ['posters', 'Posters']].forEach(([value, label]) => {
     const chip = document.createElement('span');
     chip.className = 'quick-country' + (active === value ? ' active' : '');
     chip.textContent = label;
-    chip.addEventListener('click', () => { if (active !== value) setServiceLayout(value); });
+    chip.addEventListener('click', () => { if (active !== value) setPosterLayout(page, value, rerender); });
     container.appendChild(chip);
   });
+}
+
+// Both lists render the same tiles into whichever container they own, so
+// the two pages can't drift apart on sizing or on what a tap does.
+function fillPosterGrid(container, films) {
+  const grid = document.createElement('div');
+  grid.className = 'poster-grid';
+  films.forEach(film => grid.appendChild(buildPosterTile(film)));
+  container.appendChild(grid);
 }
 
 function serviceDetailSlugs({ brand, country }) {
@@ -4248,7 +4278,7 @@ function renderServiceDetail() {
   const { brand, country, countryName } = currentServiceDetail;
   document.getElementById('serviceDetailTitle').innerHTML =
     esc(brand) + ' <i>' + esc(country === null ? 'All countries' : countryName) + '</i>';
-  renderServiceLayoutSwitch();
+  renderLayoutSwitch('serviceLayoutSwitch', 'service', renderServiceDetail);
 
   const container = document.getElementById('serviceDetailCards');
   container.innerHTML = '';
@@ -4256,11 +4286,8 @@ function renderServiceDetail() {
     .map(slug => DATA.films_by_slug[slug])
     .filter(Boolean);
 
-  if (serviceLayout() === 'posters') {
-    const grid = document.createElement('div');
-    grid.className = 'poster-grid';
-    films.forEach(film => grid.appendChild(buildPosterTile(film)));
-    container.appendChild(grid);
+  if (posterLayout('service') === 'posters') {
+    fillPosterGrid(container, films);
     return;
   }
   films.forEach(film => container.appendChild(buildFilmDetailCard(film, brand, country, true)));

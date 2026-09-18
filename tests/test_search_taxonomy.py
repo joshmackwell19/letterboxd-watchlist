@@ -170,3 +170,44 @@ def test_variants_of_a_service_you_have_resolve_without_the_corpus():
     assert taxonomy["brand_by_clear_name"]["BBC iPlayer Premium"] == "BBC iPlayer"
     assert _classify_from_taxonomy(taxonomy, "Netflix Standard with Ads", "US", {"FLATRATE"}) == "have"
     assert _classify_from_taxonomy(taxonomy, "MUBI Amazon Channel", "DE", {"FLATRATE"}) == "have"
+
+
+# --- Discovery films are classified on every build, not once and stored ---
+
+def test_stored_discovery_classification_is_recomputed_against_todays_config():
+    # similar.py classifies a discovery film's offers when it finds it and
+    # stores the verdict, so a Settings change (or a fix to the matching
+    # rules) never reached those cards — recommendations went on badging a
+    # service as one Josh had long after nothing else did.
+    from watchlist_justwatch.dashboard import _reclassified_discovery_films
+
+    stored = {"some-film": {"slug": "some-film", "title": "Some Film", "all_offers": [
+        # Stale: "have" was right under the old rules, wrong under today's.
+        {"brand": "YouTube TV", "country": "US", "classification": "have",
+         "available_to": None, "url": None, "monetization_types": ["FLATRATE"]},
+        {"brand": "Netflix", "country": "US", "classification": "subscription",
+         "available_to": None, "url": None, "monetization_types": ["FLATRATE"]},
+    ]}}
+
+    fresh = _reclassified_discovery_films(stored, CONFIG, GLOBAL_SUBSCRIPTIONS, REVISITABLE)
+    verdicts = {o["brand"]: o["classification"] for o in fresh["some-film"]["all_offers"]}
+
+    assert verdicts["YouTube TV"] == "subscription"   # no longer a service you have
+    assert verdicts["Netflix"] == "have"              # and this one now is
+    # Everything else about the entry survives untouched.
+    assert fresh["some-film"]["title"] == "Some Film"
+
+
+def test_discovery_entries_stored_before_monetization_types_keep_their_verdict():
+    # Nothing to recompute from, so the stored answer stands until discovery
+    # next re-runs — better than guessing at it.
+    from watchlist_justwatch.dashboard import _reclassified_discovery_films
+
+    stored = {"old-film": {"all_offers": [
+        {"brand": "YouTube TV", "country": "US", "classification": "have",
+         "available_to": None, "url": None},
+    ]}}
+
+    fresh = _reclassified_discovery_films(stored, CONFIG, GLOBAL_SUBSCRIPTIONS, REVISITABLE)
+
+    assert fresh["old-film"]["all_offers"][0]["classification"] == "have"

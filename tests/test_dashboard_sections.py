@@ -318,7 +318,7 @@ def test_build_home_sections_caps_person_sections_across_director_and_cast():
     films_by_slug |= {f"c{i}": _discovery_entry(f"c{i}") for i in range(5)}
 
     sections = _build_home_sections(state, films_all_offers={}, films_by_slug=films_by_slug,
-                                     dismissed_recommendations=set(), watch_together={})
+                                     discovery_films={}, dismissed_recommendations=set(), watch_together={})
 
     person_sections = [s for s in sections if s["key"].startswith(("director:", "cast:"))]
     assert len(person_sections) == 4
@@ -339,8 +339,8 @@ def test_build_home_sections_does_not_repeat_a_film_across_sections():
     ]
     offers = {"a": [_offer("Netflix", "AU", "have", _in_days(3))]}
 
-    sections = _build_home_sections(state, offers, films_by_slug={}, dismissed_recommendations=set(),
-                                     watch_together={})
+    sections = _build_home_sections(state, offers, films_by_slug={}, discovery_films={},
+                                     dismissed_recommendations=set(), watch_together={})
 
     by_key = {s["key"]: [f["slug"] for f in s["films"]] for s in sections}
     assert by_key.get("leaving_soon") == ["a"]
@@ -349,6 +349,6 @@ def test_build_home_sections_does_not_repeat_a_film_across_sections():
 
 def test_build_home_sections_omits_empty_sections_entirely():
     state = StateDoc(films={})
-    sections = _build_home_sections(state, films_all_offers={}, films_by_slug={},
+    sections = _build_home_sections(state, films_all_offers={}, films_by_slug={}, discovery_films={},
                                      dismissed_recommendations=set(), watch_together={})
     assert sections == []

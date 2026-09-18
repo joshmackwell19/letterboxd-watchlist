@@ -185,7 +185,12 @@ def _enrich_resolved_candidates(
             continue
         if not film_state.offers:
             continue
-        all_offers = _all_offers_for_film(film_state, config, global_subscriptions, revisitable)
+        # keep_monetization: this classification is about to be stored, and
+        # a stored verdict goes stale the moment the config changes — the
+        # monetization types are what let dashboard.py recompute it on every
+        # build instead (see _reclassified_discovery_films).
+        all_offers = _all_offers_for_film(film_state, config, global_subscriptions, revisitable,
+                                          keep_monetization=True)
         if not all_offers:
             continue
 

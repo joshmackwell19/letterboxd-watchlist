@@ -60,7 +60,7 @@ searched film leaves no trace and costs no Neon quota.
 |---|---|---|
 | `films` | `run()`, full replace each run | Josh's watchlist **union** Sarah's — `josh_watchlist`/`sarah_watchlist` say whose list a slug came from, since this table alone can't |
 | `diary` | `run()`, full replace | Every film ever logged as watched; backfilled once via `--backfill-diary` (must run locally — Letterboxd blocks GH Actions' IPs from `/username/films/`) |
-| `discovery_films` | `run()`, full replace | TMDB-correlated films surfaced by `similar.py` that aren't on the watchlist itself |
+| `discovery_films` | `run()`, full replace | TMDB-correlated films surfaced by `similar.py` that aren't on the watchlist itself. Their offers are stored with `monetization_types`, so `dashboard.py` re-runs `_classify` on them at build time — a stored verdict would otherwise keep whatever config was current the day the film was discovered |
 | `recommendation_sections` | `run()`, full replace | Which slugs go in which home-page discovery section |
 | `josh_watchlist` / `sarah_watchlist` | `run()`, full replace | Membership only (slugs) — offer data lives in `films` regardless of which list |
 | `meta` | `run()`, full replace | `last_run_at`, `last_justwatch_check_date`, `last_seen_diary_guid`, `recent_watches`, `recent_additions` |

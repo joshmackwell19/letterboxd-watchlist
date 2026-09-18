@@ -60,7 +60,8 @@ _MONETIZATION_PRIORITY = {"FLATRATE": 0, "FREE": 1, "ADS": 2}
 
 
 def _all_offers_for_film(
-    film, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str]
+    film, config: dict[str, CountryConfig], global_subscriptions: list[str], revisitable: set[str],
+    *, keep_monetization: bool = False,
 ) -> list[dict]:
     """Every (brand, country) this film has a qualifying offer for, each
     classified — the single source of truth other views bucket/filter.
@@ -71,7 +72,14 @@ def _all_offers_for_film(
     group_offers_by_brand_and_country only tracks monetization types, so
     this is the one place with access to the raw per-offer dates/urls. When
     a (brand, country) has multiple qualifying offers (e.g. a free ad tier
-    and a full subscription), the url from the most-watchable one wins."""
+    and a full subscription), the url from the most-watchable one wins.
+
+    keep_monetization carries the monetization types through onto each
+    entry, which is what makes a classification recomputable later. Only
+    discovery films need it — they're the ones stored classified (see
+    _reclassified_discovery_films); a watchlist film is classified fresh on
+    every build, so paying for the field in every page load would buy
+    nothing."""
     soonest_expiry: dict[tuple[str, str], str] = {}
     best_url: dict[tuple[str, str], tuple[int, str]] = {}
     for offer in film.offers:
@@ -88,11 +96,14 @@ def _all_offers_for_film(
             classification = _classify(brand, country, monetization_types, config, global_subscriptions, revisitable)
             key = (brand, country)
             url_entry = best_url.get(key)
-            result.append({
+            entry = {
                 "brand": brand, "country": country, "classification": classification,
                 "available_to": soonest_expiry.get(key),
                 "url": url_entry[1] if url_entry else None,
-            })
+            }
+            if keep_monetization:
+                entry["monetization_types"] = sorted(monetization_types)
+            result.append(entry)
     return result
 
 
@@ -281,6 +292,43 @@ def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> 
             "all_offers": all_offers,
         }
     return lookup
+
+
+
+def _reclassified_discovery_films(
+    discovery_films: dict[str, dict], config: dict[str, CountryConfig],
+    global_subscriptions: list[str], revisitable: set[str],
+) -> dict[str, dict]:
+    """Discovery films with their offers re-judged against today's config.
+
+    A watchlist film's offers are classified on every build, so changing
+    what you subscribe to takes effect immediately. A discovery film's were
+    classified once, when similar.py found it, and stored that way — so
+    they kept whatever verdict was current on the day, and a Settings
+    change (or a fix to the matching rules) never reached them. That's how
+    recommendation cards ended up still badging YouTube TV as a service
+    Josh has, months after nothing else did.
+
+    Nothing is re-fetched: an offer's brand, country and monetization types
+    are what _classify reads, and those are facts about the offer rather
+    than about the config, so the verdict can simply be recomputed.
+    Entries stored before monetization types were kept keep their stored
+    verdict — there's nothing to recompute from — and correct themselves
+    when discovery next re-runs.
+    """
+    result: dict[str, dict] = {}
+    for slug, film in discovery_films.items():
+        offers = []
+        for offer in film.get("all_offers", []):
+            monetization_types = offer.get("monetization_types")
+            if monetization_types is None:
+                offers.append(offer)
+                continue
+            offers.append({**offer, "classification": _classify(
+                offer["brand"], offer["country"], set(monetization_types),
+                config, global_subscriptions, revisitable)})
+        result[slug] = {**film, "all_offers": offers}
+    return result
 
 
 def _mini_card(film) -> dict:
@@ -541,9 +589,13 @@ MAX_PERSON_SECTIONS = 4
 
 
 def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
-                          films_by_slug: dict[str, dict], dismissed_recommendations: set[str],
+                          films_by_slug: dict[str, dict], discovery_films: dict[str, dict],
+                          dismissed_recommendations: set[str],
                           watch_together: dict[str, dict]) -> list[dict]:
-    lookup = {**films_by_slug, **state.discovery_films}
+    # Same merge order and the same already-reclassified discovery films as
+    # the payload's own films_by_slug, so a card here and the quick-look it
+    # opens can't disagree about what a film costs.
+    lookup = {**discovery_films, **films_by_slug}
     # Seeded with dismissed slugs so every section below skips them for
     # free — "not interested" only ever applies to a discovery pick (not
     # already on the watchlist), so this can't accidentally hide a real
@@ -806,6 +858,9 @@ def build_dashboard_data(
     for slug, entry in films_by_slug.items():
         entry["watch_together_status"] = watch_together.get(slug, {}).get("status")
 
+    discovery_films = _reclassified_discovery_films(
+        state.discovery_films, config, global_subscriptions, revisitable)
+
     josh_films = {slug: f for slug, f in state.films.items() if slug in state.josh_watchlist}
     josh_offers = {slug: films_all_offers[slug] for slug in josh_films}
     josh_state = dataclasses.replace(state, films=josh_films)
@@ -834,12 +889,16 @@ def build_dashboard_data(
         "last_run_at": state.last_run_at,
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
-        "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, dismissed_recommendations,
-                                              watch_together),
+        "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, discovery_films,
+                                              dismissed_recommendations, watch_together),
         "films": rows,
         "services": _service_rows(josh_state, josh_offers),
         "countries": _country_rows(josh_state, josh_offers),
-        "films_by_slug": {**films_by_slug, **state.discovery_films},
+        # Watchlist entries win over discovery ones for the same slug: both
+        # can hold the film, but only the watchlist copy was built from this
+        # run's data. The other order let a stored recommendation shadow it
+        # and show offers judged on some earlier day's config.
+        "films_by_slug": {**discovery_films, **films_by_slug},
         "sarah_films": sarah_films,
         "cinemas": _cinema_listings(state),
         "settings": _settings_data(config, global_subscriptions),

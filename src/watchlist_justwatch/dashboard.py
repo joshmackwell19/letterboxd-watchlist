@@ -1289,6 +1289,16 @@ _TEMPLATE = """<!DOCTYPE html>
   .poster-tile img { width: 100%; height: 100%; object-fit: cover; display: block; background: var(--hairline); }
   .poster-tile:hover img, .poster-tile:focus-visible img { opacity: 0.82; }
   .poster-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Poster view drops the service badges, which is the point, but "can I
+     watch this tonight" is the one thing worth keeping at a glance. Only
+     the two answers that mean yes get a dot — a film needing a new
+     subscription gets none, so the marks stay rare enough to scan. */
+  .poster-dot {
+    position: absolute; top: 6px; right: 6px; width: 9px; height: 9px; border-radius: 50%;
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  }
+  .poster-dot-have { background: #4ade80; }
+  .poster-dot-free { background: #60a5fa; }
   /* Only for a film with no artwork — every film has one today, but a new
      one can arrive before its poster does. */
   .poster-tile-fallback {
@@ -1950,6 +1960,11 @@ function renderClassificationToggles(containerId, filterState, onChange) {
     const span = document.createElement('span');
     span.textContent = CLASSIFICATION_LABELS[key];
     span.classList.add('filter-toggle', 'badge', 'badge-' + key);
+    // Drawn from the state rather than assumed on: these used to start on
+    // without exception, so nothing ever set this at build time. Now that
+    // the Services tab starts with one off, a pill that looked enabled
+    // while its filter was applied would be the UI lying about itself.
+    if (!filterState[key]) span.classList.add('off');
     span.addEventListener('click', () => {
       filterState[key] = !filterState[key];
       span.classList.toggle('off', !filterState[key]);
@@ -3608,7 +3623,17 @@ function renderFilms() {
           filmsFilterState[o.classification] && (!activeCountry || o.country === activeCountry))
       : [];
 
-    const include = Object.keys(visibleMain).length > 0 || visibleOther.length > 0;
+    // A film with no tracked offer anywhere matches none of the four
+    // classification filters, so it used to fall out of this tab entirely —
+    // unfindable even by searching its exact title, though it's on the
+    // watchlist and shows up on Home. Mostly films that aren't released
+    // yet. They belong in the list when the list isn't being asked an
+    // availability question; the moment one is asked — a classification
+    // turned off, a country or service chosen — they're correctly absent.
+    const askingAboutAvailability =
+      CLASSIFICATIONS.some(k => !filmsFilterState[k]) || activeCountry || activeService;
+    const include = Object.keys(visibleMain).length > 0 || visibleOther.length > 0 ||
+      (!row.any_service && !askingAboutAvailability);
     if (!include) return;
     Object.keys(visibleMain).forEach(b => visibleBrands.add(b));
     processed.push({ row, visibleMain, visibleOther });
@@ -3659,7 +3684,7 @@ function renderFilmCards(processed, columnBrands, showOtherServices) {
   // class carries the grid, so the two layouts don't need separate elements.
   if (posterLayout('films') === 'posters' && processed.length) {
     container.className = 'poster-grid';
-    processed.forEach(({ row }) => container.appendChild(buildPosterTile(row)));
+    processed.forEach(({ row }) => container.appendChild(buildPosterTile(row, activeCountry)));
     return;
   }
   // Back to the card grid — and for the empty state too, so "no films match"
@@ -3919,7 +3944,12 @@ const serviceCols = [
   { key: 'film_count', sort: r => r.film_count, dir: -1 },
   { key: 'unique_film_count', sort: r => r.unique_film_count, dir: -1 },
 ];
-const serviceFilterState = { have: true, could_get_again: true, free: true, subscription: true };
+// "Subscription needed" starts off: it's 847 of the 1,662 rows here, all of
+// them services Josh doesn't pay for, and they arrive ahead of anything
+// useful on a tab that's read to answer "what's on the things I've got".
+// The toggle sits right there, and the active-filter row says it's on, so
+// the rest is one tap away rather than hidden.
+const serviceFilterState = { have: true, could_get_again: true, free: true, subscription: false };
 let serviceSarahFilter = 'all';
 
 let serviceSortKey = 'film_count', serviceSortDir = -1;
@@ -4213,16 +4243,46 @@ function posterThumbUrl(url) {
   return url && LETTERBOXD_POSTER_SIZE_RE.test(url) ? url.replace(LETTERBOXD_POSTER_SIZE_RE, '-0-150-0-225-') : url;
 }
 
-function buildPosterTile(film) {
+// A tile is built from two different shapes: films_by_slug entries carry
+// all_offers, while a Films-tab row carries main/other_services. Both say
+// the same thing, so this reads whichever is present rather than making
+// the callers convert.
+//
+// The country matters. "Have" across all 124 countries is true of 80% of
+// the watchlist — most things are on Netflix or Prime somewhere, given a
+// VPN — so a dot meaning that would be green almost everywhere and say
+// almost nothing. Narrowed to one country it's 27%, which is the question
+// actually being asked: can I watch this tonight, here. So the dot follows
+// whatever country the view is already scoped to, and only falls back to
+// "anywhere" when the view isn't scoped at all.
+function watchableNowClass(film, country) {
+  const entries = film.all_offers
+    ? film.all_offers
+    : [...Object.values(film.main || {}).flat(), ...(film.other_services || [])];
+  const relevant = country ? entries.filter(e => e.country === country) : entries;
+  if (relevant.some(e => e.classification === 'have')) return 'have';
+  if (relevant.some(e => e.classification === 'free')) return 'free';
+  return null;   // needs a subscription, or isn't streaming anywhere
+}
+
+function buildPosterTile(film, country) {
   const tile = document.createElement('button');
   tile.type = 'button';
   tile.className = 'poster-tile';
   const label = film.title + (film.year ? ' (' + film.year + ')' : '');
   tile.title = label;
-  const titledPlaceholder = '<span class="poster-tile-fallback">' + esc(label) + '</span>';
+  // An element rather than a string, because it gets swapped in for a
+  // failed image below — rewriting the tile's innerHTML there would take
+  // the availability dot with it.
+  function titledPlaceholder() {
+    const span = document.createElement('span');
+    span.className = 'poster-tile-fallback';
+    span.textContent = label;
+    return span;
+  }
 
   if (!film.poster_url) {
-    tile.innerHTML = titledPlaceholder;
+    tile.appendChild(titledPlaceholder());
   } else {
     const thumb = posterThumbUrl(film.poster_url);
     tile.innerHTML = '<img loading="lazy" alt="' + escAttr(label) + '" src="' + escAttr(thumb) + '"' +
@@ -4238,9 +4298,17 @@ function buildPosterTile(film) {
         delete img.dataset.full;
         return;
       }
-      tile.innerHTML = titledPlaceholder;
+      img.replaceWith(titledPlaceholder());
     });
   }
+  const watchable = watchableNowClass(film, country);
+  if (watchable) {
+    const dot = document.createElement('span');
+    dot.className = 'poster-dot poster-dot-' + watchable;
+    dot.title = watchable === 'have' ? 'On a service you have' : 'Free to watch';
+    tile.appendChild(dot);
+  }
+
   tile.addEventListener('click', () => openQuickLook(film.slug));
   return tile;
 }
@@ -4260,10 +4328,10 @@ function renderLayoutSwitch(containerId, page, rerender) {
 
 // Both lists render the same tiles into whichever container they own, so
 // the two pages can't drift apart on sizing or on what a tap does.
-function fillPosterGrid(container, films) {
+function fillPosterGrid(container, films, country) {
   const grid = document.createElement('div');
   grid.className = 'poster-grid';
-  films.forEach(film => grid.appendChild(buildPosterTile(film)));
+  films.forEach(film => grid.appendChild(buildPosterTile(film, country)));
   container.appendChild(grid);
 }
 
@@ -4292,7 +4360,7 @@ function renderServiceDetail() {
     .filter(Boolean);
 
   if (posterLayout('service') === 'posters') {
-    fillPosterGrid(container, films);
+    fillPosterGrid(container, films, country);
     return;
   }
   films.forEach(film => container.appendChild(buildFilmDetailCard(film, brand, country, true)));

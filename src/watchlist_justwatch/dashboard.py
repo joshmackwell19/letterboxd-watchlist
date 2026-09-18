@@ -4178,11 +4178,16 @@ const LAYOUT_KEYS = {
 };
 let currentServiceDetail = null;   // {brand, country, countryName} — country null = all countries
 
+// Posters is the default: both lists are long enough that the first thing
+// wanted of them is usually "what's in here", which artwork answers faster
+// than a column of cards. Detailed is one tap away and, once chosen, is
+// remembered — so only an explicit "detailed" overrides this, not the
+// absence of a preference.
 function posterLayout(page) {
   try {
-    return localStorage.getItem(LAYOUT_KEYS[page]) === 'posters' ? 'posters' : 'detailed';
+    return localStorage.getItem(LAYOUT_KEYS[page]) === 'detailed' ? 'detailed' : 'posters';
   } catch {
-    return 'detailed';
+    return 'posters';
   }
 }
 

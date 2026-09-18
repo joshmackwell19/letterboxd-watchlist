@@ -1,3 +1,4 @@
+from watchlist_justwatch.brands import canonical_brand_name
 from watchlist_justwatch.config import (
     CountryConfig,
     classify_offer,
@@ -42,14 +43,15 @@ def test_service_matches_rejects_a_name_that_merely_ends_with_a_service():
 
 def test_service_matches_rejects_separate_products_sharing_a_prefix():
     # Extra trailing words usually mean a variant of the same service, but
-    # not for these — YouTube TV and YouTube Premium are their own paid
+    # not for these — YouTube TV and YouTube Sports are their own paid
     # products, and having YouTube doesn't get you either.
     assert not service_matches("YouTube", "YouTube TV")
-    assert not service_matches("YouTube", "YouTube Premium")
     assert not service_matches("YouTube", "YouTube Sports")
     # Naming one in config still matches that exact service, so someone who
     # does subscribe can just list it.
-    assert service_matches("YouTube Premium", "YouTube Premium")
+    assert service_matches("YouTube TV", "YouTube TV")
+    # Not "YouTube Premium" though: that's a tier, stripped by brands.py
+    # before matching is ever reached — see the canonicalization test below.
 
 
 def test_service_matches_keeps_real_variants_of_the_same_service():
@@ -104,3 +106,21 @@ def test_is_have_anywhere_matches_country_specific_subscription():
 
 def test_is_have_anywhere_false_for_untracked_country_and_service():
     assert not is_have_anywhere("Stan", "ZZ", {}, [])
+
+
+def test_tier_qualifiers_collapse_but_separate_products_do_not():
+    # Classification sees canonical brand names, not raw package names (see
+    # _all_offers_for_film), and the two rules interact: brands.py strips
+    # tier qualifiers, so "YouTube Premium" is already "YouTube" by the time
+    # matching happens, while "YouTube TV" survives as its own name and is
+    # held apart here. Getting this pair backwards is easy — the audit that
+    # motivated _STANDALONE_SERVICES compared raw names and reported a
+    # change to YouTube Premium that the pipeline never made.
+    config = {"GB": CountryConfig(country="GB", subscriptions=["YouTube"], free_tier=[])}
+
+    assert canonical_brand_name("YouTube Premium") == "YouTube"
+    assert is_have_anywhere(canonical_brand_name("YouTube Premium"), "GB", config, ["YouTube"])
+
+    for separate in ["YouTube TV", "YouTube Sports"]:
+        assert canonical_brand_name(separate) == separate
+        assert not is_have_anywhere(canonical_brand_name(separate), "GB", config, ["YouTube"])

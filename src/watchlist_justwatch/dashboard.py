@@ -312,21 +312,32 @@ def _reclassified_discovery_films(
     Nothing is re-fetched: an offer's brand, country and monetization types
     are what _classify reads, and those are facts about the offer rather
     than about the config, so the verdict can simply be recomputed.
-    Entries stored before monetization types were kept keep their stored
-    verdict — there's nothing to recompute from — and correct themselves
-    when discovery next re-runs.
+
+    An entry stored before monetization types were kept is still worth
+    re-judging, because the two rungs that matter most — is this a service
+    you have, or one you could get again — are decided by brand and country
+    alone. Only the last rung needs the types, to tell "free to watch" from
+    "needs a subscription", and there the stored answer stands. Waiting for
+    those entries to age out instead left nine recommendation cards
+    claiming Josh had YouTube TV.
     """
     result: dict[str, dict] = {}
     for slug, film in discovery_films.items():
         offers = []
         for offer in film.get("all_offers", []):
             monetization_types = offer.get("monetization_types")
-            if monetization_types is None:
-                offers.append(offer)
-                continue
-            offers.append({**offer, "classification": _classify(
-                offer["brand"], offer["country"], set(monetization_types),
-                config, global_subscriptions, revisitable)})
+            classification = _classify(
+                offer["brand"], offer["country"], set(monetization_types or ()),
+                config, global_subscriptions, revisitable)
+            if monetization_types is None and classification == "free":
+                # "free" here only means the types weren't there to say
+                # otherwise. Keep whichever of free/subscription was stored;
+                # if the stored answer was have or could_get_again — the very
+                # thing just overturned — assume it has to be paid for rather
+                # than guess it away.
+                stored = offer.get("classification")
+                classification = stored if stored in ("free", "subscription") else "subscription"
+            offers.append({**offer, "classification": classification})
         result[slug] = {**film, "all_offers": offers}
     return result
 

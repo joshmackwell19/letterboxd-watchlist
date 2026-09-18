@@ -198,16 +198,28 @@ def test_stored_discovery_classification_is_recomputed_against_todays_config():
     assert fresh["some-film"]["title"] == "Some Film"
 
 
-def test_discovery_entries_stored_before_monetization_types_keep_their_verdict():
-    # Nothing to recompute from, so the stored answer stands until discovery
-    # next re-runs — better than guessing at it.
+def test_entries_stored_without_monetization_types_are_still_re_judged():
+    # Whether a service is one you have needs only its brand and country, so
+    # an old entry can still be corrected on that — which is the rung that
+    # was wrong. Only free-vs-subscription needs the types it doesn't carry.
     from watchlist_justwatch.dashboard import _reclassified_discovery_films
 
     stored = {"old-film": {"all_offers": [
+        # Wrongly "have" under the old rules, and no types to recompute from.
         {"brand": "YouTube TV", "country": "US", "classification": "have",
+         "available_to": None, "url": None},
+        # Genuinely a service in the config: still "have", from brand alone.
+        {"brand": "Netflix", "country": "US", "classification": "subscription",
+         "available_to": None, "url": None},
+        # Not a service Josh has either way — the stored free/subscription
+        # answer is the only thing that can tell those two apart, so it stands.
+        {"brand": "Some Other Service", "country": "US", "classification": "free",
          "available_to": None, "url": None},
     ]}}
 
     fresh = _reclassified_discovery_films(stored, CONFIG, GLOBAL_SUBSCRIPTIONS, REVISITABLE)
+    verdicts = {o["brand"]: o["classification"] for o in fresh["old-film"]["all_offers"]}
 
-    assert fresh["old-film"]["all_offers"][0]["classification"] == "have"
+    assert verdicts["YouTube TV"] == "subscription"   # no longer claimed as yours
+    assert verdicts["Netflix"] == "have"
+    assert verdicts["Some Other Service"] == "free"

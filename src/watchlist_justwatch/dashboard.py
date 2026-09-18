@@ -1266,6 +1266,36 @@ _TEMPLATE = """<!DOCTYPE html>
   #searchPanel { display: flex; flex-direction: column; min-height: 0; }
   #searchResults { overflow-y: auto; min-height: 0; -webkit-overflow-scrolling: touch; }
   #searchDetailPanel { overflow-y: auto; min-height: 0; }
+  /* Title and layout switch share a row, wrapping to two on a phone rather
+     than squeezing the chips. */
+  .detail-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 16px;
+  }
+  .detail-head .detail-title { margin-bottom: 0; }
+  .layout-switch { display: flex; gap: 6px; }
+
+  /* Poster-only view: the point is seeing a whole service at once, so the
+     tiles are as small as the artwork stays recognisable at — three across
+     on a phone, as many as fit on a desktop. */
+  .poster-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px;
+  }
+  .poster-tile {
+    position: relative; padding: 0; border: none; background: none; cursor: pointer;
+    border-radius: 8px; overflow: hidden; aspect-ratio: 2 / 3;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .poster-tile img { width: 100%; height: 100%; object-fit: cover; display: block; background: var(--hairline); }
+  .poster-tile:hover img, .poster-tile:focus-visible img { opacity: 0.82; }
+  .poster-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Only for a film with no artwork — every film has one today, but a new
+     one can arrive before its poster does. */
+  .poster-tile-fallback {
+    width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+    padding: 8px; box-sizing: border-box; background: var(--hairline);
+    color: var(--text-muted); font-size: 11px; text-align: center; line-height: 1.3;
+  }
   .modal-card .detail-card { border-bottom: none; padding: 0; }
   .modal-card .detail-poster, .modal-card .detail-poster-placeholder { width: 120px; height: 176px; }
   .modal-close {
@@ -1736,7 +1766,10 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <section class="view" id="view-service-detail">
   <button class="back-btn" id="backToServices">← Back to services</button>
-  <h2 class="detail-title" id="serviceDetailTitle"></h2>
+  <div class="detail-head">
+    <h2 class="detail-title" id="serviceDetailTitle"></h2>
+    <div class="layout-switch" id="serviceLayoutSwitch"></div>
+  </div>
   <div id="serviceDetailCards"></div>
 </section>
 
@@ -4111,30 +4144,137 @@ function renderServicesRows() {
   renderServiceQuickJump();
 }
 
-function openServiceDetailAllCountries(brand) {
-  const slugSet = new Set();
-  DATA.services.filter(r => r.brand === brand).forEach(r => r.slugs.forEach(s => slugSet.add(s)));
-  const slugs = [...slugSet].sort((a, b) =>
-    (DATA.films_by_slug[a]?.title || '').localeCompare(DATA.films_by_slug[b]?.title || ''));
-  document.getElementById('serviceDetailTitle').innerHTML = esc(brand) + ' <i>All countries</i>';
+// ---------- Service detail: one service's films, two ways ----------
+//
+// Detailed is the default and unchanged: a card per film, with its
+// availability and expiry. Posters trades all of that for seeing the whole
+// service at once, and a tap opens the same quick-look every other poster
+// on the dashboard does.
+//
+// Which service is open is held here rather than implied by whatever was
+// last rendered, so flipping the switch can redraw the same films without
+// the caller having to remember how it got here.
+const SERVICE_LAYOUT_KEY = 'watchlist_service_layout_v1';
+let currentServiceDetail = null;   // {brand, country, countryName} — country null = all countries
+
+function serviceLayout() {
+  try {
+    return localStorage.getItem(SERVICE_LAYOUT_KEY) === 'posters' ? 'posters' : 'detailed';
+  } catch {
+    return 'detailed';
+  }
+}
+
+function setServiceLayout(layout) {
+  try {
+    localStorage.setItem(SERVICE_LAYOUT_KEY, layout);
+  } catch {
+    // Private browsing, or storage that's full or blocked — the switch still
+    // works for this visit, it just won't be remembered for the next one.
+  }
+  renderServiceDetail();
+}
+
+// Letterboxd serves its posters through a resizer whose dimensions are in
+// the path, so a grid can ask for tiles instead of the 600x900 the card
+// view wants — about 23KB rather than 69KB each, which is the difference
+// between 1.7MB and 5MB for a service with 215 films. Any URL that doesn't
+// match the expected shape is left exactly as it was, and a request that
+// fails falls back to the original.
+const LETTERBOXD_POSTER_SIZE_RE = /-0-600-0-900-/;
+
+function posterThumbUrl(url) {
+  return url && LETTERBOXD_POSTER_SIZE_RE.test(url) ? url.replace(LETTERBOXD_POSTER_SIZE_RE, '-0-150-0-225-') : url;
+}
+
+function buildPosterTile(film) {
+  const tile = document.createElement('button');
+  tile.type = 'button';
+  tile.className = 'poster-tile';
+  const label = film.title + (film.year ? ' (' + film.year + ')' : '');
+  tile.title = label;
+  const titledPlaceholder = '<span class="poster-tile-fallback">' + esc(label) + '</span>';
+
+  if (!film.poster_url) {
+    tile.innerHTML = titledPlaceholder;
+  } else {
+    const thumb = posterThumbUrl(film.poster_url);
+    tile.innerHTML = '<img loading="lazy" alt="' + escAttr(label) + '" src="' + escAttr(thumb) + '"' +
+      (thumb === film.poster_url ? '' : ' data-full="' + escAttr(film.poster_url) + '"') + '>';
+    const img = tile.querySelector('img');
+    img.addEventListener('error', () => {
+      // A resized URL gets one retry at the size the card view uses, in case
+      // only the thumbnail is missing. After that show the title instead:
+      // a broken-image icon with alt text spilling over the tile is worse
+      // than the placeholder a film with no artwork already gets.
+      if (img.dataset.full) {
+        img.src = img.dataset.full;
+        delete img.dataset.full;
+        return;
+      }
+      tile.innerHTML = titledPlaceholder;
+    });
+  }
+  tile.addEventListener('click', () => openQuickLook(film.slug));
+  return tile;
+}
+
+function renderServiceLayoutSwitch() {
+  const container = document.getElementById('serviceLayoutSwitch');
+  container.innerHTML = '';
+  const active = serviceLayout();
+  [['detailed', 'Detailed'], ['posters', 'Posters']].forEach(([value, label]) => {
+    const chip = document.createElement('span');
+    chip.className = 'quick-country' + (active === value ? ' active' : '');
+    chip.textContent = label;
+    chip.addEventListener('click', () => { if (active !== value) setServiceLayout(value); });
+    container.appendChild(chip);
+  });
+}
+
+function serviceDetailSlugs({ brand, country }) {
+  if (country === null) {
+    const slugSet = new Set();
+    DATA.services.filter(r => r.brand === brand).forEach(r => r.slugs.forEach(s => slugSet.add(s)));
+    return [...slugSet].sort((a, b) =>
+      (DATA.films_by_slug[a]?.title || '').localeCompare(DATA.films_by_slug[b]?.title || ''));
+  }
+  const row = DATA.services.find(r => r.brand === brand && r.country === country);
+  return row ? row.slugs : [];
+}
+
+function renderServiceDetail() {
+  if (!currentServiceDetail) return;
+  const { brand, country, countryName } = currentServiceDetail;
+  document.getElementById('serviceDetailTitle').innerHTML =
+    esc(brand) + ' <i>' + esc(country === null ? 'All countries' : countryName) + '</i>';
+  renderServiceLayoutSwitch();
+
   const container = document.getElementById('serviceDetailCards');
   container.innerHTML = '';
-  slugs.forEach(slug => {
-    const film = DATA.films_by_slug[slug];
-    container.appendChild(buildFilmDetailCard(film, brand, null, true));
-  });
+  const films = serviceDetailSlugs(currentServiceDetail)
+    .map(slug => DATA.films_by_slug[slug])
+    .filter(Boolean);
+
+  if (serviceLayout() === 'posters') {
+    const grid = document.createElement('div');
+    grid.className = 'poster-grid';
+    films.forEach(film => grid.appendChild(buildPosterTile(film)));
+    container.appendChild(grid);
+    return;
+  }
+  films.forEach(film => container.appendChild(buildFilmDetailCard(film, brand, country, true)));
+}
+
+function openServiceDetailAllCountries(brand) {
+  currentServiceDetail = { brand, country: null, countryName: null };
+  renderServiceDetail();
   showView('service-detail');
 }
 
 function openServiceDetail(brand, country, countryName) {
-  const row = DATA.services.find(r => r.brand === brand && r.country === country);
-  document.getElementById('serviceDetailTitle').innerHTML = esc(brand) + ' <i>' + esc(countryName) + '</i>';
-  const container = document.getElementById('serviceDetailCards');
-  container.innerHTML = '';
-  row.slugs.forEach(slug => {
-    const film = DATA.films_by_slug[slug];
-    container.appendChild(buildFilmDetailCard(film, brand, country, true));
-  });
+  currentServiceDetail = { brand, country, countryName };
+  renderServiceDetail();
   showView('service-detail');
 }
 

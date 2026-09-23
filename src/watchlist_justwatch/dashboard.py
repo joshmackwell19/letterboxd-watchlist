@@ -201,44 +201,72 @@ _CLASSIFICATION_PRIORITY = {"have": 0, "free": 1, "could_get_again": 2, "subscri
 
 
 def _service_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
-    """One row per (brand, country). "titles"/"unique_titles" are slug lists
-    — the detail page resolves full film info from films_by_slug so poster/
-    synopsis/etc. text isn't duplicated across every service row it appears in.
+    """One row per service, aggregated across every country it's in.
 
-    A single "classification" represents the whole group (same have/
-    could_get_again/free/subscription taxonomy as the film and country
-    views) rather than separate have/paid booleans. "have"/"could_get_again"
-    are structural per (brand, country) so never actually vary within a
-    group; only free-vs-subscription can, when the service isn't one you
-    have, and there the best (most favorable) classification wins.
+    The tab used to be a card per (brand, country) — Netflix appearing 118
+    times — which answered "what's on Netflix in Chile" but never "what is
+    Netflix actually worth to me". A service is one thing you pay for once,
+    so it's one card; the countries become a filter inside it, carried here
+    as `slugs_by_country`.
+
+    `unique_slugs` is the point of the exercise: the films on this service
+    that are on **no other service you have**. For a service you have that
+    is what you'd lose by cancelling it. For one you don't, the same
+    sentence reads as what you'd gain, since none of its films being on
+    something you have is exactly the case where it would add something.
+    Judged across all countries, so a film on Netflix here and Prime
+    elsewhere is not unique to either.
+
+    Note what "a service you have" means: every brand that classifies as
+    `have`, which includes the free broadcasters (BBC iPlayer, ITVX, ABC
+    iview) alongside the paid subscriptions. A film on iPlayer is one you
+    don't need Netflix for, so counting it is what makes the number answer
+    the question it's there to answer.
     """
-    by_brand_country: dict[tuple[str, str], dict] = {}
+    # The set of services you have that each film is on, which is all the
+    # uniqueness test needs and is cheaper than rescanning offers per brand.
+    have_brands_by_slug: dict[str, set[str]] = {
+        slug: {o["brand"] for o in all_offers if o["classification"] == "have"}
+        for slug, all_offers in films_all_offers.items()
+    }
 
+    by_brand: dict[str, dict] = {}
     for slug, all_offers in films_all_offers.items():
-        film_has_have = any(o["classification"] == "have" for o in all_offers)
         for offer in all_offers:
-            key = (offer["brand"], offer["country"])
-            entry = by_brand_country.setdefault(key, {"slugs": [], "has_have_flags": {}, "classifications": set()})
-            entry["slugs"].append(slug)
-            entry["has_have_flags"][slug] = film_has_have
+            entry = by_brand.setdefault(offer["brand"], {
+                "slugs": set(), "by_country": {}, "classifications": set(),
+            })
+            entry["slugs"].add(slug)
+            entry["by_country"].setdefault(offer["country"], set()).add(slug)
             entry["classifications"].add(offer["classification"])
 
+    def by_title(slug: str) -> str:
+        return state.films[slug].title.lower()
+
     rows = []
-    for (brand, country), entry in by_brand_country.items():
-        slugs = sorted(entry["slugs"], key=lambda s: state.films[s].title.lower())
-        unique_slugs = [s for s in slugs if not entry["has_have_flags"][s]]
-        classification = min(entry["classifications"], key=lambda c: _CLASSIFICATION_PRIORITY[c])
+    for brand, entry in by_brand.items():
+        slugs = sorted(entry["slugs"], key=by_title)
+        unique_slugs = [s for s in slugs if not (have_brands_by_slug[s] - {brand})]
+        countries = sorted(
+            ({"code": code, "name": country_name(code), "film_count": len(country_slugs)}
+             for code, country_slugs in entry["by_country"].items()),
+            key=lambda c: (-c["film_count"], c["name"]),
+        )
         rows.append({
             "brand": brand,
-            "country": country,
-            "country_name": country_name(country),
-            "classification": classification,
+            "classification": min(entry["classifications"], key=lambda c: _CLASSIFICATION_PRIORITY[c]),
             "film_count": len(slugs),
             "slugs": slugs,
             "unique_film_count": len(unique_slugs),
             "unique_slugs": unique_slugs,
+            "country_count": len(countries),
+            "countries": countries,
+            "slugs_by_country": {
+                code: sorted(country_slugs, key=by_title)
+                for code, country_slugs in entry["by_country"].items()
+            },
         })
-    rows.sort(key=lambda r: (-r["film_count"], r["brand"], r["country"]))
+    rows.sort(key=lambda r: (-r["film_count"], r["brand"]))
     return rows
 
 
@@ -1614,6 +1642,10 @@ _TEMPLATE = """<!DOCTYPE html>
   .service-card-name { font-weight: 600; font-size: 13.5px; }
   .service-card-name i { color: var(--text-faint); font-style: italic; font-weight: 400; display: block; font-size: 11.5px; }
   .service-card-stats { color: var(--text-muted); font-size: 11.5px; }
+  .service-card-stats strong { color: var(--text); font-weight: 600; }
+  .service-detail-filters {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 14px;
+  }
   .bottom-nav { display: none; }
   @media (max-width: 700px) {
     body { padding: calc(16px + env(safe-area-inset-top)) 12px 16px; }
@@ -1863,7 +1895,6 @@ _TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="controls" data-view="services" id="controls-services">
       <select id="serviceSelect"></select>
-      <select id="serviceCountrySelect"></select>
       <select id="serviceGenreSelect"></select>
       <div class="search-wrap">
         <input type="text" id="serviceFilmSearch" placeholder="Search title, year, director, cast...">
@@ -1943,6 +1974,10 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="detail-head">
     <h2 class="detail-title" id="serviceDetailTitle"></h2>
     <div class="layout-switch" id="serviceLayoutSwitch"></div>
+  </div>
+  <div class="service-detail-filters">
+    <span class="pill-toggle" id="serviceUniqueOnly">Only on this service</span>
+    <div class="quick-filters" id="serviceCountryPills"></div>
   </div>
   <div id="serviceDetailCards"></div>
 </section>
@@ -5050,7 +5085,6 @@ function populateServiceSelects() {
   const serviceNames = [...new Set(DATA.services.map(r => r.brand))].sort((a, b) => a.localeCompare(b));
   const topNames = serviceNames.filter(n => topBrands.has(n));
   const restNames = serviceNames.filter(n => !topBrands.has(n));
-  const countryNames = [...new Set(DATA.services.map(r => r.country_name))].sort((a, b) => a.localeCompare(b));
 
   const buildOptions = names => names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
   const serviceSelect = document.getElementById('serviceSelect');
@@ -5067,10 +5101,6 @@ function populateServiceSelects() {
     restGroup.innerHTML = buildOptions(restNames);
     serviceSelect.appendChild(restGroup);
   }
-
-  const countrySelect = document.getElementById('serviceCountrySelect');
-  countrySelect.innerHTML = '<option value="">All countries</option>' +
-    countryNames.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
 
   // Services rows aren't per-film, so unlike Films/Country there's no
   // per-context genre list to narrow to — just every genre across the
@@ -5098,11 +5128,10 @@ function renderActiveServiceFilters() {
   const container = document.getElementById('activeServiceFilters');
   container.innerHTML = '';
   const serviceQ = document.getElementById('serviceSelect').value;
-  const countryQ = document.getElementById('serviceCountrySelect').value;
   const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim();
   const anyToggleOff = CLASSIFICATIONS.some(k => !serviceFilterState[k]);
-  if (!serviceQ && !countryQ && !genreQ && !filmQ && serviceSarahFilter === 'all' && !anyToggleOff) return;
+  if (!serviceQ && !genreQ && !filmQ && serviceSarahFilter === 'all' && !anyToggleOff) return;
 
   if (genreQ) {
     const chip = document.createElement('span');
@@ -5116,13 +5145,6 @@ function renderActiveServiceFilters() {
     chip.className = 'filter-chip';
     chip.textContent = serviceQ + ' ✕';
     chip.addEventListener('click', () => { document.getElementById('serviceSelect').value = ''; renderServicesRows(); });
-    container.appendChild(chip);
-  }
-  if (countryQ) {
-    const chip = document.createElement('span');
-    chip.className = 'filter-chip';
-    chip.textContent = countryQ + ' ✕';
-    chip.addEventListener('click', () => { document.getElementById('serviceCountrySelect').value = ''; renderServicesRows(); });
     container.appendChild(chip);
   }
   if (filmQ) {
@@ -5159,7 +5181,6 @@ function renderActiveServiceFilters() {
   clearAll.textContent = 'Clear all ✕';
   clearAll.addEventListener('click', () => {
     document.getElementById('serviceSelect').value = '';
-    document.getElementById('serviceCountrySelect').value = '';
     document.getElementById('serviceGenreSelect').value = '';
     document.getElementById('serviceFilmSearch').value = '';
     document.getElementById('serviceFilmSearchClear').classList.add('hidden');
@@ -5188,7 +5209,6 @@ function renderServicesRows() {
   const container = document.getElementById('servicesGrid');
   container.innerHTML = '';
   const serviceQ = document.getElementById('serviceSelect').value;
-  const countryQ = document.getElementById('serviceCountrySelect').value;
   const genreQ = document.getElementById('serviceGenreSelect').value;
   const filmQ = document.getElementById('serviceFilmSearch').value.trim().toLowerCase();
   const sarahActive = serviceSarahFilter !== 'all';
@@ -5228,7 +5248,6 @@ function renderServicesRows() {
 
   const visibleRows = rows.filter(row => {
     if (serviceQ && row.brand !== serviceQ) return false;
-    if (countryQ && row.country_name !== countryQ) return false;
     if (filmQ && !row.slugs.some(s => searchHaystack(DATA.films_by_slug[s]).includes(filmQ))) return false;
     if (!serviceFilterState[row.classification]) return false;
     return true;
@@ -5236,40 +5255,23 @@ function renderServicesRows() {
 
   const frag = document.createDocumentFragment();
 
-  // One service picked, no specific country, and still more than one
-  // country showing — offer a merged card so "what's on MUBI, anywhere"
-  // doesn't mean opening every country's card and cross-referencing by
-  // hand, which was the actual complaint this view exists to fix.
-  if (serviceQ && !countryQ && visibleRows.length > 1) {
-    const slugSet = new Set(), uniqueSet = new Set();
-    let bestClass = visibleRows[0].classification;
-    visibleRows.forEach(row => {
-      row.slugs.forEach(s => slugSet.add(s));
-      row.unique_slugs.forEach(s => uniqueSet.add(s));
-      if (CLASSIFICATION_PRIORITY[row.classification] < CLASSIFICATION_PRIORITY[bestClass]) bestClass = row.classification;
-    });
-    const card = document.createElement('div');
-    card.className = 'service-card service-card-aggregate';
-    card.innerHTML =
-      '<div class="service-card-head">' +
-        '<span class="service-card-name">' + esc(serviceQ) + '<i>All countries</i></span>' +
-        '<span class="badge badge-' + bestClass + '">' + classificationBadgeLabel(bestClass) + '</span>' +
-      '</div>' +
-      '<div class="service-card-stats">' + slugSet.size + ' films tracked · ' + uniqueSet.size + ' unique</div>';
-    card.addEventListener('click', () => openServiceDetailAllCountries(serviceQ));
-    frag.appendChild(card);
-  }
-
   visibleRows.forEach(row => {
     const card = document.createElement('div');
     card.className = 'service-card';
+    // How many countries a service is in is worth knowing — it's the
+    // difference between something genuinely everywhere and something that
+    // only exists behind a VPN — but it isn't what the card is about.
+    const reach = row.country_count === 1
+      ? row.countries[0].name
+      : row.country_count + ' countries';
     card.innerHTML =
       '<div class="service-card-head">' +
-        '<span class="service-card-name">' + esc(row.brand) + '<i>' + esc(row.country_name) + '</i></span>' +
+        '<span class="service-card-name">' + esc(row.brand) + '<i>' + esc(reach) + '</i></span>' +
         '<span class="badge badge-' + row.classification + '">' + classificationBadgeLabel(row.classification) + '</span>' +
       '</div>' +
-      '<div class="service-card-stats">' + row.film_count + ' films tracked · ' + row.unique_film_count + ' unique</div>';
-    card.addEventListener('click', () => openServiceDetail(row.brand, row.country, row.country_name));
+      '<div class="service-card-stats">' + row.film_count + ' films · ' +
+        '<strong>' + row.unique_film_count + '</strong> only here</div>';
+    card.addEventListener('click', () => openServiceDetail(row.brand));
     frag.appendChild(card);
   });
   container.appendChild(frag);
@@ -5295,7 +5297,7 @@ const LAYOUT_KEYS = {
   service: 'watchlist_service_layout_v1',
   films: 'watchlist_films_layout_v1',
 };
-let currentServiceDetail = null;   // {brand, country, countryName} — country null = all countries
+let currentServiceDetail = null;   // {brand, country, uniqueOnly} — country null = every country
 
 // Posters is the default: both lists are long enough that the first thing
 // wanted of them is usually "what's in here", which artwork answers faster
@@ -5429,29 +5431,99 @@ function fillPosterGrid(container, films, country, onPick) {
   container.appendChild(grid);
 }
 
-function serviceDetailSlugs({ brand, country }) {
-  if (country === null) {
-    const slugSet = new Set();
-    DATA.services.filter(r => r.brand === brand).forEach(r => r.slugs.forEach(s => slugSet.add(s)));
-    return [...slugSet].sort((a, b) =>
-      (DATA.films_by_slug[a]?.title || '').localeCompare(DATA.films_by_slug[b]?.title || ''));
+// The films this service has, narrowed by whichever country pill is on and
+// by whether you asked for only what nothing else you have covers.
+function serviceDetailSlugs({ brand, country, uniqueOnly }) {
+  const row = DATA.services.find(r => r.brand === brand);
+  if (!row) return [];
+  const slugs = country === null ? row.slugs : (row.slugs_by_country[country] || []);
+  if (!uniqueOnly) return slugs;
+  // unique_slugs is computed across every country, so this stays the same
+  // question whichever country pill is on: is this film on anything else I
+  // have, anywhere. A film reachable on another of your services in another
+  // market isn't one this subscription is buying you.
+  const unique = new Set(row.unique_slugs);
+  return slugs.filter(s => unique.has(s));
+}
+
+// Netflix is in 118 countries and pills for all of them would bury the
+// films they're meant to filter. The list is already busiest-first, so the
+// cap keeps the markets with something in them and the rest are one tap away.
+const SERVICE_COUNTRY_PILL_CAP = 12;
+let serviceCountryPillsExpanded = false;
+
+function renderServiceCountryPills() {
+  const { brand, country } = currentServiceDetail;
+  const row = DATA.services.find(r => r.brand === brand);
+  const container = document.getElementById('serviceCountryPills');
+  container.innerHTML = '';
+  if (!row || row.countries.length < 2) return;   // nothing to choose between
+
+  // Busiest-first is how the data arrives, which for Netflix leads with
+  // South Korea — true, and not the question. The markets actually watched
+  // in come first, then the rest by how much is on them.
+  const home = HOME_COUNTRY_CODES
+    .map(code => row.countries.find(c => c.code === code))
+    .filter(Boolean);
+  const homeCodes = new Set(home.map(c => c.code));
+  const all = home.concat(row.countries.filter(c => !homeCodes.has(c.code)));
+  const capped = serviceCountryPillsExpanded ? all : all.slice(0, SERVICE_COUNTRY_PILL_CAP);
+  // A country picked from the long list stays visible after the list closes.
+  const shown = (country && !capped.some(c => c.code === country))
+    ? capped.concat(all.filter(c => c.code === country))
+    : capped;
+  const entries = shown.map(c => ({ value: c.code, label: c.name, count: c.film_count }));
+
+  renderQuickJumpChips('serviceCountryPills', entries, country === null ? '' : country, value => {
+    // '' is the All chip; tapping the country you're already in also clears,
+    // so the pills are their own way back to every country.
+    currentServiceDetail.country =
+      (value === '' || value === currentServiceDetail.country) ? null : value;
+    renderServiceDetail();
+  });
+
+  if (!serviceCountryPillsExpanded && all.length > SERVICE_COUNTRY_PILL_CAP) {
+    const more = document.createElement('span');
+    more.className = 'quick-country';
+    more.textContent = '+' + (all.length - SERVICE_COUNTRY_PILL_CAP) + ' more';
+    more.addEventListener('click', () => { serviceCountryPillsExpanded = true; renderServiceDetail(); });
+    container.appendChild(more);
   }
-  const row = DATA.services.find(r => r.brand === brand && r.country === country);
-  return row ? row.slugs : [];
 }
 
 function renderServiceDetail() {
   if (!currentServiceDetail) return;
-  const { brand, country, countryName } = currentServiceDetail;
-  document.getElementById('serviceDetailTitle').innerHTML =
-    esc(brand) + ' <i>' + esc(country === null ? 'All countries' : countryName) + '</i>';
-  renderLayoutSwitch('serviceLayoutSwitch', 'service', renderServiceDetail);
-
-  const container = document.getElementById('serviceDetailCards');
-  container.innerHTML = '';
+  const { brand, country } = currentServiceDetail;
+  const row = DATA.services.find(r => r.brand === brand);
   const films = serviceDetailSlugs(currentServiceDetail)
     .map(slug => DATA.films_by_slug[slug])
     .filter(Boolean);
+
+  const where = country === null
+    ? (row && row.country_count > 1 ? 'All ' + row.country_count + ' countries' : (row && row.countries[0] ? row.countries[0].name : ''))
+    : countryLabel(country);
+  document.getElementById('serviceDetailTitle').innerHTML =
+    esc(brand) + ' <i>' + esc(where) + ' · ' + films.length + ' film' + (films.length === 1 ? '' : 's') + '</i>';
+  renderLayoutSwitch('serviceLayoutSwitch', 'service', renderServiceDetail);
+  renderServiceCountryPills();
+
+  const uniqueToggle = document.getElementById('serviceUniqueOnly');
+  // 'active' is what the pill styles read — 'on' is the classification
+  // toggles' own class and does nothing here.
+  uniqueToggle.classList.toggle('active', Boolean(currentServiceDetail.uniqueOnly));
+  // The count is the answer to "what would I lose", so it belongs on the
+  // control rather than only in the list below it.
+  uniqueToggle.textContent = 'Only on this service' + (row ? ' (' + row.unique_film_count + ')' : '');
+
+  const container = document.getElementById('serviceDetailCards');
+  container.innerHTML = '';
+
+  if (!films.length) {
+    ensureNotEmpty(container, currentServiceDetail.uniqueOnly
+      ? 'Nothing here that isn\\'t on another service you have.'
+      : 'Nothing tracked on this service here.');
+    return;
+  }
 
   if (posterLayout('service') === 'posters') {
     fillPosterGrid(container, films, country);
@@ -5460,20 +5532,21 @@ function renderServiceDetail() {
   films.forEach(film => container.appendChild(buildFilmDetailCard(film, brand, country, true)));
 }
 
-function openServiceDetailAllCountries(brand) {
-  currentServiceDetail = { brand, country: null, countryName: null };
+document.getElementById('serviceUniqueOnly').addEventListener('click', () => {
+  currentServiceDetail.uniqueOnly = !currentServiceDetail.uniqueOnly;
   renderServiceDetail();
-  showView('service-detail');
-}
+});
 
-function openServiceDetail(brand, country, countryName) {
-  currentServiceDetail = { brand, country, countryName };
+// A service is one thing now, so opening one no longer means choosing a
+// country first — that's what the pills inside are for.
+function openServiceDetail(brand) {
+  serviceCountryPillsExpanded = false;   // a fresh service starts with the short list
+  currentServiceDetail = { brand, country: null, uniqueOnly: false };
   renderServiceDetail();
   showView('service-detail');
 }
 
 document.getElementById('serviceSelect').addEventListener('change', renderServicesRows);
-document.getElementById('serviceCountrySelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceGenreSelect').addEventListener('change', renderServicesRows);
 document.getElementById('serviceFilmSearch').addEventListener('input', renderServicesRows);
 wireSearchClear('serviceFilmSearch', 'serviceFilmSearchClear', renderServicesRows);

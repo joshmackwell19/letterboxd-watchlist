@@ -1314,9 +1314,23 @@ _TEMPLATE = """<!DOCTYPE html>
   .search-status { font-size: 12px; color: var(--text-faint); padding: 10px 2px; }
   .modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 50;
-    align-items: center; justify-content: center; padding: 20px;
+    align-items: center; justify-content: center;
+    /* An overlay covers the whole screen, status bar included, so a flat
+       20px put the top-anchored search card under the notch. */
+    padding: calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom));
   }
   .modal-overlay.active { display: flex; }
+  /* Quick look is opened from things that can themselves be inside the
+     search overlay, and both were z-index 50 — with quick look first in the
+     DOM, the tie went to search and the film opened underneath it. */
+  #quickLookOverlay { z-index: 60; }
+  /* While a modal is open the page behind it is frozen where it was. position
+     fixed rather than overflow:hidden because iOS ignores the latter on body
+     and scrolls the page behind the modal anyway; the offset is what stops
+     that freeze from also jumping you to the top. */
+  body.modal-open {
+    position: fixed; left: 0; right: 0; width: 100%; overflow: hidden;
+  }
   .modal-card {
     position: relative; background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px;
     max-width: 560px; width: 100%; max-height: 85vh; overflow-y: auto; padding: 20px; box-shadow: var(--shadow);
@@ -2480,7 +2494,59 @@ if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) {
   });
 }
 
-function showView(name) {
+// Freezing the page behind a modal. Counted rather than a boolean, because
+// quick look can be opened from inside the search overlay and closing the
+// upper one must not unfreeze the page while the lower one is still up.
+let openModalCount = 0;
+let lockedScrollY = 0;
+
+function lockPageScroll() {
+  if (openModalCount++ > 0) return;
+  lockedScrollY = window.scrollY;
+  document.body.style.top = (-lockedScrollY) + 'px';
+  document.body.classList.add('modal-open');
+}
+
+function unlockPageScroll() {
+  openModalCount = Math.max(0, openModalCount - 1);
+  if (openModalCount > 0) return;
+  document.body.classList.remove('modal-open');
+  document.body.style.top = '';
+  // Instant, not smooth: this is restoring where you already were, and
+  // animating it reads as the page jumping about on its own.
+  window.scrollTo(0, lockedScrollY);
+}
+
+// Pull-to-refresh reloads the page, and the page came back on Home every
+// time regardless of where you were. sessionStorage rather than local: it
+// is about this visit, and a new tab tomorrow should still start at Home.
+const LAST_VIEW_KEY = 'watchlist_last_view_v1';
+
+// Read once, here, before anything renders. Startup ends with showView('home')
+// to settle the controls bar, and that write would otherwise overwrite the
+// very value the restore below is trying to read back.
+const savedLastView = (() => {
+  try {
+    return JSON.parse(sessionStorage.getItem(LAST_VIEW_KEY) || 'null');
+  } catch {
+    return null;
+  }
+})();
+
+function rememberLastView(name, scrollY) {
+  try {
+    sessionStorage.setItem(LAST_VIEW_KEY, JSON.stringify({ view: name, scrollY: scrollY || 0 }));
+  } catch {
+    // Private browsing / storage full — a refresh just lands on Home, which
+    // is what it did before this existed.
+  }
+}
+
+// `scroll: 'manual'` means the caller positions the page itself (the detail
+// pages do, from their own trail); anything else restores wherever this view
+// was last left.
+function showView(name, options) {
+  rememberCurrentScroll();
   document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
   // The two drill-downs aren't tabs of their own, so each borrows the tab it
@@ -2498,6 +2564,12 @@ function showView(name) {
   // destinations (mobile keeps its own small gear icon instead) — handled
   // separately rather than folded into TABS so that loop above doesn't
   // break looking for a nonexistent "nav-settings" button.
+  if (!options || options.scroll !== 'manual') restoreScroll(viewScrollPositions['view-' + name]);
+  // The detail pages aren't worth coming back to on a refresh — they're
+  // rebuilt from a trail that a reload throws away — so the tab they belong
+  // to is what's remembered.
+  rememberLastView(DETAIL_VIEW_IDS.includes('view-' + name) ? filmDetailReturnView : name,
+                   viewScrollPositions['view-' + name]);
   document.getElementById('tab-settings').classList.toggle('active', owner === 'settings');
   document.getElementById('tab-review').classList.toggle('active', owner === 'review');
   document.getElementById('tab-sarah').classList.toggle('active', owner === 'sarah');
@@ -3264,11 +3336,21 @@ function openQuickLook(slug) {
   });
   content.appendChild(more);
 
-  document.getElementById('quickLookOverlay').classList.add('active');
+  showQuickLookOverlay();
+}
+
+function showQuickLookOverlay() {
+  const overlay = document.getElementById('quickLookOverlay');
+  if (overlay.classList.contains('active')) return;   // already up; don't double-count the lock
+  overlay.classList.add('active');
+  lockPageScroll();
 }
 
 function closeQuickLook() {
-  document.getElementById('quickLookOverlay').classList.remove('active');
+  const overlay = document.getElementById('quickLookOverlay');
+  if (!overlay.classList.contains('active')) return;
+  overlay.classList.remove('active');
+  unlockPageScroll();
 }
 
 document.getElementById('quickLookClose').addEventListener('click', closeQuickLook);
@@ -3499,7 +3581,11 @@ function showSearchResultsPanel() {
 }
 
 function openFilmSearch() {
-  document.getElementById('searchOverlay').classList.add('active');
+  const overlay = document.getElementById('searchOverlay');
+  if (!overlay.classList.contains('active')) {
+    overlay.classList.add('active');
+    lockPageScroll();
+  }
   showSearchResultsPanel();
   const input = document.getElementById('filmSearchInput');
   input.focus();
@@ -3507,7 +3593,10 @@ function openFilmSearch() {
 }
 
 function closeFilmSearch() {
-  document.getElementById('searchOverlay').classList.remove('active');
+  const overlay = document.getElementById('searchOverlay');
+  if (!overlay.classList.contains('active')) return;
+  overlay.classList.remove('active');
+  unlockPageScroll();
 }
 
 document.getElementById('filmSearchBtn').addEventListener('click', openFilmSearch);
@@ -3573,36 +3662,77 @@ let currentDetailStop = null;
 
 const DETAIL_VIEW_IDS = ['view-film-detail', 'view-person-detail'];
 
-function renderDetailStop(stop) {
+// Where the page was scrolled to when you left it, so Back puts it back
+// rather than dropping you at the top of a list you were halfway down.
+// Keyed by view id for the tabs; a trail entry carries its own.
+const viewScrollPositions = {};
+
+function rememberCurrentScroll() {
+  const current = document.querySelector('section.view.active');
+  if (current) viewScrollPositions[current.id] = window.scrollY;
+}
+
+// Scrolling is the only thing that moves the page between view switches, so
+// without this the position stored for a refresh is wherever the tab was
+// when you arrived at it, not where you actually read to. Throttled because
+// this fires continuously and sessionStorage is a synchronous write.
+let scrollPersistTimer = null;
+window.addEventListener('scroll', () => {
+  rememberCurrentScroll();
+  if (scrollPersistTimer) return;
+  scrollPersistTimer = setTimeout(() => {
+    scrollPersistTimer = null;
+    const current = document.querySelector('section.view.active');
+    if (!current) return;
+    const name = current.id.replace('view-', '');
+    rememberLastView(DETAIL_VIEW_IDS.includes(current.id) ? filmDetailReturnView : name,
+                     DETAIL_VIEW_IDS.includes(current.id)
+                       ? viewScrollPositions['view-' + filmDetailReturnView]
+                       : window.scrollY);
+  }, 400);
+}, { passive: true });
+
+// After a render the new content has to exist before the browser can scroll
+// to an offset inside it, so this waits a frame rather than scrolling into a
+// page that is still the previous one's height.
+function restoreScroll(y) {
+  requestAnimationFrame(() => window.scrollTo(0, y || 0));
+}
+
+function renderDetailStop(stop, scrollTo) {
   if (stop.kind === 'person') {
     renderPersonDetail(stop);
     requestPerson(stop);
-    showView('person-detail');
+    showView('person-detail', { scroll: 'manual' });
   } else {
     renderFilmDetail(stop.slug);
-    showView('film-detail');
+    showView('film-detail', { scroll: 'manual' });
   }
-  window.scrollTo(0, 0);
+  restoreScroll(scrollTo || 0);
 }
 
 // Every way into either detail page goes through here, so the trail and the
 // tab to return to are decided in exactly one place.
 function pushDetailStop(stop, fromView) {
   const current = document.querySelector('section.view.active');
+  rememberCurrentScroll();
   if (current && DETAIL_VIEW_IDS.includes(current.id)) {
-    if (currentDetailStop) detailTrail.push(currentDetailStop);
+    // The stop being left keeps where it was read to, so unwinding a chain
+    // returns each page to its own position, not to the top.
+    if (currentDetailStop) detailTrail.push({ ...currentDetailStop, scrollY: window.scrollY });
   } else {
     filmDetailReturnView = fromView || (current ? current.id.replace('view-', '') : 'films');
     detailTrail = [];
   }
   currentDetailStop = stop;
-  renderDetailStop(stop);
+  renderDetailStop(stop, 0);   // a page you're opening starts at its top
 }
 
 function goBackFromDetail() {
   if (detailTrail.length) {
-    currentDetailStop = detailTrail.pop();
-    renderDetailStop(currentDetailStop);
+    const previous = detailTrail.pop();
+    currentDetailStop = previous;
+    renderDetailStop(previous, previous.scrollY);
     return;
   }
   currentDetailStop = null;
@@ -4024,7 +4154,7 @@ function renderRelationSections(film, live) {
 function openLiveQuickLook(row) {
   const content = document.getElementById('quickLookContent');
   content.innerHTML = '<p class="search-status">Looking up ' + esc(row.title) + '…</p>';
-  document.getElementById('quickLookOverlay').classList.add('active');
+  showQuickLookOverlay();
 
   // buildSearchedFilm reads the picker's own row shape, which carries three
   // fields a relation row doesn't. Absent, not empty — Letterboxd supplies
@@ -5658,6 +5788,30 @@ function updateNewSinceLastViewed() {
 }
 
 updateNewSinceLastViewed();
+
+// ---------- Come back where you left off ----------
+//
+// The browser's own scroll restoration measures the page before this script
+// has switched to the right view, so it restores against the wrong content
+// height. The view and offset are restored explicitly below instead.
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+
+//
+// Pull-to-refresh reloads the page, which dropped you on Home however far
+// into the Films tab you were. Restored last, after every tab has rendered,
+// so the view being switched to is already built and its scroll offset
+// means something.
+(function restoreLastView() {
+  const saved = savedLastView;
+  if (!saved || !saved.view) return;
+  // A stored name has to still be a view — a stale key from an older build
+  // would otherwise throw on the getElementById below and take the whole
+  // page's scripts with it.
+  if (!document.getElementById('view-' + saved.view)) return;
+  if (saved.view === 'settings') renderSettings();
+  viewScrollPositions['view-' + saved.view] = saved.scrollY || 0;
+  showView(saved.view);
+})();
 
 // ---------- Pull to refresh (mobile) ----------
 // Reload picks up whatever dashboard.html the last daily run deployed —

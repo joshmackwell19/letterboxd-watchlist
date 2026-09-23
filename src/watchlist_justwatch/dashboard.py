@@ -967,7 +967,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Watchlist streaming dashboard</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icons/favicon-32.png" sizes="32x32">
@@ -1220,9 +1220,35 @@ _TEMPLATE = """<!DOCTYPE html>
   .surprise-btn:hover { background: var(--accent); color: var(--bg); }
   .detail-title { font-size: 17px; font-weight: 600; margin: 0 0 16px; }
   .detail-title i { color: var(--text-faint); font-style: italic; font-weight: 400; }
+  /* No zoom on a phone. Safari has ignored user-scalable=no since iOS 10,
+     so the meta tag alone does nothing; what works is denying the gestures
+     themselves. pan-x pan-y is every panning direction minus pinch-zoom and
+     minus the double-tap that was zooming the page on a second tap of a
+     bottom-nav icon.
+
+     Scoped to coarse pointers so a desktop browser is left completely
+     alone — its own zoom still reflows the grid, which is the wanted
+     behaviour there, and a Mac trackpad pinch (which fires the same gesture
+     events Safari uses on iOS) keeps working. */
+  @media (pointer: coarse) {
+    html, body { touch-action: pan-x pan-y; }
+    /* touch-action isn't inherited — the ancestor chain governs the gesture,
+       so the rule above is what actually does the work. This is stated on
+       the controls anyway, because the bottom nav is where a stray second
+       tap lands and it should be obvious there that the zoom is refused on
+       purpose. .review-card keeps its own pan-y for the swipe handler. */
+    button, a, .poster-tile, .film-card, .bottom-nav-btn, .tab { touch-action: pan-x pan-y; }
+  }
   .detail-card {
     display: flex; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--hairline);
   }
+  /* A flex item defaults to min-width:auto, which means it refuses to shrink
+     below its widest unbreakable child — one long service name ("Sony
+     Pictures Core United States") was therefore setting the card's width and
+     pushing it past the modal on 112 of 527 films. min-width:0 lets it
+     shrink; the wrapping rules below are what it shrinks into. */
+  .detail-body { min-width: 0; flex: 1; }
+  .detail-body h3, .detail-meta, .detail-synopsis { overflow-wrap: anywhere; }
   .detail-poster { width: 76px; height: 112px; object-fit: cover; border-radius: 6px; flex-shrink: 0; background: var(--hairline); }
   .detail-poster-placeholder { width: 76px; height: 112px; border-radius: 6px; flex-shrink: 0; background: var(--hairline); }
   .detail-body h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
@@ -1231,7 +1257,15 @@ _TEMPLATE = """<!DOCTYPE html>
   .detail-meta strong { color: var(--text); font-weight: 600; }
   .detail-genre { color: #c98a7d; }
   .detail-synopsis { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin: 4px 0 8px; }
-  .badge-wrap { display: flex; flex-wrap: wrap; gap: 2px; }
+  .badge-wrap { display: flex; flex-wrap: wrap; gap: 2px; min-width: 0; }
+  /* A badge is one unbreakable run of text; without this the longest service
+     name in a country decides how wide the card has to be. */
+  /* nowrap is right for the usual "Netflix United Kingdom" pill, but a
+     badge is one unbreakable run of text, so "Sony Pictures Core Turks and
+     Caicos Islands" was setting how wide the card had to be. Inside a wrap
+     container it may break — between the service and the country first,
+     which is where it reads naturally anyway. */
+  .badge-wrap .badge { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
   .expiring-notes { margin-top: 8px; }
   .expiring-note { font-size: 11.5px; color: #fbbf24; font-weight: 500; margin: 0 0 3px; }
   .expiring-note i { color: #fbbf24; font-style: italic; opacity: 0.85; }
@@ -2432,6 +2466,19 @@ async function handleRefreshDataClick() {
   }
 }
 refreshDataBtns.forEach(btn => btn.addEventListener('click', handleRefreshDataClick));
+
+// touch-action above stops double-tap and pinch through the compositor, but
+// Safari on iOS still zooms the *page* from its own gesture events, which
+// nothing in CSS reaches. Cancelling them is the only thing that does.
+//
+// Gated on a coarse pointer for the same reason the CSS is: these are the
+// events a Mac trackpad pinch fires too, and desktop zoom is meant to keep
+// working.
+if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) {
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach(name => {
+    document.addEventListener(name, event => event.preventDefault(), { passive: false });
+  });
+}
 
 function showView(name) {
   document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));

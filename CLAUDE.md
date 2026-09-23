@@ -135,6 +135,12 @@ elsewhere is unique to neither) and counting the free broadcasters among
 "services you have", since a film on iPlayer isn't a reason to keep paying
 for Netflix.
 
+A separate "What you'd lose" page (`view-subscriptions`, reached from a
+link on the Services tab) ranks the services you have by what cancelling
+each would cost, over a greedy coverage build-up — which service covers
+the most, then what the next one adds. It's derived entirely from
+`DATA.services` in JS and adds no payload.
+
 `brands.py`'s `_VARIANTS` folds a tier or profile into the service it
 belongs to (Netflix Kids → Netflix, Channel 4 Plus → Channel 4) — both
 reach you on a subscription you already have, so left separate they gave

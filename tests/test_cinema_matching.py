@@ -48,6 +48,38 @@ def test_venue_annotations_are_stripped_and_a_real_year_kept(listing, expected_t
     assert clean_listing_title(listing) == (expected_title, expected_year)
 
 
+@pytest.mark.parametrize("listing,expected", [
+    # An ordinal in front of "Anniversary" — the bracketed form was caught
+    # from the start, this one wasn't, and both are equally common.
+    ("Amelie - 25th Anniversary", "Amelie"),
+    ("The Transformers: The Movie: 40th Anniversary", "The Transformers: The Movie"),
+    # Square brackets do the same job as round ones, usually for a language
+    # note or the film's original title.
+    ("Whisper of the Heart [SUBTITLED]", "Whisper of the Heart"),
+    ("Cinema Paradiso [Nuovo Cinema Paradiso]", "Cinema Paradiso"),
+    ("The Colour of Pomegranates [Sayat Nova]", "The Colour of Pomegranates"),
+    # A strand the venue programmes under, in front of the film.
+    ("Relaxed Screening: Ish", "Ish"),
+    ("Kids' Club: Hoppers", "Hoppers"),
+    ("Parent & Baby Screening: Lady", "Lady"),
+    # An event bolted on behind it.
+    ("Sense and Sensibility + Recorded Q&A with George Mackay", "Sense and Sensibility"),
+    ("If.... + Short Film", "If...."),
+    ("Better Class (Altas capacidades) + Q&A", "Better Class"),
+    # Both ends at once.
+    ("Preschool Pics: The Smeds and the Smoos + Music", "The Smeds and the Smoos"),
+])
+def test_strand_names_and_bolted_on_events_are_stripped(listing, expected):
+    assert clean_listing_title(listing)[0] == expected
+
+
+def test_a_colon_in_the_films_own_title_is_not_a_strand_name():
+    # Only the strands venues actually programme are stripped — a blanket
+    # "everything before the colon" would eat half the films showing.
+    for title in ["Spider-Man: Brand New Day", "Dune: Part Two", "Star Wars: A New Hope"]:
+        assert clean_listing_title(title)[0] == title
+
+
 def test_brackets_that_are_part_of_the_title_survive():
     # Stripping these would leave a title no film has, which is worse than
     # leaving an annotation on.
@@ -137,6 +169,17 @@ def test_event_cinema_does_not_get_matched_to_whatever_tmdb_returns():
         film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
 
     assert match is None
+
+
+def test_accents_do_not_block_a_match():
+    # Venues type "Amelie"; TMDB holds "Amélie". Without folding, the check
+    # that stops a concert film matching a real one rejects this too.
+    match = resolve_listing_to_letterboxd(
+        "Amelie - 25th Anniversary", None,
+        search_movie=_search({"id": 194, "title": "Amélie", "release_date": "2001-04-25"}),
+        film_details_by_tmdb_id=_details({**LA_LA_LAND_LETTERBOXD, "slug": "amelie"}))
+
+    assert match["slug"] == "amelie"
 
 
 def test_the_original_title_counts_as_agreement():

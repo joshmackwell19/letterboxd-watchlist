@@ -5067,8 +5067,13 @@ function setPosterLayout(page, layout, rerender) {
 // fails falls back to the original.
 const LETTERBOXD_POSTER_SIZE_RE = /-0-600-0-900-/;
 
+// A grid tile measures 345-387 device pixels across on a phone (115-129 CSS
+// px at DPR 3), so the 150px thumb this used to ask for was being upscaled
+// 2.3x and looked it. 300 costs ~9KB more per poster and lands close enough
+// to 1:1 to read as sharp; the full 600 stays the retry for a thumb that
+// fails, and what the hero and cards use.
 function posterThumbUrl(url) {
-  return url && LETTERBOXD_POSTER_SIZE_RE.test(url) ? url.replace(LETTERBOXD_POSTER_SIZE_RE, '-0-150-0-225-') : url;
+  return url && LETTERBOXD_POSTER_SIZE_RE.test(url) ? url.replace(LETTERBOXD_POSTER_SIZE_RE, '-0-300-0-450-') : url;
 }
 
 // A tile is built from two different shapes: films_by_slug entries carry

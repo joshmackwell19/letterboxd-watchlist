@@ -80,6 +80,12 @@ const TMDB_BASE_URL = "https://api.themoviedb.org/3";
 // w154 is the smallest TMDB size that still looks right in the picker list;
 // the full-size poster on the card comes from Letterboxd instead.
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w154";
+// Poster *tiles* are a different job: measured, a grid tile is 345-387
+// device pixels wide on a phone, so w154 arrives at well under half the
+// resolution it's drawn at and looks soft next to the Letterboxd posters
+// beside it. w342 is the nearest size that covers it (+24KB per poster,
+// and only for the untracked films in a relation grid).
+const TMDB_TILE_POSTER_BASE = "https://image.tmdb.org/t/p/w342";
 const JUSTWATCH_GRAPHQL_URL = "https://apis.justwatch.com/graphql";
 const JUSTWATCH_RETRY_DELAY_MS = 600;
 
@@ -421,7 +427,7 @@ function relationRow(movie) {
     tmdb_id: movie.id,
     title: movie.title || movie.original_title || "",
     year: releaseYear(movie.release_date),
-    poster_url: movie.poster_path ? TMDB_POSTER_BASE + movie.poster_path : null,
+    poster_url: movie.poster_path ? TMDB_TILE_POSTER_BASE + movie.poster_path : null,
     tmdb_rating: typeof movie.vote_average === "number" ? movie.vote_average : null,
     popularity: typeof movie.popularity === "number" ? movie.popularity : 0,
   };

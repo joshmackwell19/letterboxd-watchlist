@@ -58,6 +58,14 @@ class StateDoc:
     # matching against the watchlist happens fresh at dashboard-build time
     # (see dashboard.py), not stored here.
     cinema_showtimes: list[dict] = field(default_factory=list)
+    # listing_match_key -> the Letterboxd film that listing is showing, for
+    # the listings the watchlist can't answer for (most of them). Resolving
+    # one costs a TMDB search plus a Letterboxd page, so unlike the
+    # watchlist match this can't be redone at build time and is cached here
+    # across runs. A key mapping to None is a listing with no Letterboxd
+    # film at all — event cinema, mostly — remembered so it isn't retried
+    # every day forever.
+    cinema_matches: dict[str, dict | None] = field(default_factory=dict)
 
 
 def get_cached_entry_id(state: StateDoc, slug: str) -> tuple[str | None, str | None]:

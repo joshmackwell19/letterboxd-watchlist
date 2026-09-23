@@ -1306,6 +1306,39 @@ _TEMPLATE = """<!DOCTYPE html>
     padding: 8px; box-sizing: border-box; background: var(--hairline);
     color: var(--text-muted); font-size: 11px; text-align: center; line-height: 1.3;
   }
+  /* Film detail page — the long look at one film, as opposed to quick
+     look's glance. Nothing is capped or collapsed here. */
+  .film-hero { display: flex; gap: 18px; margin-bottom: 8px; flex-wrap: wrap; }
+  .film-hero-poster { width: 150px; border-radius: 10px; background: var(--hairline); flex-shrink: 0; }
+  .film-hero-body { flex: 1 1 200px; min-width: 0; }
+  /* On a phone the desktop poster is wide enough to push the text onto its
+     own line, which wastes the whole right half of the screen on nothing —
+     a narrower poster keeps title and facts beside it. */
+  @media (max-width: 480px) {
+    .film-hero { gap: 14px; }
+    .film-hero-poster { width: 112px; }
+  }
+  .film-hero-body h2 { font-size: 21px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .film-hero-body h2 span { color: var(--text-faint); font-weight: 400; }
+  .film-hero-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--text-muted); margin: 0 0 10px; }
+  .film-hero-facts .rating { color: #4ade80; font-weight: 600; }
+  .film-hero-synopsis { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin: 0 0 12px; }
+  .film-hero-meta { font-size: 12.5px; color: var(--text-muted); margin: 0 0 5px; }
+  .film-hero-meta strong { color: var(--text); font-weight: 600; }
+  /* Availability in full: every service, grouped by what it costs you,
+     rather than quick look's capped single run of badges. */
+  .avail-group { margin-bottom: 12px; }
+  .avail-group-head { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-faint); font-weight: 600; margin: 0 0 6px; }
+  .film-section { margin-top: 26px; }
+  .film-section-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    margin: 0 0 10px; flex-wrap: wrap;
+  }
+  .film-section-head h3 { font-size: 14.5px; font-weight: 600; margin: 0; }
+  .film-section-head .count { font-size: 12px; color: var(--text-faint); }
+  .film-section-empty { font-size: 12.5px; color: var(--text-faint); }
+  .quick-look-more { margin-top: 14px; font-size: 12.5px; padding: 7px 14px; }
   .modal-card .detail-card { border-bottom: none; padding: 0; }
   .modal-card .detail-poster, .modal-card .detail-poster-placeholder { width: 120px; height: 176px; }
   .modal-close {
@@ -1829,6 +1862,11 @@ _TEMPLATE = """<!DOCTYPE html>
   <div id="sarahGrid" class="film-cards"></div>
 </section>
 
+<section class="view" id="view-film-detail">
+  <button class="back-btn" id="filmDetailBack">← Back</button>
+  <div id="filmDetailContent"></div>
+</section>
+
 <nav class="bottom-nav">
   <button class="bottom-nav-btn active" id="nav-home">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -2321,8 +2359,14 @@ refreshDataBtns.forEach(btn => btn.addEventListener('click', handleRefreshDataCl
 function showView(name) {
   document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
+  // The two drill-downs aren't tabs of their own, so each borrows the tab it
+  // belongs to: service-detail always Services, film-detail whichever tab you
+  // opened the film from — which can itself be service-detail, hence the
+  // second hop rather than a single check.
+  let owner = name === 'film-detail' ? filmDetailReturnView : name;
+  if (owner === 'service-detail') owner = 'services';
   TABS.forEach(n => {
-    const isActive = n === name || (name === 'service-detail' && n === 'services');
+    const isActive = n === owner;
     document.getElementById('tab-' + n).classList.toggle('active', isActive);
     document.getElementById('nav-' + n).classList.toggle('active', isActive);
   });
@@ -2330,9 +2374,9 @@ function showView(name) {
   // destinations (mobile keeps its own small gear icon instead) — handled
   // separately rather than folded into TABS so that loop above doesn't
   // break looking for a nonexistent "nav-settings" button.
-  document.getElementById('tab-settings').classList.toggle('active', name === 'settings');
-  document.getElementById('tab-review').classList.toggle('active', name === 'review');
-  document.getElementById('tab-sarah').classList.toggle('active', name === 'sarah');
+  document.getElementById('tab-settings').classList.toggle('active', owner === 'settings');
+  document.getElementById('tab-review').classList.toggle('active', owner === 'review');
+  document.getElementById('tab-sarah').classList.toggle('active', owner === 'sarah');
 
   // The fixed bar's second row holds each tab's own search/sort/filter
   // controls (moved up out of the scrolling content so they never scroll
@@ -3084,6 +3128,18 @@ function openQuickLook(slug) {
   const content = document.getElementById('quickLookContent');
   content.innerHTML = '';
   content.appendChild(buildFilmDetailCard(film, null, null));
+
+  // The glance stays the glance; this is the way through to the long look.
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'surprise-btn quick-look-more';
+  more.textContent = 'Full details →';
+  more.addEventListener('click', () => {
+    closeQuickLook();
+    openFilmDetail(slug);
+  });
+  content.appendChild(more);
+
   document.getElementById('quickLookOverlay').classList.add('active');
 }
 
@@ -3363,6 +3419,238 @@ document.addEventListener('keydown', event => {
     event.preventDefault();
     openFilmSearch();
   }
+});
+
+// ---------- Film detail page ----------
+//
+// Quick look answers "what is this and can I watch it"; this answers "tell
+// me about this film, and what else like it can I watch". It's a view
+// rather than a modal because it's long, it links on to other films, and
+// coming back from one should return you where you were.
+//
+// Everything here is built from the payload the page already has — the
+// films tracked plus the ones discovery surfaced — so opening it costs
+// nothing. Reaching past that corpus to the rest of TMDB is the next step,
+// deliberately separate.
+
+const FILM_RELATION_CAP = 18;
+const ACTOR_SECTIONS_CAP = 3;
+// Two shared genres is the line where "also a thriller" becomes "the same
+// sort of film"; one is too loose to be worth showing.
+const SIMILAR_MIN_SHARED_GENRES = 2;
+
+// Where to return to, and the trail of films walked through to get here, so
+// a chain of "more by this director" unwinds one film at a time.
+let filmDetailReturnView = 'films';
+let filmDetailTrail = [];
+
+function filmDirectors(film) {
+  return (film.director || '').split(', ').map(n => n.trim()).filter(Boolean);
+}
+
+function allKnownFilms() {
+  return Object.entries(DATA.films_by_slug).map(([slug, film]) => ({ ...film, slug }));
+}
+
+function relatedByDirector(film, director) {
+  return allKnownFilms().filter(other =>
+    other.slug !== film.slug && filmDirectors(other).includes(director));
+}
+
+function relatedByActor(film, actor) {
+  return allKnownFilms().filter(other =>
+    other.slug !== film.slug && (other.starring || []).includes(actor));
+}
+
+// Local stand-in for "similar": films sharing most of this one's genres,
+// best-rated first. Not TMDB's notion of similarity — that needs the live
+// lookup — but it's honest about what it is and costs nothing.
+function similarByGenre(film) {
+  const genres = new Set(film.genre || []);
+  if (genres.size < SIMILAR_MIN_SHARED_GENRES) return [];
+  return allKnownFilms()
+    .map(other => ({
+      film: other,
+      shared: (other.genre || []).filter(g => genres.has(g)).length,
+    }))
+    .filter(x => x.film.slug !== film.slug && x.shared >= SIMILAR_MIN_SHARED_GENRES)
+    .sort((a, b) => (b.shared - a.shared) || ((b.film.rating || 0) - (a.film.rating || 0)))
+    .map(x => x.film);
+}
+
+function watchlistRank(film) {
+  // Watchlist films lead their section: they're the ones already wanted,
+  // and a recommendation is a weaker claim than "you put this on the list".
+  return isDiscoveryOnly(film.slug) ? 1 : 0;
+}
+
+function sortRelated(films) {
+  return films.slice().sort((a, b) =>
+    (watchlistRank(a) - watchlistRank(b)) || ((b.rating || 0) - (a.rating || 0)));
+}
+
+function filmRelationSection(title, films, emptyNote) {
+  const section = document.createElement('div');
+  section.className = 'film-section';
+  const head = document.createElement('div');
+  head.className = 'film-section-head';
+  head.innerHTML = '<h3>' + esc(title) + '</h3>' +
+    (films.length > FILM_RELATION_CAP ? '<span class="count">showing ' + FILM_RELATION_CAP +
+      ' of ' + films.length + '</span>' : '<span class="count">' + films.length + '</span>');
+  section.appendChild(head);
+
+  if (!films.length) {
+    const note = document.createElement('p');
+    note.className = 'film-section-empty';
+    note.textContent = emptyNote;
+    section.appendChild(note);
+    return section;
+  }
+  // The dot reads against one market, not "streaming somewhere on earth" —
+  // left unscoped nearly every tile goes green and the dot stops meaning
+  // anything. This page has no country control of its own, so it answers for
+  // the first home market, the same one the country chips lead with.
+  fillPosterGrid(section, films.slice(0, FILM_RELATION_CAP), HOME_COUNTRY_CODES[0],
+                 film => openFilmDetail(film.slug));
+  return section;
+}
+
+// Every service, grouped by what it would cost, with nothing capped — the
+// thing quick look can't do without becoming a wall of badges.
+function availabilityGroupsHtml(film) {
+  const offers = (film.all_offers || []).slice()
+    .sort((a, b) => (CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification]) ||
+      a.brand.localeCompare(b.brand) || a.country.localeCompare(b.country));
+  if (!offers.length) return '<p class="film-section-empty">Not streaming on anything tracked, anywhere.</p>';
+
+  let html = '';
+  CLASSIFICATIONS.forEach(key => {
+    const group = offers.filter(o => o.classification === key);
+    if (!group.length) return;
+    const badges = group.map(o => {
+      const label = esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i>';
+      const cls = 'badge badge-' + o.classification;
+      return o.url
+        ? '<a class="' + cls + ' badge-link" href="' + escAttr(o.url) + '" target="_blank" rel="noopener">' + label + ' ↗</a>'
+        : '<span class="' + cls + '">' + label + '</span>';
+    });
+    html += '<div class="avail-group">' +
+      '<p class="avail-group-head">' + esc(CLASSIFICATION_LABELS[key]) + ' · ' + group.length + '</p>' +
+      '<div class="badge-wrap">' + badges.join(' ') + '</div>' +
+    '</div>';
+  });
+  return html;
+}
+
+function filmHeroHtml(film) {
+  const year = film.year ? ' <span>(' + film.year + ')</span>' : '';
+  // Each fact is its own element: the row is a flex line whose gaps are what
+  // separate them, and bare strings would run into each other.
+  const facts = [];
+  if (film.rating != null) facts.push('<span class="rating">' + film.rating.toFixed(2) + '★</span>');
+  if (film.runtime_minutes != null) facts.push('<span>' + esc(formatRuntime(film.runtime_minutes)) + '</span>');
+  if (film.genre && film.genre.length) facts.push('<span>' + esc(film.genre.join(', ')) + '</span>');
+  if (film.language_name) {
+    facts.push('<span>' + esc(film.language_name) + (film.is_subtitled ? ' 🌐' : '') + '</span>');
+  }
+  const countries = new Set((film.all_offers || []).map(o => o.country));
+  if (countries.size) {
+    facts.push('<span>streaming in ' + countries.size + (countries.size === 1 ? ' country' : ' countries') + '</span>');
+  }
+
+  const poster = film.poster_url
+    ? '<img class="film-hero-poster" loading="lazy" src="' + escAttr(film.poster_url) + '">'
+    : '<div class="film-hero-poster" style="aspect-ratio:2/3;"></div>';
+
+  return '<div class="film-hero">' +
+    '<div>' + poster + '</div>' +
+    '<div class="film-hero-body">' +
+      '<h2>' + esc(film.title) + year + '</h2>' +
+      '<p class="film-hero-facts">' + facts.join('') + '</p>' +
+      (film.director ? '<p class="film-hero-meta"><strong>Director:</strong> ' + esc(film.director) + '</p>' : '') +
+      ((film.starring && film.starring.length)
+        ? '<p class="film-hero-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '') +
+      (film.synopsis ? '<p class="film-hero-synopsis">' + esc(film.synopsis) + '</p>' : '') +
+      '<p class="film-hero-meta"><a class="film-link" target="_blank" href="' +
+        escAttr(filmLetterboxdUrl(film)) + '">View on Letterboxd ↗</a></p>' +
+    '</div>' +
+  '</div>';
+}
+
+function renderFilmDetail(slug) {
+  const film = { ...DATA.films_by_slug[slug], slug };
+  const container = document.getElementById('filmDetailContent');
+  container.innerHTML = filmHeroHtml(film);
+  // Same reasoning as the poster tiles: a broken-image icon reads as a fault
+  // in the page, where the empty frame a film with no artwork already gets
+  // just reads as no artwork.
+  const heroImg = container.querySelector('img.film-hero-poster');
+  if (heroImg) {
+    heroImg.addEventListener('error', () => {
+      const blank = document.createElement('div');
+      blank.className = 'film-hero-poster';
+      blank.style.aspectRatio = '2/3';
+      heroImg.replaceWith(blank);
+    });
+  }
+
+  const cinema = DATA.cinemas.find(r => r.matched_slug === slug);
+  if (cinema && cinema.showtimes.length) {
+    const block = document.createElement('div');
+    block.className = 'film-section';
+    block.innerHTML = '<div class="film-section-head"><h3>🎬 At the cinema</h3></div>' +
+      cinemaShowtimesHtml(cinema.showtimes);
+    container.appendChild(block);
+  }
+
+  const avail = document.createElement('div');
+  avail.className = 'film-section';
+  avail.innerHTML = '<div class="film-section-head"><h3>Where to watch</h3></div>' + availabilityGroupsHtml(film);
+  container.appendChild(avail);
+
+  filmDirectors(film).forEach(director => {
+    container.appendChild(filmRelationSection(
+      'More by ' + director,
+      sortRelated(relatedByDirector(film, director)),
+      'Nothing else by ' + director + ' on your watchlist or in your recommendations yet.'));
+  });
+
+  (film.starring || []).slice(0, ACTOR_SECTIONS_CAP).forEach(actor => {
+    const films = relatedByActor(film, actor);
+    if (!films.length) return;   // a section per actor only where there's something in it
+    container.appendChild(filmRelationSection('More with ' + actor, sortRelated(films), ''));
+  });
+
+  container.appendChild(filmRelationSection(
+    'Similar films', similarByGenre(film),
+    'Nothing else tracked shares enough of its genres.'));
+}
+
+function openFilmDetail(slug, fromView) {
+  if (!DATA.films_by_slug[slug]) return;
+  const current = document.querySelector('section.view.active');
+  if (current && current.id === 'view-film-detail') {
+    filmDetailTrail.push(currentFilmDetailSlug);
+  } else {
+    filmDetailReturnView = fromView || (current ? current.id.replace('view-', '') : 'films');
+    filmDetailTrail = [];
+  }
+  currentFilmDetailSlug = slug;
+  renderFilmDetail(slug);
+  showView('film-detail');
+  window.scrollTo(0, 0);
+}
+
+let currentFilmDetailSlug = null;
+
+document.getElementById('filmDetailBack').addEventListener('click', () => {
+  if (filmDetailTrail.length) {
+    currentFilmDetailSlug = filmDetailTrail.pop();
+    renderFilmDetail(currentFilmDetailSlug);
+    window.scrollTo(0, 0);
+    return;
+  }
+  showView(filmDetailReturnView);
 });
 
 // ---------- Films cards ----------
@@ -4265,7 +4553,7 @@ function watchableNowClass(film, country) {
   return null;   // needs a subscription, or isn't streaming anywhere
 }
 
-function buildPosterTile(film, country) {
+function buildPosterTile(film, country, onPick) {
   const tile = document.createElement('button');
   tile.type = 'button';
   tile.className = 'poster-tile';
@@ -4309,7 +4597,7 @@ function buildPosterTile(film, country) {
     tile.appendChild(dot);
   }
 
-  tile.addEventListener('click', () => openQuickLook(film.slug));
+  tile.addEventListener('click', onPick ? () => onPick(film) : () => openQuickLook(film.slug));
   return tile;
 }
 
@@ -4328,10 +4616,10 @@ function renderLayoutSwitch(containerId, page, rerender) {
 
 // Both lists render the same tiles into whichever container they own, so
 // the two pages can't drift apart on sizing or on what a tap does.
-function fillPosterGrid(container, films, country) {
+function fillPosterGrid(container, films, country, onPick) {
   const grid = document.createElement('div');
   grid.className = 'poster-grid';
-  films.forEach(film => grid.appendChild(buildPosterTile(film, country)));
+  films.forEach(film => grid.appendChild(buildPosterTile(film, country, onPick)));
   container.appendChild(grid);
 }
 

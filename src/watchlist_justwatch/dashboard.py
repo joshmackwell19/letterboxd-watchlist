@@ -1964,7 +1964,6 @@ _TEMPLATE = """<!DOCTYPE html>
 </section>
 
 <section class="view" id="view-services">
-  <div class="quick-filters" id="serviceQuickJump"></div>
   <div class="active-filters" id="activeServiceFilters"></div>
   <div id="servicesGrid" class="service-cards"></div>
 </section>
@@ -2218,19 +2217,6 @@ function topServiceBrands() {
     DATA.services
       .filter(r => r.classification === 'have' || r.classification === 'could_get_again' ||
                    (r.classification === 'free' && ['AU', 'GB', 'US'].includes(r.country)))
-      .map(r => r.brand)
-  );
-}
-
-// Just the services you actually have — no free-tier-in-home-markets
-// inclusion — for the quick-jump chips specifically. That looser set
-// balloons to 40+ once every free ad-supported app in GB/US/AU is
-// counted, which defeats "quick": this is the ~19 services that actually
-// match what's configured in Settings.
-function myServiceBrands() {
-  return new Set(
-    DATA.services
-      .filter(r => r.classification === 'have' || r.classification === 'could_get_again')
       .map(r => r.brand)
   );
 }
@@ -5111,19 +5097,6 @@ function populateServiceSelects() {
     genres.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
 }
 
-function renderServiceQuickJump() {
-  const myBrands = myServiceBrands();
-  const entries = [...myBrands].map(brand => ({
-    value: brand, label: brand,
-    count: new Set(DATA.services.filter(r => r.brand === brand).flatMap(r => r.slugs)).size,
-  })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-  const active = document.getElementById('serviceSelect').value;
-  renderQuickJumpChips('serviceQuickJump', entries, active, value => {
-    document.getElementById('serviceSelect').value = value;
-    renderServicesRows();
-  });
-}
-
 function renderActiveServiceFilters() {
   const container = document.getElementById('activeServiceFilters');
   container.innerHTML = '';
@@ -5276,7 +5249,6 @@ function renderServicesRows() {
   });
   container.appendChild(frag);
   ensureNotEmpty(container, 'No services match your search and filters.');
-  renderServiceQuickJump();
 }
 
 // ---------- Service detail: one service's films, two ways ----------

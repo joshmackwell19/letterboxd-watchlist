@@ -1,5 +1,6 @@
 import html
 import re
+import unicodedata
 import time
 from datetime import date, datetime, timedelta
 
@@ -381,16 +382,38 @@ _LEADING_ARTICLE_RE = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
 # programming is mostly re-releases, so these are the norm rather than the
 # exception: "La La Land (10th Anniversary)", "Alien (Theatrical Cut)",
 # "The Hunger Games (2012)". Left in, each one is a title no film has.
-_TRAILING_PAREN_RE = re.compile(r"\s*\(([^()]*)\)\s*$")
+_TRAILING_PAREN_RE = re.compile(r"\s*[(\[]([^()\[\]]*)[)\]]\s*$")
 _YEAR_IN_PARENS_RE = re.compile(r"^(19|20)\d{2}$")
-# Suffixes venues append without brackets, after a dash or colon.
+# Suffixes venues append without brackets, after a dash or colon. The
+# ordinal is optional and separate because "- 25th Anniversary" and
+# "(10th Anniversary)" are both common and only the bracketed form was
+# being caught.
 _FORMAT_SUFFIX_RE = re.compile(
     r"\s*[-–—:]\s*(?:in\s+)?"
     r"(?:imax(?:\s+70mm)?|70mm|35mm|4k(?:\s+restoration)?|remastered|"
     r"the\s+final\s+cut|director'?s\s+cut|extended\s+cut|sing[- ]?along|"
-    r"live\s+score|q\s*&\s*a|double\s+bill|anniversary|re[- ]?release)\s*$",
+    r"live\s+score|q\s*&\s*a|double\s+bill|re[- ]?release|"
+    r"(?:\d+(?:st|nd|rd|th)\s+)?anniversary(?:\s+(?:screening|edition|re[- ]?release))?|"
+    r"subtitled|restored|uncut|the\s+musical\s+experience)\s*$",
     re.IGNORECASE,
 )
+# What a venue bolts onto a screening that isn't part of the film: a strand
+# name in front ("Kids' Club: Hoppers") or an event behind it ("Sense and
+# Sensibility + Recorded Q&A"). Both are listed as separate programmes by
+# the same cinema showing the same film plainly, so leaving them on splits
+# one film into two rows and matches neither.
+_PROGRAMME_PREFIX_RE = re.compile(
+    r"^(?:relaxed\s+screening|kids'?\s+club|family\s+film\s+club|"
+    r"parent\s*(?:&|and)\s*baby(?:\s+screening)?|preschool\s+pics|"
+    r"toddler\s+time|senior\s+screening|autism[- ]friendly(?:\s+screening)?|"
+    r"members'?\s+screening|classic\s+matinee|midnight\s+movies?)\s*:\s*",
+    re.IGNORECASE,
+)
+# "+ Q&A", "+ Short Film", "+ Recorded Q&A with George Mackay". A literal
+# " + " almost never appears in a film's own title, and where the strip is
+# wrong the title-agreement check in resolve_listing_to_letterboxd rejects
+# the match rather than accepting a wrong one.
+_APPENDED_EVENT_RE = re.compile(r"\s+\+\s+.*$")
 # A bracketed qualifier that is part of the film's real title, not the
 # venue's annotation — stripping these would match the wrong film, or none.
 _KEEP_PAREN_RE = re.compile(r"^(19|20)\d{2}\s+film$|^tv$|^uk$|^us$", re.IGNORECASE)
@@ -405,7 +428,10 @@ def clean_listing_title(title: str) -> tuple[str, int | None]:
     Matching on the raw string means a repertory programme (which is most
     of what the Prince Charles shows) almost never matches anything.
     """
-    cleaned = title.strip()
+    cleaned = _PROGRAMME_PREFIX_RE.sub("", title.strip()).strip()
+    stripped_event = _APPENDED_EVENT_RE.sub("", cleaned).strip()
+    if stripped_event:
+        cleaned = stripped_event
     year: int | None = None
 
     # Repeatedly, because "Alien (Theatrical Cut) (1979)" happens.
@@ -434,7 +460,12 @@ def clean_listing_title(title: str) -> tuple[str, int | None]:
 
 
 def _normalize_title(title: str) -> str:
-    normalized = _PUNCTUATION_RE.sub("", title.lower())
+    # Accents folded, because a venue types "Amelie" where TMDB holds
+    # "Amélie" — and the title-agreement check that keeps a concert film
+    # from matching a real one would otherwise reject the right answer too.
+    decomposed = unicodedata.normalize("NFKD", title)
+    folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    normalized = _PUNCTUATION_RE.sub("", folded.lower())
     normalized = _LEADING_ARTICLE_RE.sub("", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
 

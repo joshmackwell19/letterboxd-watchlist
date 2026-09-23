@@ -23,6 +23,7 @@ from .cinemas import (
     fetch_prince_charles,
     fetch_riverside,
     fetch_vue,
+    MATCHER_VERSION,
     listing_match_key,
     match_watchlist_film,
     resolve_listing_to_letterboxd,
@@ -179,11 +180,17 @@ def _resolved_cinema_matches(
         if cached != "missing":
             stale = False
             if cached is None or not cached.get("slug"):
-                stamp = (cached or {}).get("resolved_at", "")[:10]
-                try:
-                    stale = (today - date.fromisoformat(stamp)).days >= CINEMA_NEGATIVE_RETRY_DAYS
-                except ValueError:
+                # Retried either because the rules that failed it have since
+                # changed, or because enough time has passed that TMDB may
+                # have indexed a title it hadn't on announcement.
+                if (cached or {}).get("matcher_version", 1) != MATCHER_VERSION:
                     stale = True
+                else:
+                    stamp = (cached or {}).get("resolved_at", "")[:10]
+                    try:
+                        stale = (today - date.fromisoformat(stamp)).days >= CINEMA_NEGATIVE_RETRY_DAYS
+                    except ValueError:
+                        stale = True
             if not stale:
                 resolved[key] = cached
                 continue
@@ -203,7 +210,7 @@ def _resolved_cinema_matches(
             warn(f"cinema listing {showing['title']!r} could not be resolved this run ({exc})")
             continue
         resolved[key] = {**match, "resolved_at": today.isoformat()} if match else {
-            "slug": None, "resolved_at": today.isoformat(),
+            "slug": None, "resolved_at": today.isoformat(), "matcher_version": MATCHER_VERSION,
         }
         time.sleep(0.2)
 

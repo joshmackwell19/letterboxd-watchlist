@@ -215,3 +215,47 @@ def test_the_same_film_at_two_venues_shares_one_key():
 
 def test_two_different_films_sharing_a_title_do_not_share_a_key():
     assert listing_match_key("Godzilla (1954)", None) != listing_match_key("Godzilla (2014)", None)
+
+
+# --- the negative cache must not outlive the rules that produced it ------
+
+def test_a_cleaner_change_invalidates_the_listings_it_failed():
+    # A listing that resolved to nothing is cached as "not a film" for a
+    # month. Without a version on that verdict, fixing the cleaner wouldn't
+    # reach the listings it was written for until the month was up — the
+    # fix would be inert exactly where it mattered.
+    from watchlist_justwatch import main
+    from watchlist_justwatch.cinemas import MATCHER_VERSION
+
+    showings = [{"title": "Amelie - 25th Anniversary", "year": None, "cinema": "PCC"}]
+    key = listing_match_key("Amelie - 25th Anniversary", None)
+    asked: list[str] = []
+
+    def search(title, year):
+        asked.append(title)
+        return {"id": 194, "title": "Amélie", "release_date": "2001-04-25"}
+
+    original_search = main._tmdb_search_movie
+    original_details = main.get_film_details_by_tmdb_id
+    main._tmdb_search_movie = search
+    main.get_film_details_by_tmdb_id = lambda tmdb_id: {
+        "slug": "amelie", "rating": 4.2, "poster_url": "p", "director": ["Jean-Pierre Jeunet"],
+        "starring": [], "synopsis": "s", "genre": [], "runtime_minutes": 122,
+    }
+    try:
+        stale = {key: {"slug": None, "resolved_at": "2099-01-01", "matcher_version": MATCHER_VERSION - 1}}
+        out = main._resolved_cinema_matches(showings, {}, stale, warn=lambda m: None)
+        assert asked, "a negative from older rules should be retried"
+        assert out[key]["slug"] == "amelie"
+
+        asked.clear()
+        current = {key: {"slug": None, "resolved_at": "2099-01-01", "matcher_version": MATCHER_VERSION}}
+        main._resolved_cinema_matches(showings, {}, current, warn=lambda m: None)
+        assert not asked, "a negative from the current rules should stand"
+
+        asked.clear()
+        main._resolved_cinema_matches(showings, {}, {key: out[key]}, warn=lambda m: None)
+        assert not asked, "a film already resolved should never be re-asked"
+    finally:
+        main._tmdb_search_movie = original_search
+        main.get_film_details_by_tmdb_id = original_details

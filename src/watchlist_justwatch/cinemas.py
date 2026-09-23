@@ -470,6 +470,13 @@ def _normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+# Bumped whenever the cleaning rules above change. A listing that resolved
+# to nothing under older rules is cached as "not a film" for a month, so
+# without this a fix to the cleaner wouldn't reach the listings it was
+# written for until that month was up — which is exactly backwards.
+MATCHER_VERSION = 2
+
+
 def listing_match_key(title: str, year: int | None) -> str:
     """Cache key for one cinema listing's identity, so the same film showing
     at three venues (and again tomorrow) is resolved once, not every run."""

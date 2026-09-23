@@ -1257,6 +1257,13 @@ _TEMPLATE = """<!DOCTYPE html>
   .detail-meta strong { color: var(--text); font-weight: 600; }
   .detail-genre { color: #c98a7d; }
   .detail-synopsis { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin: 4px 0 8px; }
+  /* In the modal the synopsis is the one part with no natural ceiling — a
+     long one is most of the card on its own. Clamped so quick look stays one
+     glance; the whole thing is on the full details page, which is a tap away
+     from the same card. */
+  .detail-card-compact .detail-synopsis {
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+  }
   .badge-wrap { display: flex; flex-wrap: wrap; gap: 2px; min-width: 0; }
   /* A badge is one unbreakable run of text; without this the longest service
      name in a country decides how wide the card has to be. */
@@ -1354,7 +1361,6 @@ _TEMPLATE = """<!DOCTYPE html>
   }
   #searchPanel { display: flex; flex-direction: column; min-height: 0; }
   #searchResults { overflow-y: auto; min-height: 0; -webkit-overflow-scrolling: touch; }
-  #searchDetailPanel { overflow-y: auto; min-height: 0; }
   /* Title and layout switch share a row, wrapping to two on a phone rather
      than squeezing the chips. */
   .detail-head {
@@ -1466,6 +1472,10 @@ _TEMPLATE = """<!DOCTYPE html>
     width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 14px; z-index: 1;
   }
   .modal-close:hover { background: var(--hairline-strong); }
+  /* The close button floats over the card's top-right corner, and a title
+     long enough to reach it ran underneath — "2001: A Space Odyssey" with the
+     ✕ sitting on the last letter. Only the first line needs the room. */
+  .modal-card .detail-body h3 { padding-right: 34px; }
   .home-section { margin-bottom: 24px; }
   .home-section-header { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
   .film-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
@@ -2046,10 +2056,6 @@ _TEMPLATE = """<!DOCTYPE html>
       <input type="text" class="search-modal-input" id="filmSearchInput" autocomplete="off"
              placeholder="Search any film on Letterboxd...">
       <div id="searchResults"></div>
-    </div>
-    <div id="searchDetailPanel" hidden>
-      <button class="back-btn" id="searchBackBtn">← Back to results</button>
-      <div id="searchDetailContent"></div>
     </div>
   </div>
 </div>
@@ -2641,6 +2647,14 @@ function countryLabel(code) {
 // height rhythm — cap the inline list and let a "+N more" reveal the rest
 // on demand instead of dropping the data entirely.
 const BADGE_CAP = 8;
+// Quick look is meant to be one glance at one card. Its own caps are
+// tighter than the inline cards' because it has a fixed box to fit inside
+// and no room to grow: fewer services shown, and the "leaving soon" notes —
+// one per country, so a film leaving Prime everywhere produced 114 lines and
+// three thousand pixels of card — capped hard. Everything hidden is still a
+// tap away behind the same "+N more" the badges already use.
+const QUICK_LOOK_BADGE_CAP = 4;
+const EXPIRING_NOTE_CAP = 2;
 
 function capBadges(badgeParts, cap) {
   if (badgeParts.length <= cap) return badgeParts.join(' ');
@@ -3214,9 +3228,13 @@ function filmLetterboxdUrl(film) {
 
 // ---------- Film detail card (shared: quick look + service detail) ----------
 
-function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
+function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible, options) {
+  // `compact` is the modal treatment: the card has to fit its box without
+  // scrolling, which is the whole point of a quick look.
+  const compact = Boolean(options && options.compact);
+  const badgeCap = compact ? QUICK_LOOK_BADGE_CAP : BADGE_CAP;
   const div = document.createElement('div');
-  div.className = 'detail-card';
+  div.className = 'detail-card' + (compact ? ' detail-card-compact' : '');
   const year = film.year ? ' (' + film.year + ')' : '';
   const rating = film.rating != null ? film.rating.toFixed(2) + '★' : '—';
   const poster = film.poster_url
@@ -3266,7 +3284,7 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     .slice()
     .sort((a, b) => CLASSIFICATION_PRIORITY[a.classification] - CLASSIFICATION_PRIORITY[b.classification]);
   const otherHtml = others.length
-    ? capBadges(others.map(offerBadgeHtml), BADGE_CAP)
+    ? capBadges(others.map(offerBadgeHtml), badgeCap)
     : '<span class="muted">Not available anywhere else tracked</span>';
 
   // Computed against the viewer's own clock (not baked in at generation
@@ -3278,12 +3296,25 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
     .map(o => ({ ...o, daysLeft: daysUntil(o.available_to) }))
     .filter(o => o.daysLeft >= 0 && o.daysLeft <= LEAVING_SOON_WINDOW_DAYS)
     .sort((a, b) => a.daysLeft - b.daysLeft);
-  const expiringHtml = expiring.length
-    ? '<div class="expiring-notes">' + expiring.map(o => {
-        const when = o.daysLeft === 0 ? 'today' : o.daysLeft === 1 ? 'tomorrow' : 'in ' + o.daysLeft + ' days';
-        return '<p class="expiring-note">Leaving ' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i> ' + when + '</p>';
-      }).join('') + '</div>'
-    : '';
+  // Soonest first, so a cap keeps the ones that actually matter.
+  const expiringNoteHtml = o => {
+    const when = o.daysLeft === 0 ? 'today' : o.daysLeft === 1 ? 'tomorrow' : 'in ' + o.daysLeft + ' days';
+    return '<p class="expiring-note">Leaving ' + esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i> ' + when + '</p>';
+  };
+  const expiringCap = compact ? EXPIRING_NOTE_CAP : expiring.length;
+  let expiringHtml = '';
+  if (expiring.length) {
+    const shown = expiring.slice(0, expiringCap).map(expiringNoteHtml).join('');
+    const rest = expiring.slice(expiringCap);
+    const restId = 'exp-' + Math.random().toString(36).slice(2, 9);
+    expiringHtml = '<div class="expiring-notes">' + shown +
+      (rest.length
+        ? '<span class="badges-hidden" id="' + restId + '" hidden>' + rest.map(expiringNoteHtml).join('') + '</span>' +
+          '<button type="button" class="badge-more-btn" data-target="' + restId + '">+' +
+            rest.length + ' more leaving</button>'
+        : '') +
+      '</div>';
+  }
 
   // At the cinema now/soon — surfaced ahead of streaming info, same
   // priority a specific screening gets everywhere else in the dashboard.
@@ -3316,14 +3347,32 @@ function buildFilmDetailCard(film, excludeBrand, excludeCountry, collapsible) {
   return div;
 }
 
+// Films looked up live (from search, or a cinema listing the watchlist
+// doesn't track) so they can have a quick look and a detail page like any
+// other — they aren't in DATA, which only carries what the build knew about.
+// Session-lived and deliberately not merged into films_by_slug: the lists,
+// filters and counts elsewhere are about the watchlist, and a film you
+// glanced at once doesn't belong in them.
+const liveFilms = {};
+
+function filmBySlug(slug) {
+  return DATA.films_by_slug[slug] || liveFilms[slug] || null;
+}
+
+function registerLiveFilm(film) {
+  const slug = film.slug || ('tmdb-' + film.tmdb_id);
+  if (!DATA.films_by_slug[slug]) liveFilms[slug] = { ...film, slug };
+  return slug;
+}
+
 // ---------- Quick look modal (Films + Country card click) ----------
 
 function openQuickLook(slug) {
-  const film = DATA.films_by_slug[slug];
+  const film = filmBySlug(slug);
   if (!film) return;
   const content = document.getElementById('quickLookContent');
   content.innerHTML = '';
-  content.appendChild(buildFilmDetailCard(film, null, null));
+  content.appendChild(buildFilmDetailCard(film, null, null, false, { compact: true }));
 
   // The glance stays the glance; this is the way through to the long look.
   const more = document.createElement('button');
@@ -3441,7 +3490,9 @@ function renderSearchResults(query, localMatches, remote) {
         posterUrl: film.poster_url, title: film.title, year: film.year,
         meta: film.director, badge: onWatchlist ? 'On your watchlist' : 'Recommended',
         // Stored data, already classified — no lookup needed.
-        onPick: () => showSearchDetail(film, { alreadyTracked: true }),
+        // On top of the search, not below it — the same overlay any other
+        // film opens in, so it reads the same and links on to full details.
+        onPick: () => openQuickLook(slug),
       }));
     });
   }
@@ -3520,63 +3571,17 @@ function runSearch(query) {
     });
 }
 
+// A film the dashboard doesn't track, picked from the search list. Same
+// live lookup as before, but shown in the quick-look overlay on top of the
+// search rather than swapped in underneath it.
 function lookUpSearchResult(row) {
-  showSearchDetailPanel();
-  const content = document.getElementById('searchDetailContent');
-  content.innerHTML = '<p class="search-status">Looking up ' + esc(row.title) + '…</p>';
-
-  searchWorker('/film-lookup', {
-    tmdb_id: row.tmdb_id,
-    title: row.title,
-    year: row.year,
-    countries: DATA.search_taxonomy.justwatch_countries,
-  })
-    .then(body => {
-      if (!body || !body.ok) throw new Error((body && body.error) || 'lookup failed');
-      showSearchDetail(buildSearchedFilm(row, body), {
-        alreadyTracked: false,
-        letterboxdFailed: !(body.letterboxd && body.letterboxd.ok),
-      });
-    })
-    .catch(() => {
-      content.innerHTML = '<p class="search-status">Couldn\\'t look that film up just now.</p>';
-    });
+  openLiveQuickLook(row);
 }
 
-function showSearchDetail(film, { alreadyTracked, letterboxdFailed }) {
-  showSearchDetailPanel();
-  const content = document.getElementById('searchDetailContent');
-  content.innerHTML = '';
-  content.appendChild(buildFilmDetailCard(film, null, null));
-
-  const notes = [];
-  if (!alreadyTracked) {
-    notes.push({ text: 'Not on your watchlist — this was looked up live.', warn: false });
-  }
-  if (letterboxdFailed) {
-    notes.push({ text: "Letterboxd details couldn't be read, so the rating and cast are missing.", warn: true });
-  }
-  // An empty offer list means two very different things, and they must not
-  // read the same: the card already says "not available anywhere tracked",
-  // which would be a lie when the check itself failed.
-  if (film.offers_unavailable) {
-    notes.push({ text: "Streaming availability couldn't be checked just now — try again in a moment.", warn: true });
-  }
-  notes.forEach(note => {
-    const el = document.createElement('p');
-    el.className = 'search-note' + (note.warn ? ' search-note-warn' : '');
-    el.textContent = note.text;
-    content.appendChild(el);
-  });
-}
-
-function showSearchDetailPanel() {
-  document.getElementById('searchPanel').hidden = true;
-  document.getElementById('searchDetailPanel').hidden = false;
-}
-
+// The picked film used to swap into a second panel here; it opens in the
+// quick-look overlay on top now, so all that's left is making sure the
+// results are showing when the search is reopened.
 function showSearchResultsPanel() {
-  document.getElementById('searchDetailPanel').hidden = true;
   document.getElementById('searchPanel').hidden = false;
 }
 
@@ -3602,7 +3607,6 @@ function closeFilmSearch() {
 document.getElementById('filmSearchBtn').addEventListener('click', openFilmSearch);
 document.getElementById('filmSearchBtnMobile').addEventListener('click', openFilmSearch);
 document.getElementById('searchClose').addEventListener('click', closeFilmSearch);
-document.getElementById('searchBackBtn').addEventListener('click', showSearchResultsPanel);
 document.getElementById('searchOverlay').addEventListener('click', event => {
   if (event.target.id === 'searchOverlay') closeFilmSearch();
 });
@@ -3992,7 +3996,7 @@ function filmHeroHtml(film) {
 }
 
 function renderFilmDetail(slug) {
-  const film = { ...DATA.films_by_slug[slug], slug };
+  const film = { ...filmBySlug(slug), slug };
   const container = document.getElementById('filmDetailContent');
   container.innerHTML = filmHeroHtml(film);
   // Same reasoning as the poster tiles: a broken-image icon reads as a fault
@@ -4066,9 +4070,9 @@ function requestFilmRelations(film) {
       // Only redraw if this is still the film on screen — a fast chain of
       // taps would otherwise land one film's sections under another's hero.
       const stop = currentDetailStop;
-      if (stop && stop.kind === 'film' && DATA.films_by_slug[stop.slug] &&
-          DATA.films_by_slug[stop.slug].tmdb_id === tmdbId) {
-        renderRelationSections({ ...DATA.films_by_slug[stop.slug], slug: stop.slug },
+      const stopFilm = stop && stop.kind === 'film' ? filmBySlug(stop.slug) : null;
+      if (stopFilm && stopFilm.tmdb_id === tmdbId) {
+        renderRelationSections({ ...stopFilm, slug: stop.slug },
                                filmRelationsCache[tmdbId]);
       }
     });
@@ -4177,7 +4181,23 @@ function openLiveQuickLook(row) {
       if (!body || !body.ok) throw new Error((body && body.error) || 'lookup failed');
       const film = buildSearchedFilm(searchRow, body);
       content.innerHTML = '';
-      content.appendChild(buildFilmDetailCard(film, null, null));
+      content.appendChild(buildFilmDetailCard(film, null, null, false, { compact: true }));
+
+      // The same way through to the long look a tracked film gets. It works
+      // because the film is registered above: the detail page reads through
+      // filmBySlug, and its TMDB id is what the live relations layer needs.
+      const slug = registerLiveFilm(film);
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'surprise-btn quick-look-more';
+      more.textContent = 'Full details →';
+      more.addEventListener('click', () => {
+        closeQuickLook();
+        closeFilmSearch();
+        openFilmDetail(slug);
+      });
+      content.appendChild(more);
+
       const notes = [{ text: 'Not on your watchlist — this was looked up live.', warn: false }];
       if (!(body.letterboxd && body.letterboxd.ok)) {
         notes.push({ text: "Letterboxd details couldn't be read, so the rating and cast are missing.", warn: true });
@@ -4392,7 +4412,7 @@ function requestPerson(stop) {
 }
 
 function openFilmDetail(slug, fromView) {
-  if (!DATA.films_by_slug[slug]) return;
+  if (!filmBySlug(slug)) return;
   pushDetailStop({ kind: 'film', slug }, fromView);
 }
 

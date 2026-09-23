@@ -2552,6 +2552,13 @@ function rememberLastView(name, scrollY) {
 // pages do, from their own trail); anything else restores wherever this view
 // was last left.
 function showView(name, options) {
+  // Changing view behind the search overlay leaves the new page underneath
+  // it, which is never what's wanted — every route here (Full details from
+  // quick look, a director's name, a cinema listing) means "take me there",
+  // so the search is done. Closed before the scroll is read, because the
+  // page is frozen while the overlay is up and window.scrollY reads 0 until
+  // the unlock puts it back.
+  closeFilmSearch();
   rememberCurrentScroll();
   document.querySelectorAll('section.view').forEach(el => el.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
@@ -4193,8 +4200,7 @@ function openLiveQuickLook(row) {
       more.textContent = 'Full details →';
       more.addEventListener('click', () => {
         closeQuickLook();
-        closeFilmSearch();
-        openFilmDetail(slug);
+        openFilmDetail(slug);   // showView closes the search behind it
       });
       content.appendChild(more);
 

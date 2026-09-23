@@ -135,6 +135,16 @@ elsewhere is unique to neither) and counting the free broadcasters among
 "services you have", since a film on iPlayer isn't a reason to keep paying
 for Netflix.
 
+`brands.py`'s `_VARIANTS` folds a tier or profile into the service it
+belongs to (Netflix Kids → Netflix, Channel 4 Plus → Channel 4) — both
+reach you on a subscription you already have, so left separate they gave
+those services their own card and their own "only here" count. Hand-listed
+on purpose: the obvious generalisation, folding anything prefixed by
+another brand's name, would wrongly merge YouTube TV into YouTube and AMC
+Plus into AMC. Canonicalization runs at dashboard-build time from the
+stored raw package name, so a change here reaches the page on the next
+`--dashboard` regen without a rescrape.
+
 ## `main.py` CLI flags
 
 **The daily run**: plain `python -m watchlist_justwatch.main` (needs

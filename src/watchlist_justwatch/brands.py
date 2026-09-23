@@ -23,6 +23,22 @@ _ALIASES = {
     "amazon video": "Amazon Prime Video",
 }
 
+# Names that are a tier or profile of another service rather than a service
+# of their own, where no general rule can say so. Both of these reach you on
+# a subscription you already have, so leaving them separate meant a film on
+# Netflix Kids read as one more thing to pay for, and gave Netflix its own
+# "only here" count on the Services tab.
+#
+# Hand-listed, because the obvious generalisation — fold anything whose name
+# starts with another brand's — is wrong far more often than it's right:
+# YouTube TV is not YouTube, AMC Plus is not AMC, MGM Plus is not MGM, and
+# Now TV Cinema is a separate pass from Now TV. Each of those is a different
+# product with a different bill.
+_VARIANTS = {
+    "netflix kids": "Netflix",      # the kids profile on the same account
+    "channel 4 plus": "Channel 4",  # Channel 4's ad-free tier, same service
+}
+
 # Real brand names that happen to end in a string our generic suffix
 # stripping would otherwise mangle (e.g. "The Roku Channel" is Roku's own
 # free app, not a channel bundle add-on for some other service — don't
@@ -68,7 +84,8 @@ def canonical_brand_name(clear_name: str) -> str:
     if name.endswith("+"):
         name = name[:-1].strip() + " Plus"
 
-    return _ALIASES.get(name.lower(), name)
+    name = _ALIASES.get(name.lower(), name)
+    return _VARIANTS.get(name.lower(), name)
 
 
 def group_offers_by_brand(offers) -> dict[str, set[str]]:

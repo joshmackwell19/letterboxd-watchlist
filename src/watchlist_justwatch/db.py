@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS watch_together (
 ALTER TABLE films ADD COLUMN IF NOT EXISTS genre JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE films ADD COLUMN IF NOT EXISTS original_language TEXT;
 ALTER TABLE films ADD COLUMN IF NOT EXISTS runtime_minutes INTEGER;
+ALTER TABLE films ADD COLUMN IF NOT EXISTS tmdb_id INTEGER;
 -- Raw scraped showtimes for the cinemas in cinemas.py — no stored
 -- watchlist match (see dashboard.py, which matches fresh at build time
 -- from state.films, same "recompute rather than let a derived field go
@@ -130,17 +131,17 @@ def load_state(database_url: str) -> StateDoc:
         for row in conn.execute(
             "SELECT slug, title, year, entry_id, confidence, last_checked, offers, "
             "rating, poster_url, director, starring, synopsis, genre, original_language, "
-            "runtime_minutes FROM films"
+            "runtime_minutes, tmdb_id FROM films"
         ).fetchall():
             (slug, title, year, entry_id, confidence, last_checked, offers,
              rating, poster_url, director, starring, synopsis, genre, original_language,
-             runtime_minutes) = row
+             runtime_minutes, tmdb_id) = row
             films[slug] = FilmState(
                 slug=slug, title=title, year=year, entry_id=entry_id, confidence=confidence,
                 last_checked=last_checked, offers=[_offer_from_dict(o) for o in offers],
                 rating=rating, poster_url=poster_url, director=director, starring=starring,
                 synopsis=synopsis, genre=genre, original_language=original_language,
-                runtime_minutes=runtime_minutes,
+                runtime_minutes=runtime_minutes, tmdb_id=tmdb_id,
             )
 
         diary = dict(conn.execute("SELECT slug, data FROM diary").fetchall())
@@ -206,13 +207,13 @@ def save_state(database_url: str, state: StateDoc) -> None:
             conn.cursor().executemany(
                 "INSERT INTO films (slug, title, year, entry_id, confidence, last_checked, "
                 "offers, rating, poster_url, director, starring, synopsis, genre, original_language, "
-                "runtime_minutes) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "runtime_minutes, tmdb_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 [
                     (f.slug, f.title, f.year, f.entry_id, f.confidence, f.last_checked,
                      Jsonb([_offer_to_dict(o) for o in f.offers]), f.rating, f.poster_url,
                      Jsonb(f.director), Jsonb(f.starring), f.synopsis, Jsonb(f.genre), f.original_language,
-                     f.runtime_minutes)
+                     f.runtime_minutes, f.tmdb_id)
                     for f in state.films.values()
                 ],
             )

@@ -63,7 +63,7 @@ from .similar import (
     render_similar,
 )
 from .state import StateDoc, get_cached_entry_id
-from .tmdb_client import original_language as _tmdb_original_language
+from .tmdb_client import search_movie as _tmdb_search_movie
 from .weekly_digest import compute_weekly_digest
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
@@ -91,15 +91,33 @@ STALE_BATCH_FRACTION = 0.20
 RECENT_ADDITIONS_RETENTION_DAYS = 35
 
 
-def _fetch_original_language(title: str, year: int | None) -> str | None:
-    """Best-effort TMDB lookup for the "is this subtitled" flag — a title/
-    year mismatch or a TMDB hiccup shouldn't cost the film's whole
-    enrichment, same reasoning as every other best-effort fetch here."""
+def _fetch_tmdb_facts(title: str, year: int | None) -> tuple[int | None, str | None]:
+    """(tmdb_id, original_language) from one TMDB search.
+
+    The language is for the "is this subtitled" flag (see
+    tmdb_client.search_movie for why it isn't Letterboxd's own
+    inLanguage); the id is what the dashboard hands the Worker to ask TMDB
+    about a film directly. They come from the same search result, so taking
+    both costs nothing over taking one.
+
+    Best-effort: a title/year mismatch or a TMDB hiccup shouldn't cost the
+    film's whole enrichment, same reasoning as every other best-effort
+    fetch here.
+    """
     try:
-        return _tmdb_original_language(title, year)
+        movie = _tmdb_search_movie(title, year)
     except Exception as exc:
-        print(f"warning: failed to fetch original_language for {title!r}, leaving unset ({exc})", file=sys.stderr)
-        return None
+        print(f"warning: failed to fetch TMDB facts for {title!r}, leaving unset ({exc})", file=sys.stderr)
+        return None, None
+    if movie is None:
+        return None, None
+    return movie.get("id"), movie.get("original_language")
+
+
+def _fetch_original_language(title: str, year: int | None) -> str | None:
+    """The language half alone, for the diary/discovery rows that have
+    nowhere to put an id."""
+    return _fetch_tmdb_facts(title, year)[1]
 
 
 def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
@@ -343,7 +361,8 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
             # one-off backfill pass.
             if (previous_film is not None and previous_film.poster_url is not None
                     and previous_film.original_language is not None
-                    and previous_film.runtime_minutes is not None):
+                    and previous_film.runtime_minutes is not None
+                    and previous_film.tmdb_id is not None):
                 film_state.rating = previous_film.rating
                 film_state.poster_url = previous_film.poster_url
                 film_state.director = previous_film.director
@@ -352,6 +371,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 film_state.genre = previous_film.genre
                 film_state.original_language = previous_film.original_language
                 film_state.runtime_minutes = previous_film.runtime_minutes
+                film_state.tmdb_id = previous_film.tmdb_id
             else:
                 details = get_film_details_by_slug(film.slug)
                 film_state.rating = details["rating"]
@@ -360,7 +380,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 film_state.starring = details["starring"]
                 film_state.synopsis = details["synopsis"]
                 film_state.genre = details["genre"]
-                film_state.original_language = _fetch_original_language(film.title, film.year)
+                film_state.tmdb_id, film_state.original_language = _fetch_tmdb_facts(film.title, film.year)
                 film_state.runtime_minutes = details["runtime_minutes"]
         except Exception as exc:
             _warn(f"failed to check {film.slug!r}, skipping it this run ({exc})")
@@ -535,10 +555,10 @@ def main() -> None:
                               "from the static diary page — only --check-for-new-log captures that, "
                               "going forward.")
     parser.add_argument("--backfill-language", action="store_true",
-                         help="One-time TMDB-only backfill of original_language for every watchlist film "
-                              "missing it (normally fills in gradually via the stale-checking rotation, "
-                              "see run()) — no JustWatch/Letterboxd calls, just one TMDB search per film, "
-                              "then exit.")
+                         help="One-time TMDB-only backfill of original_language and tmdb_id for every "
+                              "watchlist film missing either (normally fills in gradually via the "
+                              "stale-checking rotation, see run()) — no JustWatch/Letterboxd calls, just "
+                              "one TMDB search per film, which carries both, then exit.")
     parser.add_argument("--backfill-runtime", action="store_true",
                          help="One-time backfill of runtime_minutes for every watchlist film missing it "
                               "(normally fills in gradually via the stale-checking rotation, see run()) "
@@ -626,12 +646,23 @@ def main() -> None:
 
     if args.backfill_language:
         state = load_state(args.database_url)
-        missing = [f for f in state.films.values() if f.original_language is None]
-        print(f"Backfilling original_language for {len(missing)}/{len(state.films)} films...")
+        # Both come out of the same search, so a film missing either is
+        # worth one call — and tmdb_id was added long after original_language,
+        # so on the first run after that change almost every film needs it.
+        missing = [f for f in state.films.values()
+                   if f.original_language is None or f.tmdb_id is None]
+        print(f"Backfilling TMDB facts for {len(missing)}/{len(state.films)} films...")
         updated = 0
         for i, film in enumerate(missing, start=1):
-            film.original_language = _fetch_original_language(film.title, film.year)
-            if film.original_language is not None:
+            tmdb_id, language = _fetch_tmdb_facts(film.title, film.year)
+            # A film TMDB can't find returns (None, None); leaving what's
+            # already there alone means a failed call never erases a value
+            # an earlier one found.
+            if tmdb_id is not None:
+                film.tmdb_id = tmdb_id
+            if language is not None:
+                film.original_language = language
+            if tmdb_id is not None or language is not None:
                 updated += 1
             if i % 25 == 0:
                 print(f"...checked {i}/{len(missing)}", file=sys.stderr)

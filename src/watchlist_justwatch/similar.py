@@ -147,6 +147,10 @@ def _enrich_candidates(
 
         resolved.append({
             "slug": details["slug"], "title": movie.get("title") or "", "year": tmdb_client.release_year(movie),
+            # These came from TMDB in the first place, so the id is already
+            # in hand — and it's what lets the film detail page match a live
+            # TMDB result back to a film the dashboard already knows about.
+            "tmdb_id": movie["id"],
             "rating": details["rating"], "poster_url": details["poster_url"],
             "director": ", ".join(details["director"]) if details["director"] else None,
             "starring": details["starring"], "synopsis": details["synopsis"], "genre": details["genre"],

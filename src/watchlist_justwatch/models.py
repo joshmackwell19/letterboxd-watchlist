@@ -51,6 +51,11 @@ class FilmState:
     synopsis: str | None = None
     genre: list[str] = field(default_factory=list)
     # ISO 639-1 code (TMDB's "original_language", not Letterboxd's own
-    # inLanguage list — see tmdb_client.original_language for why).
+    # inLanguage list — see tmdb_client.search_movie for why).
     original_language: str | None = None
     runtime_minutes: int | None = None
+    # TMDB's id for this film. Falls out of the same search call
+    # original_language already makes, and is what lets the dashboard ask
+    # the Worker for TMDB's own view of a film (its real "similar", the
+    # director's whole filmography) instead of only what's already tracked.
+    tmdb_id: int | None = None

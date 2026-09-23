@@ -1,5 +1,5 @@
 """ISO 639-1 codes for the languages this watchlist actually sees (TMDB's
-own `original_language` field, sourced via tmdb_client.original_language) —
+own `original_language` field, sourced via tmdb_client.search_movie) —
 extend as new ones turn up rather than trying to enumerate all ~180 up
 front, same approach as countries.py's COUNTRY_NAMES."""
 

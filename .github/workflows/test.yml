@@ -21,3 +21,9 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+      # The Worker is JS and has no package.json (see the note at the top of
+      # the test file) — node's own runner needs neither, so this is a step
+      # rather than a second toolchain.
+      - name: Run Worker tests
+        run: node --test worker/test/*.test.mjs

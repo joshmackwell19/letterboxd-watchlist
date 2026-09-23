@@ -377,11 +377,130 @@ def _parse_riverside(data: list[dict]) -> list[dict]:
 _PUNCTUATION_RE = re.compile(r"[^\w\s]")
 _LEADING_ARTICLE_RE = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
 
+# What a cinema adds to a title that the film itself doesn't have. Repertory
+# programming is mostly re-releases, so these are the norm rather than the
+# exception: "La La Land (10th Anniversary)", "Alien (Theatrical Cut)",
+# "The Hunger Games (2012)". Left in, each one is a title no film has.
+_TRAILING_PAREN_RE = re.compile(r"\s*\(([^()]*)\)\s*$")
+_YEAR_IN_PARENS_RE = re.compile(r"^(19|20)\d{2}$")
+# Suffixes venues append without brackets, after a dash or colon.
+_FORMAT_SUFFIX_RE = re.compile(
+    r"\s*[-–—:]\s*(?:in\s+)?"
+    r"(?:imax(?:\s+70mm)?|70mm|35mm|4k(?:\s+restoration)?|remastered|"
+    r"the\s+final\s+cut|director'?s\s+cut|extended\s+cut|sing[- ]?along|"
+    r"live\s+score|q\s*&\s*a|double\s+bill|anniversary|re[- ]?release)\s*$",
+    re.IGNORECASE,
+)
+# A bracketed qualifier that is part of the film's real title, not the
+# venue's annotation — stripping these would match the wrong film, or none.
+_KEEP_PAREN_RE = re.compile(r"^(19|20)\d{2}\s+film$|^tv$|^uk$|^us$", re.IGNORECASE)
+
+
+def clean_listing_title(title: str) -> tuple[str, int | None]:
+    """A cinema listing's title with the venue's own annotations removed,
+    plus any release year those annotations gave away.
+
+    Cinema sites decorate titles in ways no film database does — the year
+    of a re-release, which anniversary it is, which cut is being shown.
+    Matching on the raw string means a repertory programme (which is most
+    of what the Prince Charles shows) almost never matches anything.
+    """
+    cleaned = title.strip()
+    year: int | None = None
+
+    # Repeatedly, because "Alien (Theatrical Cut) (1979)" happens.
+    while True:
+        match = _TRAILING_PAREN_RE.search(cleaned)
+        if not match:
+            break
+        inner = match.group(1).strip()
+        if _KEEP_PAREN_RE.match(inner):
+            break
+        if _YEAR_IN_PARENS_RE.match(inner):
+            # The one annotation that's worth keeping — as a year, not a title.
+            year = year or int(inner)
+        stripped = cleaned[: match.start()].strip()
+        if not stripped:
+            break   # the whole title was bracketed; leave it alone
+        cleaned = stripped
+
+    while True:
+        stripped = _FORMAT_SUFFIX_RE.sub("", cleaned).strip()
+        if stripped == cleaned or not stripped:
+            break
+        cleaned = stripped
+
+    return cleaned, year
+
 
 def _normalize_title(title: str) -> str:
     normalized = _PUNCTUATION_RE.sub("", title.lower())
     normalized = _LEADING_ARTICLE_RE.sub("", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def listing_match_key(title: str, year: int | None) -> str:
+    """Cache key for one cinema listing's identity, so the same film showing
+    at three venues (and again tomorrow) is resolved once, not every run."""
+    cleaned, title_year = clean_listing_title(title)
+    return f"{_normalize_title(cleaned)}|{title_year or year or ''}"
+
+
+def resolve_listing_to_letterboxd(
+    title: str, year: int | None, *, search_movie, film_details_by_tmdb_id,
+) -> dict | None:
+    """The Letterboxd film a cinema listing is showing, or None.
+
+    match_watchlist_film can only ever answer for films already tracked,
+    which is a small fraction of what's on — the rest showed as bare titles
+    with no rating, no poster of ours and nowhere to click through to. This
+    resolves any listing the same way discovery does: TMDB for the id,
+    then Letterboxd's /tmdb/<id>/ redirect for the slug and details.
+
+    The two network calls are injected so the matching logic around them —
+    which is where this can go wrong — is testable without either service.
+    Returns None for the listings that genuinely aren't films: an André Rieu
+    concert or a Bing birthday screening has no Letterboxd entry, and
+    guessing one would be worse than leaving the listing plain.
+    """
+    cleaned, title_year = clean_listing_title(title)
+    if not cleaned:
+        return None
+    year = title_year or year
+
+    movie = search_movie(cleaned, year)
+    # A repertory listing's year is often the screening's, not the film's, so
+    # a year-qualified miss is retried without it rather than given up on.
+    if movie is None and year is not None:
+        movie = search_movie(cleaned, None)
+    if movie is None:
+        return None
+
+    # TMDB matches loosely — it will answer *something* for a concert film's
+    # title. Requiring the titles to agree once normalized is what keeps
+    # "André Rieu's 2026 Summer Concert" from resolving to a real film.
+    if _normalize_title(movie.get("title") or "") != _normalize_title(cleaned):
+        alt = _normalize_title(movie.get("original_title") or "")
+        if alt != _normalize_title(cleaned):
+            return None
+
+    details = film_details_by_tmdb_id(movie["id"])
+    if details is None or not details.get("slug"):
+        return None
+
+    return {
+        "slug": details["slug"],
+        "tmdb_id": movie["id"],
+        "title": movie.get("title") or cleaned,
+        "year": int(str(movie.get("release_date") or "")[:4] or 0) or None,
+        "rating": details.get("rating"),
+        "poster_url": details.get("poster_url"),
+        "director": ", ".join(details["director"]) if details.get("director") else None,
+        "starring": details.get("starring") or [],
+        "synopsis": details.get("synopsis"),
+        "genre": details.get("genre") or [],
+        "runtime_minutes": details.get("runtime_minutes"),
+    }
 
 
 def match_watchlist_film(title: str, year: int | None, films: dict[str, FilmState]) -> str | None:
@@ -391,7 +510,11 @@ def match_watchlist_film(title: str, year: int | None, films: dict[str, FilmStat
     can't be the exact-slug lookup Letterboxd matching gets to use.
     Year-tolerant (±1) when both sides have one, same spirit as
     Letterboxd's own year-tolerant confidence tier."""
-    target = _normalize_title(title)
+    cleaned, title_year = clean_listing_title(title)
+    # A year in the title ("The Hunger Games (2012)") beats the listing's own,
+    # which for a re-release is the year of the screening, not the film.
+    year = title_year or year
+    target = _normalize_title(cleaned)
     if not target:
         return None
 

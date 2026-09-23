@@ -65,6 +65,18 @@ ALTER TABLE films ADD COLUMN IF NOT EXISTS tmdb_id INTEGER;
 -- watchlist match (see dashboard.py, which matches fresh at build time
 -- from state.films, same "recompute rather than let a derived field go
 -- stale" principle as everything else the dashboard builds).
+-- Resolved Letterboxd films for cinema listings the watchlist can't
+-- identify. Keyed by cinemas.listing_match_key (normalized title + year),
+-- not by venue or showtime: the same film at three cinemas resolves once.
+-- A row with a NULL slug is a listing that has no Letterboxd film —
+-- remembered so the daily run doesn't pay two network calls rediscovering
+-- that a Bing birthday screening still isn't a film.
+CREATE TABLE IF NOT EXISTS cinema_film_matches (
+    listing_key TEXT PRIMARY KEY,
+    slug TEXT,
+    data JSONB,
+    resolved_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cinema_showtimes (
     id SERIAL PRIMARY KEY,
     cinema TEXT NOT NULL,
@@ -154,6 +166,12 @@ def load_state(database_url: str) -> StateDoc:
         ]
         josh_watchlist = {row[0] for row in conn.execute("SELECT slug FROM josh_watchlist").fetchall()}
         sarah_watchlist = {row[0] for row in conn.execute("SELECT slug FROM sarah_watchlist").fetchall()}
+        cinema_matches = {
+            key: data
+            for key, data in conn.execute(
+                "SELECT listing_key, data FROM cinema_film_matches"
+            ).fetchall()
+        }
         cinema_showtimes = [
             {"cinema": cinema, "title": title, "year": year, "showtime": showtime,
              "duration_minutes": duration_minutes, "director": director, "synopsis": synopsis,
@@ -179,6 +197,7 @@ def load_state(database_url: str) -> StateDoc:
         josh_watchlist=josh_watchlist,
         sarah_watchlist=sarah_watchlist,
         cinema_showtimes=cinema_showtimes,
+        cinema_matches=cinema_matches,
     )
 
 
@@ -198,6 +217,7 @@ def save_state(database_url: str, state: StateDoc) -> None:
         conn.execute("DELETE FROM josh_watchlist")
         conn.execute("DELETE FROM sarah_watchlist")
         conn.execute("DELETE FROM cinema_showtimes")
+        conn.execute("DELETE FROM cinema_film_matches")
         conn.execute("DELETE FROM meta")
         # watch_together is deliberately NOT wiped here — it's written
         # incrementally by seed_pending_watch_together/set_watch_together_status,
@@ -256,6 +276,17 @@ def save_state(database_url: str, state: StateDoc) -> None:
                     (s["cinema"], s["title"], s["year"], s["showtime"], s["duration_minutes"],
                      s["director"], s["synopsis"], s["poster_url"], s["booking_url"])
                     for s in state.cinema_showtimes
+                ],
+            )
+
+        if state.cinema_matches:
+            conn.cursor().executemany(
+                "INSERT INTO cinema_film_matches (listing_key, slug, data, resolved_at) "
+                "VALUES (%s, %s, %s, %s)",
+                [
+                    (key, (data or {}).get("slug"), Jsonb(data),
+                     (data or {}).get("resolved_at") or state.last_run_at or "")
+                    for key, data in state.cinema_matches.items()
                 ],
             )
 

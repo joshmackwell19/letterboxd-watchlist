@@ -10,7 +10,7 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import match_watchlist_film
+from .cinemas import listing_match_key, match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .languages import LANGUAGE_NAMES, is_subtitled, language_name
@@ -813,14 +813,36 @@ def _cinema_listings(state: StateDoc) -> list[dict]:
     tracked on the watchlist instead of the venue's own (same
     don't-duplicate-data-we-already-have principle as everywhere else)."""
     grouped: dict[tuple, dict] = {}
+    # The resolved matches are keyed by listing, but rows are grouped by the
+    # film — so index them by slug once rather than searching per row.
+    resolved_by_slug = {
+        match["slug"]: match
+        for match in state.cinema_matches.values()
+        if match and match.get("slug")
+    }
 
     for showing in state.cinema_showtimes:
         slug = match_watchlist_film(showing["title"], showing["year"], state.films)
-        key = ("matched", slug) if slug else ("unmatched", showing["cinema"], showing["title"])
+        # Everything the watchlist can't name — most of the programme — falls
+        # back to the Letterboxd film run() resolved for it. That match is
+        # just as good an identity for merging across venues, so it groups
+        # the same way; what it doesn't bring is JustWatch offers, since
+        # nothing has ever looked the film up.
+        resolved = None if slug else (state.cinema_matches.get(
+            listing_match_key(showing["title"], showing["year"])) or None)
+        if resolved is not None and not resolved.get("slug"):
+            resolved = None
+        group_slug = slug or (resolved["slug"] if resolved else None)
+        key = ("matched", group_slug) if group_slug else ("unmatched", showing["cinema"], showing["title"])
         entry = grouped.setdefault(key, {
             "matched_slug": slug, "title": showing["title"], "year": showing["year"],
             "duration_minutes": showing["duration_minutes"], "director": showing["director"],
             "synopsis": showing["synopsis"], "poster_url": showing["poster_url"],
+            # The Letterboxd film this listing is showing, when it isn't one
+            # the dashboard already tracks. Carries no availability — tapping
+            # it looks that up live, the same path a searched film takes.
+            "letterboxd_slug": resolved["slug"] if resolved else None,
+            "tmdb_id": resolved["tmdb_id"] if resolved else None,
             "showtimes": [],
         })
         entry["showtimes"].append({
@@ -840,6 +862,20 @@ def _cinema_listings(state: StateDoc) -> list[dict]:
             row["director"] = ", ".join(film.director) if film.director else row["director"]
             row["synopsis"] = film.synopsis or row["synopsis"]
             row["duration_minutes"] = film.runtime_minutes or row["duration_minutes"]
+        elif row.get("letterboxd_slug"):
+            # Same principle as a watchlist match: prefer what Letterboxd
+            # says about the film over what the venue's listing page said,
+            # since the venue's is a marketing blurb with the screening's
+            # own year on it.
+            resolved = resolved_by_slug.get(row["letterboxd_slug"], {})
+            row["rating"] = resolved.get("rating")
+            row["genre"] = resolved.get("genre") or []
+            row["title"] = resolved.get("title") or row["title"]
+            row["year"] = resolved.get("year") or row["year"]
+            row["poster_url"] = resolved.get("poster_url") or row["poster_url"]
+            row["director"] = resolved.get("director") or row["director"]
+            row["synopsis"] = resolved.get("synopsis") or row["synopsis"]
+            row["duration_minutes"] = resolved.get("runtime_minutes") or row["duration_minutes"]
         else:
             row["rating"] = None
             row["genre"] = []
@@ -4659,14 +4695,24 @@ function cinemaCardHtml(row) {
   if (row.duration_minutes != null) metaParts.push(formatRuntime(row.duration_minutes));
   const genre = metaParts.length ? '<div class="film-card-genre">' + metaParts.join(' · ') + '</div>' : '';
 
-  const titleHtml = row.matched_slug
-    ? '<a class="film-link film-card-title" target="_blank" href="https://letterboxd.com/film/' + row.matched_slug + '/">' +
+  // Either kind of match gives the film a Letterboxd page to link to; only
+  // a watchlist one gives it a slug the dashboard can open its own card for.
+  const linkSlug = row.matched_slug || row.letterboxd_slug;
+  const titleHtml = linkSlug
+    ? '<a class="film-link film-card-title" target="_blank" href="https://letterboxd.com/film/' + escAttr(linkSlug) + '/">' +
       esc(row.title) + year + '</a>'
     : '<span class="film-card-title">' + esc(row.title) + year + '</span>';
 
   const div = document.createElement('div');
   div.className = 'film-card';
   if (row.matched_slug) div.dataset.slug = row.matched_slug;
+  // Not tracked, but TMDB knows it — so "can I stream this instead" is one
+  // tap away, through the same live lookup a searched film uses.
+  else if (row.tmdb_id) {
+    div.dataset.liveTmdbId = String(row.tmdb_id);
+    div.dataset.liveTitle = row.title;
+    if (row.year != null) div.dataset.liveYear = String(row.year);
+  }
   div.innerHTML = poster +
     '<div class="film-card-body">' +
       '<div class="film-card-title-row">' + titleHtml +
@@ -4755,7 +4801,19 @@ function renderCinemas() {
 function onCinemaCardClick(event) {
   if (event.target.closest('a')) return;
   const card = event.target.closest('.film-card');
-  if (card && card.dataset.slug) openQuickLook(card.dataset.slug);
+  if (!card) return;
+  if (card.dataset.slug) { openQuickLook(card.dataset.slug); return; }
+  // A film showing locally that isn't tracked: no stored offers, so this is
+  // the live lookup — which is exactly the question worth asking about a
+  // film you've just seen is on at the Prince Charles.
+  if (card.dataset.liveTmdbId) {
+    openLiveQuickLook({
+      tmdb_id: Number(card.dataset.liveTmdbId),
+      title: card.dataset.liveTitle,
+      year: card.dataset.liveYear ? Number(card.dataset.liveYear) : null,
+      poster_url: null,
+    });
+  }
 }
 document.getElementById('cinemasGrid').addEventListener('click', onCinemaCardClick);
 document.getElementById('cinemaSearch').addEventListener('input', renderCinemas);

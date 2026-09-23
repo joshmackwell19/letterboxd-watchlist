@@ -18,7 +18,15 @@ from .analysis import (
     render_favorite_recommendations,
     render_ranking,
 )
-from .cinemas import fetch_barbican, fetch_prince_charles, fetch_riverside, fetch_vue
+from .cinemas import (
+    fetch_barbican,
+    fetch_prince_charles,
+    fetch_riverside,
+    fetch_vue,
+    listing_match_key,
+    match_watchlist_film,
+    resolve_listing_to_letterboxd,
+)
 from .config import (
     load_config, load_dismissed_recommendations, load_favorites, load_global_subscriptions,
     load_main_services, load_revisitable_services,
@@ -47,6 +55,7 @@ from .letterboxd import (
     fetch_watched_films,
     fetch_watchlist,
     get_film_details_by_slug,
+    get_film_details_by_tmdb_id,
 )
 from .models import FilmState, OfferRecord, WatchlistFilm
 from .notify import send_if_configured
@@ -118,6 +127,87 @@ def _fetch_original_language(title: str, year: int | None) -> str | None:
     """The language half alone, for the diary/discovery rows that have
     nowhere to put an id."""
     return _fetch_tmdb_facts(title, year)[1]
+
+
+# A first run has every listing to resolve at two network calls each; after
+# that it's only what's newly announced. Capped so the first one doesn't add
+# ten minutes to the pipeline — the rest resolve the next day, and the day
+# after, which is soon enough for a listing that runs for weeks.
+CINEMA_RESOLVE_PER_RUN = 120
+# A listing that resolved to nothing is usually event cinema and always will
+# be, but occasionally it's a film TMDB hadn't indexed yet on announcement.
+# Re-asking a few weeks later costs almost nothing and catches those.
+CINEMA_NEGATIVE_RETRY_DAYS = 30
+
+
+def _resolved_cinema_matches(
+    showtimes: list[dict], films: dict, previous: dict[str, dict | None], *, warn,
+) -> dict[str, dict | None]:
+    """Letterboxd films for the cinema listings the watchlist can't identify.
+
+    The watchlist answers for about a tenth of what's on — everything else
+    was showing as a bare title with no poster of ours, no rating and
+    nowhere to click through to. This resolves the rest through TMDB and
+    Letterboxd and caches the answer, since unlike the watchlist match it's
+    far too expensive to redo at dashboard-build time.
+    """
+    today = datetime.now(timezone.utc).date()
+    resolved: dict[str, dict | None] = {}
+    budget = CINEMA_RESOLVE_PER_RUN
+
+    # Busiest film first, so on the runs where the budget binds — the first
+    # couple, when nothing is cached — it's spent on the films with thirty
+    # showings rather than the one-off matinee that happens to scrape first.
+    showings_per_key: dict[str, int] = {}
+    for showing in showtimes:
+        showings_per_key[listing_match_key(showing["title"], showing["year"])] = (
+            showings_per_key.get(listing_match_key(showing["title"], showing["year"]), 0) + 1)
+    showtimes = sorted(
+        showtimes,
+        key=lambda s: -showings_per_key[listing_match_key(s["title"], s["year"])])
+
+    for showing in showtimes:
+        # Already on the watchlist: that match is better than anything this
+        # could find, and it's recomputed at build time anyway.
+        if match_watchlist_film(showing["title"], showing["year"], films):
+            continue
+        key = listing_match_key(showing["title"], showing["year"])
+        if key in resolved:
+            continue
+
+        cached = previous.get(key, "missing")
+        if cached != "missing":
+            stale = False
+            if cached is None or not cached.get("slug"):
+                stamp = (cached or {}).get("resolved_at", "")[:10]
+                try:
+                    stale = (today - date.fromisoformat(stamp)).days >= CINEMA_NEGATIVE_RETRY_DAYS
+                except ValueError:
+                    stale = True
+            if not stale:
+                resolved[key] = cached
+                continue
+
+        if budget <= 0:
+            continue
+        budget -= 1
+        try:
+            match = resolve_listing_to_letterboxd(
+                showing["title"], showing["year"],
+                search_movie=_tmdb_search_movie,
+                film_details_by_tmdb_id=get_film_details_by_tmdb_id,
+            )
+        except Exception as exc:
+            # Not cached: a failure here is about the network, not about the
+            # listing, so it shouldn't be remembered as "this isn't a film".
+            warn(f"cinema listing {showing['title']!r} could not be resolved this run ({exc})")
+            continue
+        resolved[key] = {**match, "resolved_at": today.isoformat()} if match else {
+            "slug": None, "resolved_at": today.isoformat(),
+        }
+        time.sleep(0.2)
+
+    return resolved
 
 
 def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
@@ -416,6 +506,8 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
             _warn(f"cinema showtimes fetch failed for {cinema_name!r}, carrying forward yesterday's ({exc})")
             cinema_showtimes.extend(s for s in previous_state.cinema_showtimes if s["cinema"] == cinema_name)
     current_state.cinema_showtimes = cinema_showtimes
+    current_state.cinema_matches = _resolved_cinema_matches(
+        cinema_showtimes, current_state.films, previous_state.cinema_matches, warn=_warn)
 
     # Auto-queue every watchlist film missing a watch-together decision for
     # Sarah's review — covers both the one-time backfill of the existing

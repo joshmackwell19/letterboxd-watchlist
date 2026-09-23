@@ -51,7 +51,7 @@ stores none of it.
 | `models.py` | `FilmState`/`OfferRecord`/`WatchlistFilm` — the core data shapes |
 | `diff.py` | Classifies what's new since yesterday (`have`/`free_tier`/`new_possible`/new films/unmatched) for the daily email |
 | `similar.py` | TMDB-correlated discovery (`because_you_watched`, by director/cast/genre, hidden gems, popular, rewatch) |
-| `cinemas.py` | Scrapes showtimes for 4 London cinemas (Prince Charles, Barbican, Vue Fulham Broadway, Riverside Studios) — one fetcher per venue, each a different mechanism (plain HTML, a JSON API, an opaque-token AJAX endpoint); `match_watchlist_film` fuzzy-matches a listing against the watchlist by title |
+| `cinemas.py` | Scrapes showtimes for 4 London cinemas (Prince Charles, Barbican, Vue Fulham Broadway, Riverside Studios) — one fetcher per venue, each a different mechanism (plain HTML, a JSON API, an opaque-token AJAX endpoint). `clean_listing_title` strips what the venue added and the film doesn't have ("(10th Anniversary)", "- IMAX", a re-release year); `match_watchlist_film` matches a listing against the watchlist by title, and `resolve_listing_to_letterboxd` finds the Letterboxd film for everything else (TMDB for the id, then `/tmdb/<id>/` for the slug), with its two network calls injected so the matching judgement is testable without either |
 | `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file); `_search_taxonomy` is what lets the page classify a *searched* film's offers without duplicating `brands.py`/`config.py` in JS. The film detail view (the long look behind quick look's "Full details") adds no payload of its own — its director/cast/genre relations are derived in JS from `films_by_slug`, which already carries every watchlist and discovery film — TMDB's own answer to the same questions arrives separately, from the Worker, and is merged in behind the local one. The person page (any director/actor name is a link to it) is the same shape one level up, and shares the film page's back-trail: `detailTrail` holds both kinds of stop, so film → director → another of their films unwinds one step at a time |
 | `report.py` / `html_email.py` / `weekly_digest.py` | Email rendering (plain text / HTML / the Friday digest) |
 | `notify.py` | Resend API wrapper |
@@ -71,6 +71,7 @@ stores none of it.
 | `meta` | `run()`, full replace | `last_run_at`, `last_justwatch_check_date`, `last_seen_diary_guid`, `recent_watches`, `recent_additions` |
 | `watch_together` | **Incrementally** — `seed_pending_watch_together` (new pending rows) / `set_watch_together_statuses_batch` (Review tab decisions) | Deliberately *not* part of the full-replace — see `db.py`'s own comment on `save_state` |
 | `cinema_showtimes` | `run()`, full replace | Raw scraped rows from `cinemas.py` only — matching against the watchlist happens fresh in `dashboard.py` at build time, not stored |
+| `cinema_film_matches` | `run()`, full replace | The Letterboxd film each listing is showing, for the ~90% of the programme the watchlist can't name. Keyed by `cinemas.listing_match_key` (cleaned title + year), so the same film at three venues resolves once. Unlike the watchlist match this costs a TMDB search plus a Letterboxd page, so it's cached rather than recomputed at build time; a NULL slug is a listing with no Letterboxd film, remembered so it isn't retried daily |
 
 ## GitHub Actions workflows (`.github/workflows/`)
 
@@ -160,6 +161,12 @@ never touches Letterboxd — so it also runs from Actions via
 - **GitHub Actions cron has no DST awareness** — `daily.yml`/
   `weekly-digest.yml`'s schedules drift an hour during UK summer time,
   accepted and documented in those files rather than worked around.
+- **Cinema listings resolve gradually.** `run()` resolves at most
+  `CINEMA_RESOLVE_PER_RUN` (120) new listings a day, busiest film first,
+  because each costs a TMDB search plus a Letterboxd page. A first run
+  after a programme changes wholesale therefore leaves a tail unmatched
+  until the next day or two; the cache means steady state is only the
+  handful of newly announced titles.
 - **Riverside Studios' showtimes come from a captured, opaque filter
   token** (see `cinemas.py`'s `RIVERSIDE_FILTER_TOKEN` comment) — their
   listing page only loads via a JS-encrypted filter widget with no
@@ -179,7 +186,8 @@ node --test worker/test/*.test.mjs      # the Worker (no deps, no package.json)
 ```
 
 Covers the pure classification/section-building logic (`config.py`,
-`diff.py`, `languages.py`, `dashboard.py`'s home-section builders and its
+`diff.py`, `languages.py`, `cinemas.py`'s title cleaning and listing
+matching, `dashboard.py`'s home-section builders and its
 `_search_taxonomy` — that one checks the table the page classifies searched
 films from still agrees with `_classify` itself) — not an
 integration suite against a real database, which would need a Postgres

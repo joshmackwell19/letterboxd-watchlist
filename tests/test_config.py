@@ -124,3 +124,33 @@ def test_tier_qualifiers_collapse_but_separate_products_do_not():
     for separate in ["YouTube TV", "YouTube Sports"]:
         assert canonical_brand_name(separate) == separate
         assert not is_have_anywhere(canonical_brand_name(separate), "GB", config, ["YouTube"])
+
+
+# --- Tiers and profiles of a service you already pay for -----------------
+
+def test_a_tier_or_profile_folds_into_the_service_it_belongs_to():
+    from watchlist_justwatch.brands import canonical_brand_name
+
+    # Both reach you on a subscription you already have, so leaving them
+    # separate made a film on them read as one more thing to pay for.
+    assert canonical_brand_name("Netflix Kids") == "Netflix"
+    assert canonical_brand_name("Channel 4 Plus") == "Channel 4"
+
+
+def test_a_name_that_merely_starts_with_another_brand_is_left_alone():
+    from watchlist_justwatch.brands import canonical_brand_name
+
+    # The tempting generalisation — fold anything prefixed by another brand's
+    # name — is wrong more often than right. Each of these is a separate
+    # product with a separate bill.
+    for name in ["YouTube TV", "AMC Plus", "MGM Plus", "Now TV Cinema",
+                 "Sony Pictures Core", "Sky Go"]:
+        assert canonical_brand_name(name) == name
+
+
+def test_folding_a_variant_does_not_disturb_the_suffix_rules():
+    from watchlist_justwatch.brands import canonical_brand_name
+
+    assert canonical_brand_name("Netflix Standard with Ads") == "Netflix"
+    assert canonical_brand_name("MUBI Amazon Channel") == "MUBI"
+    assert canonical_brand_name("Disney Plus") == "Disney Plus"

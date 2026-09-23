@@ -99,6 +99,30 @@ const QUALIFYING_MONETIZATION_TYPES = ["FLATRATE", "ADS", "FREE"];
 // Mirrors letterboxd.py's MAX_STARRING.
 const MAX_STARRING = 5;
 
+// ---------- Film relations (the film detail page's live layer) ----------
+//
+// The dashboard already builds "more by this director" and "similar films"
+// from the ~500 films it ships, which only ever answers "of the ones you
+// track". This is TMDB's own answer to the same questions.
+//
+// Budget: one credits call, then the rest in parallel — 2 for similar +
+// recommendations, at most 2 director filmographies and 3 cast ones. Eight
+// subrequests worst case, against Cloudflare's limit of 50.
+const RELATIONS_DIRECTOR_CAP = 2;
+// Matches ACTOR_SECTIONS_CAP on the page: more than three actor sections
+// and the page stops being about the film.
+const RELATIONS_CAST_CAP = 3;
+const RELATIONS_FILMS_PER_PERSON = 40;
+const RELATIONS_SIMILAR_CAP = 24;
+// An actor's movie_credits runs to hundreds of entries, most of them one-
+// scene parts and voice work. "order" is TMDB's own billing position, so
+// this keeps the roles the film was actually sold on. A director's crew
+// credits need no such filter — their filmography is the point.
+const RELATIONS_MAX_BILLING_ORDER = 10;
+// Enough to drop unreleased stubs and things with no audience at all,
+// low enough to keep genuinely obscure films.
+const RELATIONS_MIN_VOTES = 20;
+
 const JSON_LD_OPEN_TAG = '<script type="application/ld+json">';
 const ISO_DURATION_RE = /^PT(?:(\d+)H)?(?:(\d+)M)?$/;
 
@@ -377,6 +401,71 @@ async function fetchJustWatchOffers(title, year, tmdbId, countries) {
   return { matched: true, entry_id: match.node.id, confidence: match.confidence, offers };
 }
 
+// One TMDB movie, trimmed to what a poster tile needs. The page renders
+// these itself, so anything it doesn't draw is weight on every response.
+function relationRow(movie) {
+  return {
+    tmdb_id: movie.id,
+    title: movie.title || movie.original_title || "",
+    year: releaseYear(movie.release_date),
+    poster_url: movie.poster_path ? TMDB_POSTER_BASE + movie.poster_path : null,
+    tmdb_rating: typeof movie.vote_average === "number" ? movie.vote_average : null,
+    popularity: typeof movie.popularity === "number" ? movie.popularity : 0,
+  };
+}
+
+// Most popular first, so the per-person cap keeps the films worth showing
+// rather than an arbitrary forty. The page re-sorts for display; this only
+// decides what survives the cut.
+function sortedRelationRows(movies, cap) {
+  return movies
+    .map(relationRow)
+    .sort((a, b) => b.popularity - a.popularity)
+    .slice(0, cap);
+}
+
+function usableRelation(movie, sourceTmdbId) {
+  return (
+    movie &&
+    movie.id !== sourceTmdbId &&
+    Boolean(movie.release_date) &&
+    Boolean(movie.poster_path)
+  );
+}
+
+// A person's filmography, as either the films they directed or the films
+// they were billed in. A failure here costs that one section, not the
+// whole response — the same best-effort stance the search picker's
+// per-row credits call takes.
+async function personFilms(env, personId, role, sourceTmdbId) {
+  let credits;
+  try {
+    credits = await tmdbGet(env, `/person/${personId}/movie_credits`, { language: "en-US" });
+  } catch {
+    return null;
+  }
+  const entries =
+    role === "director"
+      ? (credits.crew || []).filter((c) => c.job === "Director")
+      : (credits.cast || []).filter(
+          (c) =>
+            typeof c.order === "number" &&
+            c.order <= RELATIONS_MAX_BILLING_ORDER &&
+            (c.vote_count || 0) >= RELATIONS_MIN_VOTES
+        );
+
+  // A director credited twice on one film (TMDB does this) would otherwise
+  // appear twice in their own filmography.
+  const seen = new Set();
+  const unique = [];
+  entries.forEach((movie) => {
+    if (!usableRelation(movie, sourceTmdbId) || seen.has(movie.id)) return;
+    seen.add(movie.id);
+    unique.push(movie);
+  });
+  return sortedRelationRows(unique, RELATIONS_FILMS_PER_PERSON);
+}
+
 export default {
   async fetch(request, env) {
     const cors = {
@@ -554,6 +643,96 @@ export default {
       }
 
       return jsonResponse({ ok: true, tmdb_id: tmdbId, letterboxd, justwatch: offers }, 200, cors);
+    }
+
+    // ---------- /film-relations (the film detail page's live layer) ----------
+    //
+    // Deliberately no JustWatch: the page already knows the availability of
+    // every film it tracks, and asking for the rest would be a hundred
+    // lookups for posters most of which are never tapped. A film the page
+    // doesn't have goes through /film-lookup when it's actually opened,
+    // which is the same one-film-at-a-time path quick search uses.
+    if (url.pathname === "/film-relations") {
+      if (!env.TMDB_API_KEY) {
+        return jsonResponse(
+          { ok: false, error: "TMDB_API_KEY is not configured on this Worker" }, 503, cors);
+      }
+
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return jsonResponse({ ok: false, error: "invalid JSON body" }, 400, cors);
+      }
+
+      const sourceTmdbId = Number(payload.tmdb_id);
+      if (!Number.isInteger(sourceTmdbId) || sourceTmdbId <= 0) {
+        return jsonResponse({ ok: false, error: 'missing or invalid "tmdb_id"' }, 400, cors);
+      }
+
+      // The people have to be known before their filmographies can be
+      // asked for, so this one call is the only sequential step.
+      let credits;
+      try {
+        credits = await tmdbGet(env, `/movie/${sourceTmdbId}/credits`, { language: "en-US" });
+      } catch (err) {
+        return jsonResponse({ ok: false, error: String(err).slice(0, 300) }, 502, cors);
+      }
+
+      const directors = (credits.crew || [])
+        .filter((c) => c.job === "Director")
+        .slice(0, RELATIONS_DIRECTOR_CAP);
+      const cast = (credits.cast || [])
+        .slice()
+        .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
+        .slice(0, RELATIONS_CAST_CAP);
+
+      // Everything below depends only on the ids above, so it all goes out
+      // at once — the whole endpoint is two round trips deep, not eight.
+      const [similarResult, recommendedResult, ...peopleFilms] = await Promise.all([
+        tmdbGet(env, `/movie/${sourceTmdbId}/similar`, { language: "en-US" }).catch(() => null),
+        tmdbGet(env, `/movie/${sourceTmdbId}/recommendations`, { language: "en-US" }).catch(() => null),
+        ...directors.map((d) => personFilms(env, d.id, "director", sourceTmdbId)),
+        ...cast.map((c) => personFilms(env, c.id, "cast", sourceTmdbId)),
+      ]);
+
+      // Interleaved for the same reason tmdb_client.similar_and_recommended
+      // interleaves them: recommendations are behaviour-based and similar is
+      // content-based, and letting either dominate the cap loses half the
+      // point of asking both.
+      const similarSeen = new Set();
+      const similar = [];
+      const similarRows = (similarResult && similarResult.results) || [];
+      const recommendedRows = (recommendedResult && recommendedResult.results) || [];
+      for (let i = 0; i < Math.max(similarRows.length, recommendedRows.length); i++) {
+        for (const movie of [recommendedRows[i], similarRows[i]]) {
+          if (!usableRelation(movie, sourceTmdbId) || similarSeen.has(movie.id)) continue;
+          similarSeen.add(movie.id);
+          similar.push(relationRow(movie));
+          if (similar.length >= RELATIONS_SIMILAR_CAP) break;
+        }
+        if (similar.length >= RELATIONS_SIMILAR_CAP) break;
+      }
+
+      // A person whose filmography call failed is dropped rather than sent
+      // as an empty section — "nothing else by this director" and "couldn't
+      // ask" must not read the same on the page.
+      const people = [...directors, ...cast].map((person, i) => ({
+        tmdb_id: person.id,
+        name: person.name,
+        role: i < directors.length ? "director" : "cast",
+        films: peopleFilms[i],
+      })).filter((p) => p.films !== null);
+
+      return jsonResponse({
+        ok: true,
+        tmdb_id: sourceTmdbId,
+        people,
+        similar,
+        // Distinguishes "TMDB has no similar films" from "both calls
+        // failed", which the page has to be able to say differently.
+        similar_unavailable: similarResult === null && recommendedResult === null,
+      }, 200, cors);
     }
 
     if (url.pathname === "/update-services") {

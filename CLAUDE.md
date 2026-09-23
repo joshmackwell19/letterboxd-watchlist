@@ -20,6 +20,7 @@ Dashboard UI writes (Settings save / dismiss / Review tab)
 Cloudflare Worker (worker/) ──► GitHub Actions workflow_dispatch ──► main.py (one-off flag) ──► Postgres
 
 Dashboard quick search (any film on Letterboxd, watchlisted or not)
+Dashboard film detail page (TMDB's own similar / director / cast)
         │
         ▼
 Cloudflare Worker (worker/) ──► TMDB + Letterboxd + JustWatch, live ──► rendered client-side
@@ -30,7 +31,10 @@ Postgres. Everything downstream of the database (the dashboard itself, the
 Worker) only ever reads it or makes small, targeted writes to specific
 tables — never a full rescan. Quick search is the one path that touches the
 database not at all: it reads live and renders, storing nothing, so a
-searched film leaves no trace and costs no Neon quota.
+searched film leaves no trace and costs no Neon quota. The film detail
+page's live layer works the same way — it asks TMDB what else the director
+made and what's similar, renders it alongside what's already tracked, and
+stores none of it.
 
 ## Source layout (`src/watchlist_justwatch/`)
 
@@ -47,7 +51,7 @@ searched film leaves no trace and costs no Neon quota.
 | `diff.py` | Classifies what's new since yesterday (`have`/`free_tier`/`new_possible`/new films/unmatched) for the daily email |
 | `similar.py` | TMDB-correlated discovery (`because_you_watched`, by director/cast/genre, hidden gems, popular, rewatch) |
 | `cinemas.py` | Scrapes showtimes for 4 London cinemas (Prince Charles, Barbican, Vue Fulham Broadway, Riverside Studios) — one fetcher per venue, each a different mechanism (plain HTML, a JSON API, an opaque-token AJAX endpoint); `match_watchlist_film` fuzzy-matches a listing against the watchlist by title |
-| `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file); `_search_taxonomy` is what lets the page classify a *searched* film's offers without duplicating `brands.py`/`config.py` in JS. The film detail view (the long look behind quick look's "Full details") adds no payload of its own — its director/cast/genre relations are derived in JS from `films_by_slug`, which already carries every watchlist and discovery film |
+| `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file); `_search_taxonomy` is what lets the page classify a *searched* film's offers without duplicating `brands.py`/`config.py` in JS. The film detail view (the long look behind quick look's "Full details") adds no payload of its own — its director/cast/genre relations are derived in JS from `films_by_slug`, which already carries every watchlist and discovery film — TMDB's own answer to the same questions arrives separately, from the Worker, and is merged in behind the local one |
 | `report.py` / `html_email.py` / `weekly_digest.py` | Email rendering (plain text / HTML / the Friday digest) |
 | `notify.py` | Resend API wrapper |
 | `analysis.py` | `--rank-services`/`--recommend-favorites` standalone analyses |
@@ -58,7 +62,7 @@ searched film leaves no trace and costs no Neon quota.
 
 | Table | Written by | Notes |
 |---|---|---|
-| `films` | `run()`, full replace each run | Josh's watchlist **union** Sarah's — `josh_watchlist`/`sarah_watchlist` say whose list a slug came from, since this table alone can't |
+| `films` | `run()`, full replace each run | Josh's watchlist **union** Sarah's — `josh_watchlist`/`sarah_watchlist` say whose list a slug came from, since this table alone can't. `tmdb_id` comes free from the same TMDB search `original_language` already makes, and is what lets the dashboard ask the Worker about a film directly; it fills in via the stale rotation (or `--backfill-language`), and a film without one just gets no live layer |
 | `diary` | `run()`, full replace | Every film ever logged as watched; backfilled once via `--backfill-diary` (must run locally — Letterboxd blocks GH Actions' IPs from `/username/films/`) |
 | `discovery_films` | `run()`, full replace | TMDB-correlated films surfaced by `similar.py` that aren't on the watchlist itself. Their offers are stored with `monetization_types`, so `dashboard.py` re-runs `_classify` on them at build time — a stored verdict would otherwise keep whatever config was current the day the film was discovered |
 | `recommendation_sections` | `run()`, full replace | Which slugs go in which home-page discovery section |
@@ -99,18 +103,23 @@ Cloudflare's side and aren't in `wrangler.toml`.
 | `POST /dismiss-recommendation` | Commits `config/dismissed_recommendations.yaml`, triggers `regenerate-dashboard.yml` |
 | `POST /tag-film` | Takes `{decisions: [{slug, status}]}` (a debounce-batched set from the Review tab), triggers `regenerate-dashboard.yml` with them |
 | `POST /search-films` | Quick search, step 1: TMDB title search (+ a parallel credits call per row for the director) returning the picker list |
-| `POST /film-lookup` | Quick search, step 2: for the picked film, Letterboxd details via `/tmdb/<id>/` and JustWatch offers for every country the page sends |
+| `POST /film-lookup` | Quick search, step 2: for the picked film, Letterboxd details via `/tmdb/<id>/` and JustWatch offers for every country the page sends. Also what the film detail page calls when an untracked TMDB poster is tapped |
+| `POST /film-relations` | The film detail page's live layer: TMDB's similar + recommendations for one film, plus the filmographies of up to 2 credited directors and 3 billed cast. Eight subrequests worst case (1 credits, then the rest in parallel), against Cloudflare's limit of 50 |
 
 Anything else 404s. The base route used to be a catch-all, so a typo or a
 call to an endpoint the deployed Worker didn't have yet silently kicked off
 a full `daily.yml` run and answered as if it had worked.
 
-The two quick-search endpoints are the only ones that touch neither GitHub
+The three TMDB-backed endpoints (`/search-films`, `/film-lookup`,
+`/film-relations`) are the only ones that touch neither GitHub
 nor the database — they read live data and return it, and deliberately
 don't classify anything. Turning raw JustWatch offers into have/free_tier/
 could_get_again/subscription badges stays in Python (`brands.py` +
 `config.py`), reaching the page as a lookup table rather than as logic
-reimplemented in JS.
+reimplemented in JS. `/film-relations` deliberately fetches no availability
+at all: the page already knows it for every film it tracks, and a film it
+doesn't track goes through `/film-lookup` when it's actually tapped, rather
+than a hundred JustWatch lookups for posters nobody opens.
 
 ## `main.py` CLI flags
 
@@ -124,7 +133,8 @@ reimplemented in JS.
 **One-off local backfills** (Letterboxd blocks GH Actions' IPs from
 `/username/films/`, so these run on a Mac): `--backfill-diary`,
 `--backfill-diary-ratings`, `--backfill-language` (TMDB-only, no
-JustWatch/Letterboxd calls).
+JustWatch/Letterboxd calls — fills `original_language` *and* `tmdb_id`,
+which come from the same search).
 
 **Standalone analyses** (network-free, read already-stored state):
 `--rank-services`, `--recommend-favorites`, `--similar-to TITLE`,
@@ -158,7 +168,8 @@ JustWatch/Letterboxd calls).
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest                                  # the Python pipeline
+node --test worker/test/*.test.mjs      # the Worker (no deps, no package.json)
 ```
 
 Covers the pure classification/section-building logic (`config.py`,
@@ -168,6 +179,12 @@ films from still agrees with `_classify` itself) — not an
 integration suite against a real database, which would need a Postgres
 fixture and is a bigger lift for less immediate value than covering the
 logic most likely to silently regress.
+
+On the Worker side, `/film-relations` is covered against a stubbed TMDB —
+including its subrequest count, which is the thing that would break it
+against Cloudflare's limit of 50 without any test noticing. The other
+endpoints aren't covered yet; they were written before there was anywhere
+to put a JS test.
 
 ## Local development
 

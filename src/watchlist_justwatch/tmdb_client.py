@@ -43,6 +43,16 @@ def _get(path: str, *, max_retries: int = 3, backoff_base_seconds: float = 2.0, 
 
 
 def search_movie(title: str, year: int | None = None) -> dict | None:
+    """TMDB's best match for a title (+ year). Callers take two things from
+    it: the film's own `id`, and `original_language` — the ISO 639-1 code of
+    its original production language, TMDB's own classification, which is
+    what flags a subtitled film.
+
+    Letterboxd's JSON-LD has an `inLanguage` list instead, but that's every
+    language *heard* in the film (The Godfather's is ['la', 'en', 'it']),
+    not its primary one, so it can't tell "mostly English, one foreign
+    scene" from "actually a foreign-language film". This can.
+    """
     params = {"query": title}
     if year is not None:
         params["year"] = year
@@ -51,17 +61,6 @@ def search_movie(title: str, year: int | None = None) -> dict | None:
     if not results:
         return None
     return results[0]
-
-
-def original_language(title: str, year: int | None = None) -> str | None:
-    """ISO 639-1 code of the film's original production language (TMDB's
-    own classification) — used to flag subtitled films. Letterboxd's own
-    JSON-LD has an `inLanguage` list instead, but that's every language
-    *heard* in the film (e.g. The Godfather's is ['la', 'en', 'it']), not
-    its primary one, so it can't distinguish "mostly English, one foreign
-    scene" from "actually a foreign-language film" — this can."""
-    movie = search_movie(title, year)
-    return movie.get("original_language") if movie else None
 
 
 def similar_and_recommended(tmdb_id: int, *, limit: int = 15) -> list[dict]:

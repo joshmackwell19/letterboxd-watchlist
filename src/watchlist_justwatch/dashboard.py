@@ -289,6 +289,11 @@ def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> 
             "runtime_minutes": film.runtime_minutes,
             "language_name": language_name(film.original_language),
             "is_subtitled": is_subtitled(film.original_language),
+            # What the film detail page hands the Worker to ask TMDB about
+            # this film directly. Absent on films whose TMDB search hasn't
+            # come round yet (the stale rotation fills it in), and the page
+            # treats that as "no live layer for this one" rather than an error.
+            "tmdb_id": film.tmdb_id,
             "all_offers": all_offers,
         }
     return lookup
@@ -1338,6 +1343,22 @@ _TEMPLATE = """<!DOCTYPE html>
   .film-section-head h3 { font-size: 14.5px; font-weight: 600; margin: 0; }
   .film-section-head .count { font-size: 12px; color: var(--text-faint); }
   .film-section-empty { font-size: 12.5px; color: var(--text-faint); }
+  /* A film TMDB knows about but the dashboard doesn't track. Dimmed until
+     hovered so a section reads tracked-first at a glance, and outlined so
+     its missing availability dot reads as "not asked yet" rather than as
+     "not available". */
+  .poster-tile-live img, .poster-tile-live .poster-tile-fallback { opacity: 0.62; }
+  .poster-tile-live:hover img, .poster-tile-live:focus-visible img { opacity: 0.9; }
+  .poster-tile-live::after {
+    content: ''; position: absolute; inset: 0; border-radius: 8px;
+    border: 1px dashed var(--text-faint); opacity: 0.5; pointer-events: none;
+  }
+  .relation-more {
+    margin-top: 10px; font-size: 12px; padding: 5px 11px; background: none;
+    color: var(--text-muted); border: 1px solid var(--hairline); border-radius: 999px;
+    cursor: pointer;
+  }
+  .relation-more:hover { color: var(--text); border-color: var(--text-muted); }
   .quick-look-more { margin-top: 14px; font-size: 12.5px; padding: 7px 14px; }
   .modal-card .detail-card { border-bottom: none; padding: 0; }
   .modal-card .detail-poster, .modal-card .detail-poster-placeholder { width: 120px; height: 176px; }
@@ -2977,7 +2998,7 @@ function classifySearchOffers(rawOffers) {
 // Assembles the films_by_slug-shaped object buildFilmDetailCard expects out
 // of the two halves a lookup returns: the picker's TMDB row (which is where
 // the language comes from — Letterboxd's own JSON-LD lists every language
-// heard in the film, not its primary one, see tmdb_client.original_language)
+// heard in the film, not its primary one, see tmdb_client.search_movie)
 // and the Worker's Letterboxd + JustWatch response. Letterboxd wins on
 // anything both carry, so a searched film reads exactly like a watchlist one.
 function buildSearchedFilm(row, lookup) {
@@ -3489,29 +3510,130 @@ function sortRelated(films) {
     (watchlistRank(a) - watchlistRank(b)) || ((b.rating || 0) - (a.rating || 0)));
 }
 
-function filmRelationSection(title, films, emptyNote) {
+// Matching a live TMDB row back to a film the dashboard already has, so it
+// renders as a tracked tile (with its availability dot) rather than as one
+// more thing to look up. Two keys, because neither alone covers it: tmdb_id
+// is exact but only present on films whose TMDB search has come round, and
+// title+year covers the rest — the same identity similar.py matches on, for
+// the same reason.
+let _trackedIndexes = null;
+
+function trackedIndexes() {
+  if (!_trackedIndexes) {
+    const byTmdbId = {};
+    const byIdentity = {};
+    // films_by_slug is discovery films overlaid by watchlist ones, so a slug
+    // on both lands here as the watchlist copy — which is the better one.
+    for (const [slug, film] of Object.entries(DATA.films_by_slug)) {
+      if (film.tmdb_id) byTmdbId[film.tmdb_id] = slug;
+      byIdentity[searchIdentity(film.title, film.year)] = slug;
+    }
+    _trackedIndexes = { byTmdbId, byIdentity };
+  }
+  return _trackedIndexes;
+}
+
+function trackedSlugForRow(row) {
+  const { byTmdbId, byIdentity } = trackedIndexes();
+  return byTmdbId[row.tmdb_id] || byIdentity[searchIdentity(row.title, row.year)] || null;
+}
+
+// Local films first, then whatever TMDB adds that isn't already among them —
+// "local first" literally: the films whose availability is already known lead,
+// and the rest follow as things to look up.
+function mergedRelationEntries(trackedFilms, liveRows) {
+  const shown = new Set(trackedFilms.map(f => f.slug));
+  const entries = trackedFilms.map(film => ({ tracked: true, film }));
+  (liveRows || []).forEach(row => {
+    const slug = trackedSlugForRow(row);
+    if (slug) {
+      if (shown.has(slug)) return;
+      shown.add(slug);
+      entries.push({ tracked: true, film: { ...DATA.films_by_slug[slug], slug } });
+    } else {
+      entries.push({ tracked: false, row });
+    }
+  });
+  return entries;
+}
+
+function relationEntryTile(entry) {
+  if (entry.tracked) {
+    // The dot reads against one market, not "streaming somewhere on earth" —
+    // left unscoped nearly every tile goes green and the dot stops meaning
+    // anything. This page has no country control of its own, so it answers for
+    // the first home market, the same one the country chips lead with.
+    return buildPosterTile(entry.film, HOME_COUNTRY_CODES[0], film => openFilmDetail(film.slug));
+  }
+  const tile = buildPosterTile(entry.row, null, () => openLiveQuickLook(entry.row));
+  // Marked, because the difference matters: a tracked tile's missing dot
+  // means "not streaming anywhere you have", where this one's means
+  // "nobody has asked yet".
+  tile.classList.add('poster-tile-live');
+  tile.title = tile.title + ' — not tracked, tap to look up';
+  return tile;
+}
+
+// One relation section. `live` is null while the TMDB call is still out,
+// 'error' if it failed, and the section says which — a live layer that
+// quietly doesn't arrive would read as "there is nothing else", which is
+// the one thing it must not say.
+function filmRelationSection({ title, trackedFilms, liveRows, emptyNote, live }) {
   const section = document.createElement('div');
   section.className = 'film-section';
+  const entries = mergedRelationEntries(trackedFilms, liveRows);
+  const liveCount = entries.filter(e => !e.tracked).length;
+
   const head = document.createElement('div');
   head.className = 'film-section-head';
+  const counts = [];
+  if (entries.length) {
+    counts.push(liveCount ? (entries.length - liveCount) + ' tracked' : String(entries.length));
+    if (liveCount) counts.push(liveCount + ' more on TMDB');
+  }
+  if (live === null) counts.push('checking TMDB…');
+  if (live === 'error') counts.push('TMDB unavailable');
   head.innerHTML = '<h3>' + esc(title) + '</h3>' +
-    (films.length > FILM_RELATION_CAP ? '<span class="count">showing ' + FILM_RELATION_CAP +
-      ' of ' + films.length + '</span>' : '<span class="count">' + films.length + '</span>');
+    (counts.length ? '<span class="count">' + esc(counts.join(' · ')) + '</span>' : '');
   section.appendChild(head);
 
-  if (!films.length) {
+  if (!entries.length) {
     const note = document.createElement('p');
     note.className = 'film-section-empty';
-    note.textContent = emptyNote;
+    note.textContent = live === 'error'
+      ? "TMDB couldn't be reached, so this only covers what's already tracked — and there's nothing."
+      : emptyNote;
     section.appendChild(note);
     return section;
   }
-  // The dot reads against one market, not "streaming somewhere on earth" —
-  // left unscoped nearly every tile goes green and the dot stops meaning
-  // anything. This page has no country control of its own, so it answers for
-  // the first home market, the same one the country chips lead with.
-  fillPosterGrid(section, films.slice(0, FILM_RELATION_CAP), HOME_COUNTRY_CODES[0],
-                 film => openFilmDetail(film.slug));
+
+  const grid = document.createElement('div');
+  grid.className = 'poster-grid';
+  section.appendChild(grid);
+
+  // A director's whole filmography can run to forty; showing all of it by
+  // default would bury the sections below it. Capped, with the way to see
+  // the rest right there rather than a link somewhere else.
+  let expanded = false;
+  const fill = () => {
+    grid.innerHTML = '';
+    const shown = expanded ? entries : entries.slice(0, FILM_RELATION_CAP);
+    shown.forEach(entry => grid.appendChild(relationEntryTile(entry)));
+  };
+  fill();
+
+  if (entries.length > FILM_RELATION_CAP) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'relation-more';
+    more.textContent = 'Show all ' + entries.length + ' →';
+    more.addEventListener('click', () => {
+      expanded = !expanded;
+      more.textContent = expanded ? 'Show fewer ↑' : 'Show all ' + entries.length + ' →';
+      fill();
+    });
+    section.appendChild(more);
+  }
   return section;
 }
 
@@ -3608,22 +3730,171 @@ function renderFilmDetail(slug) {
   avail.innerHTML = '<div class="film-section-head"><h3>Where to watch</h3></div>' + availabilityGroupsHtml(film);
   container.appendChild(avail);
 
-  filmDirectors(film).forEach(director => {
-    container.appendChild(filmRelationSection(
-      'More by ' + director,
-      sortRelated(relatedByDirector(film, director)),
-      'Nothing else by ' + director + ' on your watchlist or in your recommendations yet.'));
+  const relations = document.createElement('div');
+  relations.id = 'filmDetailRelations';
+  container.appendChild(relations);
+  renderRelationSections(film, filmRelationsFor(film));
+  requestFilmRelations(film);
+}
+
+// ---------- The live TMDB layer ----------
+//
+// The sections above are drawn from the ~500 films the page ships, which
+// only ever answers "of the ones you track". TMDB knows the director's
+// whole filmography and its own notion of similar, so the page asks — but
+// only after it has already drawn what it can, so opening a film is still
+// instant and a slow or failed call costs nothing that was there before.
+//
+// Cached per film for the session: walking a chain of films and coming
+// back shouldn't re-ask, and nothing here changes between two views of
+// the same film minutes apart.
+const filmRelationsCache = {};
+
+function filmRelationsFor(film) {
+  if (!film.tmdb_id) return 'unknown';   // no id stored yet — local only, and said so
+  const cached = filmRelationsCache[film.tmdb_id];
+  // 'pending' is a call already in flight, which the page draws the same as
+  // one not yet started: still waiting.
+  return (cached === undefined || cached === 'pending') ? null : cached;
+}
+
+function requestFilmRelations(film) {
+  if (!film.tmdb_id || filmRelationsCache[film.tmdb_id] !== undefined) return;
+  const tmdbId = film.tmdb_id;
+  // Claimed before the call goes out, so reopening a film while its first
+  // request is still in flight waits on that one instead of starting another.
+  filmRelationsCache[tmdbId] = 'pending';
+  searchWorker('/film-relations', { tmdb_id: tmdbId })
+    .then(body => {
+      if (!body || !body.ok) throw new Error((body && body.error) || 'relations lookup failed');
+      filmRelationsCache[tmdbId] = body;
+    })
+    .catch(() => { filmRelationsCache[tmdbId] = 'error'; })
+    .then(() => {
+      // Only redraw if this is still the film on screen — a fast chain of
+      // taps would otherwise land one film's sections under another's hero.
+      if (currentFilmDetailSlug && DATA.films_by_slug[currentFilmDetailSlug] &&
+          DATA.films_by_slug[currentFilmDetailSlug].tmdb_id === tmdbId) {
+        renderRelationSections({ ...DATA.films_by_slug[currentFilmDetailSlug], slug: currentFilmDetailSlug },
+                               filmRelationsCache[tmdbId]);
+      }
+    });
+}
+
+// `live` is the Worker's payload, null while its call is out, 'error' if it
+// failed, or 'unknown' for a film with no TMDB id stored yet.
+function renderRelationSections(film, live) {
+  const container = document.getElementById('filmDetailRelations');
+  if (!container) return;
+  container.innerHTML = '';
+  const payload = (live && live !== 'error' && live !== 'unknown') ? live : null;
+  // 'unknown' is a local-only answer that is not going to improve, so it
+  // reads as settled rather than as a failure or a wait.
+  const liveState = live === 'unknown' ? undefined : (payload ? payload : live);
+
+  const people = payload ? payload.people : [];
+  const liveOf = (role, name) => {
+    const person = people.find(p => p.role === role && p.name === name);
+    return person ? person.films : null;
+  };
+
+  // Local names first, then anyone TMDB credits that Letterboxd's own page
+  // didn't — the order stays stable as the live layer arrives.
+  const directorNames = [...new Set([
+    ...filmDirectors(film),
+    ...people.filter(p => p.role === 'director').map(p => p.name),
+  ])];
+  directorNames.forEach(name => {
+    container.appendChild(filmRelationSection({
+      title: 'More by ' + name,
+      trackedFilms: sortRelated(relatedByDirector(film, name)),
+      liveRows: liveOf('director', name),
+      emptyNote: 'Nothing else by ' + name + ' on your watchlist or in your recommendations yet.',
+      live: liveState,
+    }));
   });
 
-  (film.starring || []).slice(0, ACTOR_SECTIONS_CAP).forEach(actor => {
-    const films = relatedByActor(film, actor);
-    if (!films.length) return;   // a section per actor only where there's something in it
-    container.appendChild(filmRelationSection('More with ' + actor, sortRelated(films), ''));
+  // TMDB's billed cast leads once it's here, because those are the names its
+  // filmographies were fetched for — a Letterboxd name it doesn't share would
+  // get a section with no live half, which is the weaker of the two to keep
+  // under the cap. Letterboxd's own list is the fallback until then, and
+  // relatedByActor works off the name either way, so a live name still shows
+  // the films already tracked.
+  const castNames = [...new Set([
+    ...people.filter(p => p.role === 'cast').map(p => p.name),
+    ...(film.starring || []),
+  ])].slice(0, ACTOR_SECTIONS_CAP);
+  castNames.forEach(name => {
+    const trackedFilms = sortRelated(relatedByActor(film, name));
+    const liveRows = liveOf('cast', name);
+    // Still no section for an actor with nothing to show — but now that
+    // includes "and TMDB had nothing either", not just "nothing tracked".
+    if (!trackedFilms.length && !(liveRows && liveRows.length)) return;
+    container.appendChild(filmRelationSection({
+      title: 'More with ' + name,
+      trackedFilms, liveRows, emptyNote: '', live: liveState,
+    }));
   });
 
-  container.appendChild(filmRelationSection(
-    'Similar films', similarByGenre(film),
-    'Nothing else tracked shares enough of its genres.'));
+  // TMDB's own "similar" is the real answer to this one; the genre overlap
+  // below is the stand-in the page can compute by itself, so it only stands
+  // in while there's no live answer to replace it.
+  container.appendChild(filmRelationSection({
+    title: 'Similar films',
+    trackedFilms: payload ? [] : similarByGenre(film),
+    liveRows: payload ? payload.similar : null,
+    emptyNote: 'Nothing else tracked shares enough of its genres.',
+    live: liveState,
+  }));
+}
+
+// A film TMDB surfaced that the dashboard doesn't track has no stored
+// availability, so tapping it runs the same one-film live lookup quick
+// search uses, and shows the result in the same quick-look modal.
+function openLiveQuickLook(row) {
+  const content = document.getElementById('quickLookContent');
+  content.innerHTML = '<p class="search-status">Looking up ' + esc(row.title) + '…</p>';
+  document.getElementById('quickLookOverlay').classList.add('active');
+
+  // buildSearchedFilm reads the picker's own row shape, which carries three
+  // fields a relation row doesn't. Absent, not empty — Letterboxd supplies
+  // all three on a successful lookup anyway, and undefined would render as
+  // the word "undefined" if it didn't.
+  const searchRow = {
+    ...row,
+    director: row.director || null,
+    original_language: row.original_language || null,
+    overview: row.overview || null,
+  };
+
+  searchWorker('/film-lookup', {
+    tmdb_id: row.tmdb_id,
+    title: row.title,
+    year: row.year,
+    countries: DATA.search_taxonomy.justwatch_countries,
+  })
+    .then(body => {
+      if (!body || !body.ok) throw new Error((body && body.error) || 'lookup failed');
+      const film = buildSearchedFilm(searchRow, body);
+      content.innerHTML = '';
+      content.appendChild(buildFilmDetailCard(film, null, null));
+      const notes = [{ text: 'Not on your watchlist — this was looked up live.', warn: false }];
+      if (!(body.letterboxd && body.letterboxd.ok)) {
+        notes.push({ text: "Letterboxd details couldn't be read, so the rating and cast are missing.", warn: true });
+      }
+      if (film.offers_unavailable) {
+        notes.push({ text: "Streaming availability couldn't be checked just now — try again in a moment.", warn: true });
+      }
+      notes.forEach(note => {
+        const el = document.createElement('p');
+        el.className = 'search-note' + (note.warn ? ' search-note-warn' : '');
+        el.textContent = note.text;
+        content.appendChild(el);
+      });
+    })
+    .catch(() => {
+      content.innerHTML = '<p class="search-status">Couldn\\'t look that film up just now.</p>';
+    });
 }
 
 function openFilmDetail(slug, fromView) {

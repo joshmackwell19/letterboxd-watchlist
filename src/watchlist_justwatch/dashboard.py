@@ -1643,6 +1643,27 @@ _TEMPLATE = """<!DOCTYPE html>
   .service-card-name i { color: var(--text-faint); font-style: italic; font-weight: 400; display: block; font-size: 11.5px; }
   .service-card-stats { color: var(--text-muted); font-size: 11.5px; }
   .service-card-stats strong { color: var(--text); font-weight: 600; }
+  .subs-link { margin-bottom: 14px; font-size: 12.5px; padding: 7px 14px; }
+  .subs-intro { font-size: 12.5px; color: var(--text-muted); line-height: 1.55; margin: 0 0 14px; }
+  /* The coverage build-up: one row per service, in the order that adds the
+     most, with a bar for how much of everything you can watch is covered by
+     that point. */
+  .subs-step {
+    display: grid; grid-template-columns: 1.5rem 1fr auto; align-items: baseline;
+    gap: 8px; font-size: 12.5px;
+  }
+  .subs-step-rank { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .subs-step-gain { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .subs-bar { height: 4px; border-radius: 2px; background: var(--hairline); margin: 3px 0 9px; overflow: hidden; }
+  .subs-bar span { display: block; height: 100%; background: var(--accent); }
+  .subs-service { margin-top: 26px; }
+  .subs-service-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    flex-wrap: wrap; margin: 0 0 8px;
+  }
+  .subs-service-head h3 { font-size: 14.5px; font-weight: 600; margin: 0; }
+  .subs-service-head .count { font-size: 12px; color: var(--text-faint); }
+  .subs-nothing { font-size: 12.5px; color: var(--text-faint); margin: 0; }
   .service-detail-filters {
     display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 14px;
   }
@@ -1965,7 +1986,13 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <section class="view" id="view-services">
   <div class="active-filters" id="activeServiceFilters"></div>
+  <button class="surprise-btn subs-link" id="openSubscriptions">What you'd lose →</button>
   <div id="servicesGrid" class="service-cards"></div>
+</section>
+
+<section class="view" id="view-subscriptions">
+  <button class="back-btn" id="backFromSubscriptions">← Back to services</button>
+  <div id="subscriptionsContent"></div>
 </section>
 
 <section class="view" id="view-service-detail">
@@ -2588,7 +2615,7 @@ function showView(name, options) {
   // opened the film from — which can itself be service-detail, hence the
   // second hop rather than a single check.
   let owner = (name === 'film-detail' || name === 'person-detail') ? filmDetailReturnView : name;
-  if (owner === 'service-detail') owner = 'services';
+  if (owner === 'service-detail' || owner === 'subscriptions') owner = 'services';
   TABS.forEach(n => {
     const isActive = n === owner;
     document.getElementById('tab-' + n).classList.toggle('active', isActive);
@@ -5333,7 +5360,7 @@ function watchableNowClass(film, country) {
   return null;   // needs a subscription, or isn't streaming anywhere
 }
 
-function buildPosterTile(film, country, onPick) {
+function buildPosterTile(film, country, onPick, options) {
   const tile = document.createElement('button');
   tile.type = 'button';
   tile.className = 'poster-tile';
@@ -5369,7 +5396,7 @@ function buildPosterTile(film, country, onPick) {
       img.replaceWith(titledPlaceholder());
     });
   }
-  const watchable = watchableNowClass(film, country);
+  const watchable = (options && options.hideDot) ? null : watchableNowClass(film, country);
   if (watchable) {
     const dot = document.createElement('span');
     dot.className = 'poster-dot poster-dot-' + watchable;
@@ -5396,10 +5423,10 @@ function renderLayoutSwitch(containerId, page, rerender) {
 
 // Both lists render the same tiles into whichever container they own, so
 // the two pages can't drift apart on sizing or on what a tap does.
-function fillPosterGrid(container, films, country, onPick) {
+function fillPosterGrid(container, films, country, onPick, options) {
   const grid = document.createElement('div');
   grid.className = 'poster-grid';
-  films.forEach(film => grid.appendChild(buildPosterTile(film, country, onPick)));
+  films.forEach(film => grid.appendChild(buildPosterTile(film, country, onPick, options)));
   container.appendChild(grid);
 }
 
@@ -5508,6 +5535,130 @@ document.getElementById('serviceUniqueOnly').addEventListener('click', () => {
   currentServiceDetail.uniqueOnly = !currentServiceDetail.uniqueOnly;
   renderServiceDetail();
 });
+
+// ---------- What you'd lose ----------
+//
+// Opened rarely and deliberately off to one side: the Services tab answers
+// "what's on this", this answers "which of these am I actually paying for".
+//
+// Everything here is derived from DATA.services, which already carries each
+// service's films and the ones on nothing else you have — so this page adds
+// no payload, only a way of reading what's there.
+
+function haveServiceRows() {
+  return DATA.services
+    .filter(r => r.classification === 'have')
+    .slice()
+    .sort((a, b) => b.unique_film_count - a.unique_film_count || b.film_count - a.film_count);
+}
+
+// The order that covers the most soonest: repeatedly take whichever service
+// adds the most films nothing before it had. It answers "how far down this
+// list do I have to go", which is the question behind cancelling anything —
+// and it's why a service with a big catalogue can still be near-worthless
+// once the ones above it are counted.
+//
+// Greedy, so it isn't provably the smallest set that covers everything; it's
+// the order you'd actually subscribe in, which is what's being read here.
+function coverageBuildUp(rows) {
+  const remaining = new Map(rows.map(r => [r.brand, new Set(r.slugs)]));
+  const covered = new Set();
+  const steps = [];
+  while (remaining.size) {
+    let best = null, bestGain = 0;
+    remaining.forEach((slugs, brand) => {
+      let gain = 0;
+      slugs.forEach(s => { if (!covered.has(s)) gain++; });
+      if (gain > bestGain) { bestGain = gain; best = brand; }
+    });
+    if (!best) break;   // nothing left adds anything
+    remaining.get(best).forEach(s => covered.add(s));
+    remaining.delete(best);
+    steps.push({ brand: best, gain: bestGain, cumulative: covered.size });
+  }
+  return { steps, total: covered.size, leftover: [...remaining.keys()] };
+}
+
+function renderSubscriptions() {
+  const container = document.getElementById('subscriptionsContent');
+  container.innerHTML = '';
+  const rows = haveServiceRows();
+
+  const title = document.createElement('h2');
+  title.className = 'detail-title';
+  title.textContent = "What you'd lose";
+  container.appendChild(title);
+
+  if (!rows.length) {
+    const note = document.createElement('p');
+    note.className = 'subs-nothing';
+    note.textContent = 'No services configured as ones you have — set them in Settings.';
+    container.appendChild(note);
+    return;
+  }
+
+  const { steps, total, leftover } = coverageBuildUp(rows);
+  const intro = document.createElement('p');
+  intro.className = 'subs-intro';
+  intro.innerHTML = 'Your ' + rows.length + ' services put <strong>' + total + '</strong> watchlist films within reach. ' +
+    'In the order that covers the most soonest:';
+  container.appendChild(intro);
+
+  steps.forEach((step, i) => {
+    const row = document.createElement('div');
+    row.className = 'subs-step';
+    row.innerHTML =
+      '<span class="subs-step-rank">' + (i + 1) + '.</span>' +
+      '<span class="subs-step-name">' + esc(step.brand) + '</span>' +
+      '<span class="subs-step-gain">+' + step.gain + ' → ' +
+        Math.round(100 * step.cumulative / total) + '%</span>';
+    container.appendChild(row);
+    const bar = document.createElement('div');
+    bar.className = 'subs-bar';
+    bar.innerHTML = '<span style="width:' + (100 * step.cumulative / total) + '%"></span>';
+    container.appendChild(bar);
+  });
+
+  if (leftover.length) {
+    // A service every one of whose films another already covers never wins a
+    // round, so it never appears above — worth saying rather than omitting.
+    const note = document.createElement('p');
+    note.className = 'subs-intro';
+    note.textContent = 'Adds nothing the others already cover: ' + leftover.join(', ') + '.';
+    container.appendChild(note);
+  }
+
+  rows.forEach(row => {
+    const section = document.createElement('div');
+    section.className = 'subs-service';
+    const head = document.createElement('div');
+    head.className = 'subs-service-head';
+    head.innerHTML = '<h3>' + esc(row.brand) + '</h3>' +
+      '<span class="count">' + row.film_count + ' films · lose ' + row.unique_film_count + '</span>';
+    section.appendChild(head);
+
+    if (!row.unique_film_count) {
+      const note = document.createElement('p');
+      note.className = 'subs-nothing';
+      note.textContent = 'Everything on it is on something else you have.';
+      section.appendChild(note);
+    } else {
+      const films = row.unique_slugs.map(slug => DATA.films_by_slug[slug]).filter(Boolean);
+      // No availability dot: every film here is on a service you have by
+      // definition, so a dot on all of them would say nothing.
+      fillPosterGrid(section, films, null, null, { hideDot: true });
+    }
+    container.appendChild(section);
+  });
+}
+
+function openSubscriptions() {
+  renderSubscriptions();
+  showView('subscriptions');
+}
+
+document.getElementById('openSubscriptions').addEventListener('click', openSubscriptions);
+document.getElementById('backFromSubscriptions').addEventListener('click', () => showView('services'));
 
 // A service is one thing now, so opening one no longer means choosing a
 // country first — that's what the pills inside are for.

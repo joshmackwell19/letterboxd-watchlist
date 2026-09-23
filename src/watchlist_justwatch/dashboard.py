@@ -1359,6 +1359,21 @@ _TEMPLATE = """<!DOCTYPE html>
     cursor: pointer;
   }
   .relation-more:hover { color: var(--text); border-color: var(--text-muted); }
+  /* A person's biography runs to several paragraphs; clamped, it leaves the
+     filmography — the reason for the page — above the fold. */
+  .person-bio { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+    overflow: hidden; margin-bottom: 6px; }
+  .person-bio-open { display: block; overflow: visible; }
+  .person-bio-toggle { margin-top: 0; margin-bottom: 10px; }
+  /* Names that lead somewhere, marked as such without turning the hero's
+     meta lines into a row of buttons. */
+  .person-link {
+    background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+    color: var(--accent); border-bottom: 1px solid transparent;
+  }
+  .person-link:hover { border-bottom-color: currentColor; }
+  .person-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .film-section-head h3 .person-link { color: inherit; }
   .quick-look-more { margin-top: 14px; font-size: 12.5px; padding: 7px 14px; }
   .modal-card .detail-card { border-bottom: none; padding: 0; }
   .modal-card .detail-poster, .modal-card .detail-poster-placeholder { width: 120px; height: 176px; }
@@ -1888,6 +1903,11 @@ _TEMPLATE = """<!DOCTYPE html>
   <div id="filmDetailContent"></div>
 </section>
 
+<section class="view" id="view-person-detail">
+  <button class="back-btn" id="personDetailBack">← Back</button>
+  <div id="personDetailContent"></div>
+</section>
+
 <nav class="bottom-nav">
   <button class="bottom-nav-btn active" id="nav-home">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -2384,7 +2404,7 @@ function showView(name) {
   // belongs to: service-detail always Services, film-detail whichever tab you
   // opened the film from — which can itself be service-detail, hence the
   // second hop rather than a single check.
-  let owner = name === 'film-detail' ? filmDetailReturnView : name;
+  let owner = (name === 'film-detail' || name === 'person-detail') ? filmDetailReturnView : name;
   if (owner === 'service-detail') owner = 'services';
   TABS.forEach(n => {
     const isActive = n === owner;
@@ -3460,10 +3480,51 @@ const ACTOR_SECTIONS_CAP = 3;
 // sort of film"; one is too loose to be worth showing.
 const SIMILAR_MIN_SHARED_GENRES = 2;
 
-// Where to return to, and the trail of films walked through to get here, so
-// a chain of "more by this director" unwinds one film at a time.
+// Where to return to, and the trail walked through to get here, so a chain
+// of film → director → another of their films unwinds one step at a time.
+// An entry is {kind: 'film', slug} or {kind: 'person', id, name} — the two
+// detail pages share one trail because you move between them freely.
 let filmDetailReturnView = 'films';
-let filmDetailTrail = [];
+let detailTrail = [];
+let currentDetailStop = null;
+
+const DETAIL_VIEW_IDS = ['view-film-detail', 'view-person-detail'];
+
+function renderDetailStop(stop) {
+  if (stop.kind === 'person') {
+    renderPersonDetail(stop);
+    requestPerson(stop);
+    showView('person-detail');
+  } else {
+    renderFilmDetail(stop.slug);
+    showView('film-detail');
+  }
+  window.scrollTo(0, 0);
+}
+
+// Every way into either detail page goes through here, so the trail and the
+// tab to return to are decided in exactly one place.
+function pushDetailStop(stop, fromView) {
+  const current = document.querySelector('section.view.active');
+  if (current && DETAIL_VIEW_IDS.includes(current.id)) {
+    if (currentDetailStop) detailTrail.push(currentDetailStop);
+  } else {
+    filmDetailReturnView = fromView || (current ? current.id.replace('view-', '') : 'films');
+    detailTrail = [];
+  }
+  currentDetailStop = stop;
+  renderDetailStop(stop);
+}
+
+function goBackFromDetail() {
+  if (detailTrail.length) {
+    currentDetailStop = detailTrail.pop();
+    renderDetailStop(currentDetailStop);
+    return;
+  }
+  currentDetailStop = null;
+  showView(filmDetailReturnView);
+}
 
 function filmDirectors(film) {
   return (film.director || '').split(', ').map(n => n.trim()).filter(Boolean);
@@ -3473,14 +3534,23 @@ function allKnownFilms() {
   return Object.entries(DATA.films_by_slug).map(([slug, film]) => ({ ...film, slug }));
 }
 
+// The name-only forms are what the person page needs, where there's no
+// source film to leave out; the film page's versions are the same thing
+// minus the film you're already looking at.
+function relatedByDirectorName(director) {
+  return allKnownFilms().filter(other => filmDirectors(other).includes(director));
+}
+
+function relatedByActorName(actor) {
+  return allKnownFilms().filter(other => (other.starring || []).includes(actor));
+}
+
 function relatedByDirector(film, director) {
-  return allKnownFilms().filter(other =>
-    other.slug !== film.slug && filmDirectors(other).includes(director));
+  return relatedByDirectorName(director).filter(other => other.slug !== film.slug);
 }
 
 function relatedByActor(film, actor) {
-  return allKnownFilms().filter(other =>
-    other.slug !== film.slug && (other.starring || []).includes(actor));
+  return relatedByActorName(actor).filter(other => other.slug !== film.slug);
 }
 
 // Local stand-in for "similar": films sharing most of this one's genres,
@@ -3578,7 +3648,7 @@ function relationEntryTile(entry) {
 // 'error' if it failed, and the section says which — a live layer that
 // quietly doesn't arrive would read as "there is nothing else", which is
 // the one thing it must not say.
-function filmRelationSection({ title, trackedFilms, liveRows, emptyNote, live }) {
+function filmRelationSection({ title, trackedFilms, liveRows, emptyNote, live, person }) {
   const section = document.createElement('div');
   section.className = 'film-section';
   const entries = mergedRelationEntries(trackedFilms, liveRows);
@@ -3593,7 +3663,15 @@ function filmRelationSection({ title, trackedFilms, liveRows, emptyNote, live })
   }
   if (live === null) counts.push('checking TMDB…');
   if (live === 'error') counts.push('TMDB unavailable');
-  head.innerHTML = '<h3>' + esc(title) + '</h3>' +
+  // A section about a person doubles as the way to that person's page —
+  // the heading is already their name, so it's the obvious thing to tap.
+  const heading = person
+    ? esc(title.slice(0, title.length - person.name.length)) +
+      '<button type="button" class="person-link" data-person="' + escAttr(person.name) + '"' +
+      (person.id ? ' data-person-id="' + escAttr(String(person.id)) + '"' : '') + '>' +
+      esc(person.name) + '</button>'
+    : esc(title);
+  head.innerHTML = '<h3>' + heading + '</h3>' +
     (counts.length ? '<span class="count">' + esc(counts.join(' · ')) + '</span>' : '');
   section.appendChild(head);
 
@@ -3689,9 +3767,10 @@ function filmHeroHtml(film) {
     '<div class="film-hero-body">' +
       '<h2>' + esc(film.title) + year + '</h2>' +
       '<p class="film-hero-facts">' + facts.join('') + '</p>' +
-      (film.director ? '<p class="film-hero-meta"><strong>Director:</strong> ' + esc(film.director) + '</p>' : '') +
+      (film.director
+        ? '<p class="film-hero-meta"><strong>Director:</strong> ' + personLinksHtml(filmDirectors(film)) + '</p>' : '') +
       ((film.starring && film.starring.length)
-        ? '<p class="film-hero-meta"><strong>Starring:</strong> ' + esc(film.starring.join(', ')) + '</p>' : '') +
+        ? '<p class="film-hero-meta"><strong>Starring:</strong> ' + personLinksHtml(film.starring) + '</p>' : '') +
       (film.synopsis ? '<p class="film-hero-synopsis">' + esc(film.synopsis) + '</p>' : '') +
       '<p class="film-hero-meta"><a class="film-link" target="_blank" href="' +
         escAttr(filmLetterboxdUrl(film)) + '">View on Letterboxd ↗</a></p>' +
@@ -3773,9 +3852,10 @@ function requestFilmRelations(film) {
     .then(() => {
       // Only redraw if this is still the film on screen — a fast chain of
       // taps would otherwise land one film's sections under another's hero.
-      if (currentFilmDetailSlug && DATA.films_by_slug[currentFilmDetailSlug] &&
-          DATA.films_by_slug[currentFilmDetailSlug].tmdb_id === tmdbId) {
-        renderRelationSections({ ...DATA.films_by_slug[currentFilmDetailSlug], slug: currentFilmDetailSlug },
+      const stop = currentDetailStop;
+      if (stop && stop.kind === 'film' && DATA.films_by_slug[stop.slug] &&
+          DATA.films_by_slug[stop.slug].tmdb_id === tmdbId) {
+        renderRelationSections({ ...DATA.films_by_slug[stop.slug], slug: stop.slug },
                                filmRelationsCache[tmdbId]);
       }
     });
@@ -3804,6 +3884,11 @@ function renderRelationSections(film, live) {
     ...filmDirectors(film),
     ...people.filter(p => p.role === 'director').map(p => p.name),
   ])];
+  const idOf = (role, name) => {
+    const found = people.find(p => p.role === role && p.name === name);
+    return found ? found.tmdb_id : null;
+  };
+
   directorNames.forEach(name => {
     container.appendChild(filmRelationSection({
       title: 'More by ' + name,
@@ -3811,6 +3896,7 @@ function renderRelationSections(film, live) {
       liveRows: liveOf('director', name),
       emptyNote: 'Nothing else by ' + name + ' on your watchlist or in your recommendations yet.',
       live: liveState,
+      person: { name, id: idOf('director', name) },
     }));
   });
 
@@ -3833,6 +3919,7 @@ function renderRelationSections(film, live) {
     container.appendChild(filmRelationSection({
       title: 'More with ' + name,
       trackedFilms, liveRows, emptyNote: '', live: liveState,
+      person: { name, id: idOf('cast', name) },
     }));
   });
 
@@ -3897,32 +3984,214 @@ function openLiveQuickLook(row) {
     });
 }
 
-function openFilmDetail(slug, fromView) {
-  if (!DATA.films_by_slug[slug]) return;
-  const current = document.querySelector('section.view.active');
-  if (current && current.id === 'view-film-detail') {
-    filmDetailTrail.push(currentFilmDetailSlug);
-  } else {
-    filmDetailReturnView = fromView || (current ? current.id.replace('view-', '') : 'films');
-    filmDetailTrail = [];
-  }
-  currentFilmDetailSlug = slug;
-  renderFilmDetail(slug);
-  showView('film-detail');
-  window.scrollTo(0, 0);
+// A name that leads to its own page. Rendered as HTML rather than wired up
+// element by element because these sit inside strings the hero already
+// builds; one delegated listener below turns any of them into a click.
+function personLinksHtml(names) {
+  return (names || [])
+    .map(name => '<button type="button" class="person-link" data-person="' + escAttr(name) + '">' +
+      esc(name) + '</button>')
+    .join(', ');
 }
 
-let currentFilmDetailSlug = null;
-
-document.getElementById('filmDetailBack').addEventListener('click', () => {
-  if (filmDetailTrail.length) {
-    currentFilmDetailSlug = filmDetailTrail.pop();
-    renderFilmDetail(currentFilmDetailSlug);
-    window.scrollTo(0, 0);
-    return;
-  }
-  showView(filmDetailReturnView);
+document.addEventListener('click', event => {
+  const link = event.target.closest('.person-link');
+  if (!link) return;
+  const id = link.dataset.personId ? Number(link.dataset.personId) : null;
+  openPersonDetail(link.dataset.person || null, id || null);
 });
+
+// ---------- Person detail page ----------
+//
+// One director or actor: who they are, and everything they made. The
+// filmography is TMDB's, merged against what the dashboard already tracks
+// exactly as the film page's sections are — so a film you have reads as a
+// film you have, wherever you meet it.
+//
+// Cached per person for the session, keyed by id where there is one and by
+// name where there isn't, so walking a chain of people doesn't re-ask.
+const personCache = {};
+
+function personCacheKey(stop) {
+  return stop.id ? 'id:' + stop.id : 'name:' + (stop.name || '').toLowerCase();
+}
+
+function personAgeParts(person) {
+  // Birth and death as TMDB has them, plus the age those two imply —
+  // the arithmetic is the only part TMDB doesn't hand over, and it's the
+  // part anyone reading a filmography actually wants.
+  if (!person.birthday) return null;
+  const born = new Date(person.birthday);
+  if (isNaN(born)) return null;
+  const end = person.deathday ? new Date(person.deathday) : new Date();
+  if (isNaN(end)) return null;
+  let age = end.getFullYear() - born.getFullYear();
+  const monthDelta = end.getMonth() - born.getMonth();
+  if (monthDelta < 0 || (monthDelta === 0 && end.getDate() < born.getDate())) age -= 1;
+  return age >= 0 && age < 130 ? age : null;
+}
+
+function formatPersonDate(iso) {
+  const date = new Date(iso);
+  if (isNaN(date)) return iso;
+  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function personHeroHtml(person, { name }) {
+  const facts = [];
+  if (person) {
+    if (person.known_for_department) facts.push('<span>' + esc(person.known_for_department) + '</span>');
+    if (person.birthday) {
+      const age = personAgeParts(person);
+      const born = 'Born ' + esc(formatPersonDate(person.birthday));
+      facts.push('<span>' + born + (age !== null && !person.deathday ? ' (' + age + ')' : '') + '</span>');
+    }
+    if (person.deathday) {
+      const age = personAgeParts(person);
+      facts.push('<span>Died ' + esc(formatPersonDate(person.deathday)) +
+        (age !== null ? ' (aged ' + age + ')' : '') + '</span>');
+    }
+    if (person.place_of_birth) facts.push('<span>' + esc(person.place_of_birth) + '</span>');
+  }
+
+  const photo = person && person.profile_url
+    ? '<img class="film-hero-poster" loading="lazy" src="' + escAttr(person.profile_url) + '">'
+    : '<div class="film-hero-poster" style="aspect-ratio:2/3;"></div>';
+
+  const tmdbLink = person
+    ? '<p class="film-hero-meta"><a class="film-link" target="_blank" rel="noopener" href="' +
+        escAttr('https://www.themoviedb.org/person/' + person.tmdb_id) + '">View on TMDB ↗</a></p>'
+    : '';
+
+  return '<div class="film-hero">' +
+    '<div>' + photo + '</div>' +
+    '<div class="film-hero-body">' +
+      '<h2>' + esc((person && person.name) || name || 'Unknown') + '</h2>' +
+      (facts.length ? '<p class="film-hero-facts">' + facts.join('') + '</p>' : '') +
+      (person && person.biography
+        ? '<p class="film-hero-synopsis person-bio">' + esc(person.biography) + '</p>' : '') +
+      tmdbLink +
+    '</div>' +
+  '</div>';
+}
+
+// A biography runs to several paragraphs and would push the filmography off
+// the screen, so it's clamped with a way to open it — the same bargain the
+// relation sections strike with "Show all".
+function attachBioToggle(container) {
+  const bio = container.querySelector('.person-bio');
+  if (!bio) return;
+  // Only worth a control if it's actually being cut off.
+  if (bio.scrollHeight <= bio.clientHeight + 4) { bio.classList.add('person-bio-open'); return; }
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'relation-more person-bio-toggle';
+  toggle.textContent = 'Read more ↓';
+  toggle.addEventListener('click', () => {
+    const open = bio.classList.toggle('person-bio-open');
+    toggle.textContent = open ? 'Read less ↑' : 'Read more ↓';
+  });
+  bio.insertAdjacentElement('afterend', toggle);
+}
+
+// The films this person made that the dashboard already tracks, found the
+// same two ways a relation row is: by TMDB id, else by title and year.
+function trackedFilmsForPerson(name, role) {
+  if (!name) return [];
+  const films = role === 'director' ? relatedByDirectorName(name) : relatedByActorName(name);
+  return sortRelated(films);
+}
+
+function renderPersonDetail(stop) {
+  const container = document.getElementById('personDetailContent');
+  const cached = personCache[personCacheKey(stop)];
+  const payload = (cached && cached !== 'pending' && cached !== 'error') ? cached : null;
+  const person = payload ? payload.person : null;
+  const name = (person && person.name) || stop.name;
+
+  container.innerHTML = personHeroHtml(person, { name: stop.name });
+  const heroImg = container.querySelector('img.film-hero-poster');
+  if (heroImg) {
+    heroImg.addEventListener('error', () => {
+      const blank = document.createElement('div');
+      blank.className = 'film-hero-poster';
+      blank.style.aspectRatio = '2/3';
+      heroImg.replaceWith(blank);
+    });
+  }
+  attachBioToggle(container);
+
+  if (cached === 'error') {
+    const note = document.createElement('p');
+    note.className = 'film-section-empty';
+    note.textContent = "TMDB couldn't be reached, so only what's already tracked is shown.";
+    container.appendChild(note);
+  }
+
+  const live = cached === 'error' ? 'error' : (payload || null);
+  // Directing first for a director, acting first for everyone else — the
+  // section someone came here for shouldn't be the one below the fold.
+  const directingFirst = !person || person.known_for_department === 'Directing';
+  const sections = [
+    { title: 'Directed', role: 'director', rows: payload ? payload.directed : null,
+      empty: 'Nothing directed that you track.' },
+    { title: 'Acted in', role: 'actor', rows: payload ? payload.acted : null,
+      empty: 'Nothing they appear in that you track.' },
+  ];
+  if (!directingFirst) sections.reverse();
+
+  sections.forEach(section => {
+    const trackedFilms = trackedFilmsForPerson(name, section.role);
+    // A director with no acting credits shouldn't get an empty "Acted in".
+    if (!trackedFilms.length && !(section.rows && section.rows.length) && live !== null) return;
+    container.appendChild(filmRelationSection({
+      title: section.title,
+      trackedFilms,
+      liveRows: section.rows,
+      emptyNote: section.empty,
+      live,
+    }));
+  });
+}
+
+function requestPerson(stop) {
+  const key = personCacheKey(stop);
+  if (personCache[key] !== undefined) return;
+  personCache[key] = 'pending';
+  const body = stop.id ? { person_id: stop.id } : { name: stop.name };
+  searchWorker('/person', body)
+    .then(response => {
+      if (!response || !response.ok) throw new Error((response && response.error) || 'person lookup failed');
+      personCache[key] = response;
+      // A person first opened by name now has an id, so opening them again
+      // from a film that does know it hits the same cache entry.
+      if (response.person && response.person.tmdb_id) {
+        personCache['id:' + response.person.tmdb_id] = response;
+      }
+    })
+    .catch(() => { personCache[key] = 'error'; })
+    .then(() => {
+      const current = currentDetailStop;
+      if (current && current.kind === 'person' && personCacheKey(current) === key) {
+        renderPersonDetail(current);
+      }
+    });
+}
+
+function openFilmDetail(slug, fromView) {
+  if (!DATA.films_by_slug[slug]) return;
+  pushDetailStop({ kind: 'film', slug }, fromView);
+}
+
+// `id` is TMDB's, when the page has it; without one the Worker finds the
+// person by name. Either way the name is what's shown while it loads.
+function openPersonDetail(name, id, fromView) {
+  if (!name && !id) return;
+  pushDetailStop({ kind: 'person', id: id || null, name: name || null }, fromView);
+}
+
+document.getElementById('filmDetailBack').addEventListener('click', goBackFromDetail);
+document.getElementById('personDetailBack').addEventListener('click', goBackFromDetail);
 
 // ---------- Films cards ----------
 

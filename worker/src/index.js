@@ -123,6 +123,19 @@ const RELATIONS_MAX_BILLING_ORDER = 10;
 // low enough to keep genuinely obscure films.
 const RELATIONS_MIN_VOTES = 20;
 
+// ---------- Person profile ----------
+//
+// Everything about one person in a single TMDB call: append_to_response
+// folds movie_credits into the details response, so the whole page is one
+// subrequest when the id is already known and two when it has to be found
+// by name (a director credited on a Letterboxd page the relations call
+// hasn't covered).
+const PERSON_PROFILE_IMAGE_BASE = "https://image.tmdb.org/t/p/w300";
+// A full filmography, not the per-section cut a film page shows — this
+// page is the place to see all of it. Still bounded: a prolific character
+// actor runs to several hundred credits, most of them uncredited walk-ons.
+const PERSON_FILMS_CAP = 150;
+
 const JSON_LD_OPEN_TAG = '<script type="application/ld+json">';
 const ISO_DURATION_RE = /^PT(?:(\d+)H)?(?:(\d+)M)?$/;
 
@@ -414,6 +427,16 @@ function relationRow(movie) {
   };
 }
 
+// A filmography reads as a career, so it's ordered by date; undated entries
+// are already filtered out by usableRelation before this sees them.
+function byNewestFirst(movies, cap) {
+  return movies
+    .slice()
+    .sort((a, b) => String(b.release_date).localeCompare(String(a.release_date)))
+    .slice(0, cap)
+    .map(relationRow);
+}
+
 // Most popular first, so the per-person cap keeps the films worth showing
 // rather than an arbitrary forty. The page re-sorts for display; this only
 // decides what survives the cut.
@@ -464,6 +487,19 @@ async function personFilms(env, personId, role, sourceTmdbId) {
     unique.push(movie);
   });
   return sortedRelationRows(unique, RELATIONS_FILMS_PER_PERSON);
+}
+
+// TMDB's own id for a name, when the caller only has the name — the
+// relations payload carries ids, but a director read off a Letterboxd page
+// before (or without) that call has only what Letterboxd printed.
+async function findPersonId(env, name) {
+  const search = await tmdbGet(env, "/search/person", { query: name, include_adult: "false" });
+  const results = search.results || [];
+  if (!results.length) return null;
+  // TMDB orders by its own popularity, which is the right tie-break for two
+  // people sharing a name: the one a film page means is almost always the
+  // one with the credits.
+  return results[0].id;
 }
 
 export default {
@@ -733,6 +769,96 @@ export default {
         // failed", which the page has to be able to say differently.
         similar_unavailable: similarResult === null && recommendedResult === null,
       }, 200, cors);
+    }
+
+    // ---------- /person (the director/actor profile page) ----------
+    //
+    // Takes an id when the page has one (the relations payload carries
+    // them) and a name when it doesn't. Returns the person plus their whole
+    // filmography, split by what they did on each film — the page renders
+    // directing and acting as separate sections, and merges each against
+    // what it already tracks the same way the film page does.
+    if (url.pathname === "/person") {
+      if (!env.TMDB_API_KEY) {
+        return jsonResponse(
+          { ok: false, error: "TMDB_API_KEY is not configured on this Worker" }, 503, cors);
+      }
+
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return jsonResponse({ ok: false, error: "invalid JSON body" }, 400, cors);
+      }
+
+      const name = typeof payload.name === "string" ? payload.name.trim() : "";
+      let personId = payload.person_id === undefined || payload.person_id === null
+        ? null : Number(payload.person_id);
+      if (personId !== null && (!Number.isInteger(personId) || personId <= 0)) {
+        return jsonResponse({ ok: false, error: 'invalid "person_id"' }, 400, cors);
+      }
+      if (personId === null && !name) {
+        return jsonResponse({ ok: false, error: 'missing "person_id" or "name"' }, 400, cors);
+      }
+      if (name.length > MAX_QUERY_LENGTH) {
+        return jsonResponse(
+          { ok: false, error: `name too long (max ${MAX_QUERY_LENGTH} characters)` }, 400, cors);
+      }
+
+      try {
+        if (personId === null) {
+          personId = await findPersonId(env, name);
+          if (personId === null) {
+            return jsonResponse(
+              { ok: false, error: `TMDB has nobody called ${JSON.stringify(name)}` }, 404, cors);
+          }
+        }
+
+        const details = await tmdbGet(env, `/person/${personId}`, {
+          language: "en-US", append_to_response: "movie_credits",
+        });
+        const credits = details.movie_credits || {};
+
+        const seenDirected = new Set();
+        const directed = [];
+        (credits.crew || []).forEach((movie) => {
+          // A person credited twice on one film (TMDB does this) would
+          // otherwise appear twice in their own filmography.
+          if (movie.job !== "Director" || !usableRelation(movie, null) || seenDirected.has(movie.id)) return;
+          seenDirected.add(movie.id);
+          directed.push(movie);
+        });
+
+        const seenActed = new Set();
+        const acted = [];
+        (credits.cast || []).forEach((movie) => {
+          if (!usableRelation(movie, null) || seenActed.has(movie.id)) return;
+          if ((movie.vote_count || 0) < RELATIONS_MIN_VOTES) return;
+          seenActed.add(movie.id);
+          acted.push(movie);
+        });
+
+        return jsonResponse({
+          ok: true,
+          person: {
+            tmdb_id: personId,
+            name: details.name || name,
+            biography: details.biography || null,
+            birthday: details.birthday || null,
+            deathday: details.deathday || null,
+            place_of_birth: details.place_of_birth || null,
+            known_for_department: details.known_for_department || null,
+            profile_url: details.profile_path ? PERSON_PROFILE_IMAGE_BASE + details.profile_path : null,
+          },
+          // Newest first here rather than most popular: a filmography reads
+          // as a career, and the cap is high enough that nothing worth
+          // seeing falls off the end of it.
+          directed: byNewestFirst(directed, PERSON_FILMS_CAP),
+          acted: byNewestFirst(acted, PERSON_FILMS_CAP),
+        }, 200, cors);
+      } catch (err) {
+        return jsonResponse({ ok: false, error: String(err).slice(0, 300) }, 502, cors);
+      }
     }
 
     if (url.pathname === "/update-services") {

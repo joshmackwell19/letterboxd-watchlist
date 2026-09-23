@@ -352,3 +352,107 @@ def test_build_home_sections_omits_empty_sections_entirely():
     sections = _build_home_sections(state, films_all_offers={}, films_by_slug={}, discovery_films={},
                                      dismissed_recommendations=set(), watch_together={})
     assert sections == []
+
+
+# --- Services tab: one card per service, and what it's uniquely worth -----
+
+def _svc_offer(country, brand, classification="subscription"):
+    return {"brand": brand, "country": country, "classification": classification,
+            "available_to": None, "url": None}
+
+
+def _service_state(films: dict[str, list[dict]]):
+    from watchlist_justwatch.models import FilmState
+    from watchlist_justwatch.state import StateDoc
+    state = StateDoc(films={
+        slug: FilmState(slug=slug, title=slug.replace("-", " ").title(), year=2000, entry_id=None,
+                        confidence="exact", last_checked="2026-09-23T00:00:00Z")
+        for slug in films
+    })
+    return state, films
+
+
+def test_a_service_is_one_row_however_many_countries_it_is_in():
+    from watchlist_justwatch.dashboard import _service_rows
+
+    state, offers = _service_state({
+        "a-film": [_svc_offer("GB", "Netflix", "have"), _svc_offer("US", "Netflix", "have"),
+                   _svc_offer("DE", "Netflix", "have")],
+    })
+    rows = _service_rows(state, offers)
+
+    assert [r["brand"] for r in rows] == ["Netflix"]
+    # The film is counted once, not once per country.
+    assert rows[0]["film_count"] == 1
+    assert rows[0]["country_count"] == 3
+    assert [c["code"] for c in rows[0]["countries"]] == ["DE", "GB", "US"]
+
+
+def test_countries_carry_their_own_film_lists_for_the_pills():
+    from watchlist_justwatch.dashboard import _service_rows
+
+    state, offers = _service_state({
+        "one": [_svc_offer("GB", "Netflix", "have")],
+        "two": [_svc_offer("GB", "Netflix", "have"), _svc_offer("US", "Netflix", "have")],
+    })
+    rows = _service_rows(state, offers)
+
+    assert rows[0]["slugs_by_country"] == {"GB": ["one", "two"], "US": ["two"]}
+    # Busiest country first, so the pills lead with the useful ones.
+    assert [(c["code"], c["film_count"]) for c in rows[0]["countries"]] == [("GB", 2), ("US", 1)]
+
+
+def test_unique_means_on_no_other_service_you_have():
+    from watchlist_justwatch.dashboard import _service_rows
+
+    state, offers = _service_state({
+        # Only on Netflix, of the things you have — cancelling Netflix loses it.
+        "netflix-only": [_svc_offer("GB", "Netflix", "have")],
+        # On both, so neither service is the reason you can watch it.
+        "on-both": [_svc_offer("GB", "Netflix", "have"), _svc_offer("GB", "Disney Plus", "have")],
+        # On Netflix and on a service you don't have: still unique to Netflix,
+        # because the other one isn't something you could watch it on today.
+        "netflix-and-a-paid-one": [_svc_offer("GB", "Netflix", "have"), _svc_offer("GB", "Hayu", "subscription")],
+    })
+    rows = {r["brand"]: r for r in _service_rows(state, offers)}
+
+    assert rows["Netflix"]["unique_slugs"] == ["netflix-and-a-paid-one", "netflix-only"]
+    assert rows["Disney Plus"]["unique_slugs"] == []
+
+
+def test_uniqueness_is_judged_across_countries_not_within_one():
+    from watchlist_justwatch.dashboard import _service_rows
+
+    state, offers = _service_state({
+        "here-and-there": [_svc_offer("GB", "Netflix", "have"), _svc_offer("US", "Disney Plus", "have")],
+    })
+    rows = {r["brand"]: r for r in _service_rows(state, offers)}
+
+    # Reachable on Disney Plus in another market, so Netflix is not the only
+    # way to see it — even though it is the only way to see it in GB.
+    assert rows["Netflix"]["unique_slugs"] == []
+    assert rows["Disney Plus"]["unique_slugs"] == []
+
+
+def test_for_a_service_you_do_not_have_unique_reads_as_what_it_would_add():
+    from watchlist_justwatch.dashboard import _service_rows
+
+    state, offers = _service_state({
+        "nowhere-else": [_svc_offer("GB", "Hayu", "subscription")],
+        "already-covered": [_svc_offer("GB", "Hayu", "subscription"), _svc_offer("GB", "Netflix", "have")],
+    })
+    rows = {r["brand"]: r for r in _service_rows(state, offers)}
+
+    assert rows["Hayu"]["unique_slugs"] == ["nowhere-else"]
+
+
+def test_a_free_broadcaster_counts_as_a_service_you_have():
+    from watchlist_justwatch.dashboard import _service_rows
+
+    state, offers = _service_state({
+        # On iPlayer as well, so it isn't a reason to keep paying for Netflix.
+        "on-iplayer-too": [_svc_offer("GB", "Netflix", "have"), _svc_offer("GB", "BBC iPlayer", "have")],
+    })
+    rows = {r["brand"]: r for r in _service_rows(state, offers)}
+
+    assert rows["Netflix"]["unique_slugs"] == []

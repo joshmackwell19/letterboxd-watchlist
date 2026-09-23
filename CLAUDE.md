@@ -125,6 +125,16 @@ at all: the page already knows it for every film it tracks, and a film it
 doesn't track goes through `/film-lookup` when it's actually tapped, rather
 than a hundred JustWatch lookups for posters nobody opens.
 
+The Services tab is one card per service, aggregated across every country
+it's in — `_service_rows` emits `slugs_by_country` for the country pills on
+the detail page, and `unique_slugs`: the films on that service that are on
+**no other service you have**. For a service you have that's what you'd
+lose by cancelling it; for one you don't, the same test reads as what it
+would add. Judged across all countries (a film on Netflix here and Prime
+elsewhere is unique to neither) and counting the free broadcasters among
+"services you have", since a film on iPlayer isn't a reason to keep paying
+for Netflix.
+
 ## `main.py` CLI flags
 
 **The daily run**: plain `python -m watchlist_justwatch.main` (needs

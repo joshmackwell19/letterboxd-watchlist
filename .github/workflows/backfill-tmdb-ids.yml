@@ -1,0 +1,81 @@
+name: Backfill TMDB ids
+
+# --backfill-language fills original_language and tmdb_id for every film
+# missing either, from one TMDB search each. It's grouped with the local-only
+# backfills in CLAUDE.md, but only because it was written alongside them —
+# the reason those must run on a Mac is Letterboxd blocking GitHub Actions'
+# IP range from /username/films/, and this flag never touches Letterboxd (or
+# JustWatch, or the network at all beyond TMDB). So it runs fine from here.
+#
+# Dispatch-only. The daily run fills these in gradually anyway, ~20% of the
+# watchlist a day via the stale rotation, so this exists for the case where
+# waiting a week isn't the point — after adding a field, most obviously, when
+# every film needs it at once and nothing on the dashboard works until they
+# have it.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  # Writes the whole films table back (save_state replaces it wholesale), so
+  # this must not interleave with the daily pipeline's own write.
+  group: daily-pipeline
+  # Queue behind a daily run rather than cancelling it — same as daily.yml's
+  # own setting. Either one losing its write would leave the table half-built.
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Backfill original_language and tmdb_id
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: python -m watchlist_justwatch.main --backfill-language
+
+      # The ids are only useful once the page carries them, and a backfill
+      # that left the live dashboard a day behind would look like it hadn't
+      # worked.
+      - name: Regenerate dashboard.html (no network calls)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m watchlist_justwatch.main --dashboard
+
+      # Same as daily.yml/regenerate-dashboard.yml: the database write has
+      # already succeeded by here, so a transient Pages hiccup shouldn't mark
+      # the run failed.
+      - name: Prepare Pages site
+        continue-on-error: true
+        run: |
+          mkdir -p _site
+          cp dashboard.html _site/index.html
+          cp manifest.json _site/manifest.json
+          cp -r icons _site/icons
+
+      - name: Upload Pages artifact
+        continue-on-error: true
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v4

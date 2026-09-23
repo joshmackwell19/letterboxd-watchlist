@@ -81,6 +81,7 @@ stores none of it.
 | `regenerate-dashboard.yml` | Dispatched by the Worker | Network-free `--dashboard` regen + deploy, optionally preceded by `--set-watch-together-statuses-batch` |
 | `deploy-worker.yml` | Push to `worker/**` | Deploys `worker/` via Wrangler |
 | `weekly-digest.yml` | Cron Friday ~17:00 UK | Read-only — sends the weekly roundup email from already-stored state |
+| `backfill-tmdb-ids.yml` | Manual only | `--backfill-language` (fills `original_language`/`tmdb_id` for every film missing either) + dashboard regen. Shares `daily.yml`'s concurrency group, since both replace the `films` table wholesale. Exists because the stale rotation takes ~5 days to fill a newly-added field across the whole watchlist |
 
 `daily.yml` and `regenerate-dashboard.yml` don't commit `dashboard.html` to
 git — Pages deploys straight from each run's own build artifact. No
@@ -134,9 +135,12 @@ than a hundred JustWatch lookups for posters nobody opens.
 
 **One-off local backfills** (Letterboxd blocks GH Actions' IPs from
 `/username/films/`, so these run on a Mac): `--backfill-diary`,
-`--backfill-diary-ratings`, `--backfill-language` (TMDB-only, no
-JustWatch/Letterboxd calls — fills `original_language` *and* `tmdb_id`,
-which come from the same search).
+`--backfill-diary-ratings`.
+
+`--backfill-language` fills `original_language` *and* `tmdb_id` (both come
+from the same TMDB search) and is grouped with those historically, but it
+never touches Letterboxd — so it also runs from Actions via
+`backfill-tmdb-ids.yml`.
 
 **Standalone analyses** (network-free, read already-stored state):
 `--rank-services`, `--recommend-favorites`, `--similar-to TITLE`,

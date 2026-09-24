@@ -71,7 +71,7 @@ stores none of it.
 | `josh_watchlist` / `sarah_watchlist` | `run()`, full replace | Membership only (slugs) — offer data lives in `films` regardless of which list |
 | `meta` | `run()`, full replace | `last_run_at`, `last_justwatch_check_date`, `last_seen_diary_guid`, `recent_watches`, `recent_additions` |
 | `watch_together` | **Incrementally** — `seed_pending_watch_together` (new pending rows) / `set_watch_together_statuses_batch` (Review tab decisions) | Deliberately *not* part of the full-replace — see `db.py`'s own comment on `save_state` |
-| `custom_list_sources` | **Incrementally** — `_refresh_custom_list_sources` (in `run()`, weekly per source, or forced via `--refresh-custom-lists`) | Cached slugs of each Letterboxd list a custom list sources from; a failed/empty fetch keeps the previous copy. Not part of `save_state`'s full replace |
+| `custom_list_sources` | **Incrementally** — `_refresh_custom_list_sources` (in `run()`: sources over a week old, stalest first, capped at `CUSTOM_LIST_SOURCES_PER_RUN`; or uncapped via `--refresh-custom-lists`) | Cached slugs of each Letterboxd list a custom list sources from — festival sources run to thousands of films each, so the dashboard never reads them whole: `load_custom_list_memberships`/`custom_list_source_totals` intersect and count server-side. A failed/empty fetch keeps the previous copy. Not part of `save_state`'s full replace |
 | `cinema_showtimes` | `run()`, full replace | Raw scraped rows from `cinemas.py` only — matching against the watchlist happens fresh in `dashboard.py` at build time, not stored |
 | `cinema_film_matches` | `run()`, full replace | The Letterboxd film each listing is showing, for the ~90% of the programme the watchlist can't name. Keyed by `cinemas.listing_match_key` (cleaned title + year), so the same film at three venues resolves once. Unlike the watchlist match this costs a TMDB search plus a Letterboxd page, so it's cached rather than recomputed at build time; a NULL slug is a listing with no Letterboxd film, remembered so it isn't retried daily |
 
@@ -171,9 +171,10 @@ from the same TMDB search) and is grouped with those historically, but it
 never touches Letterboxd — so it also runs from Actions via
 `backfill-tmdb-ids.yml`.
 
-`--refresh-custom-lists` re-fetches every Letterboxd list
-`config/custom_lists.yaml` sources from, so a newly added one shows up
-before the next daily run.
+`--refresh-custom-lists` fetches every Letterboxd list
+`config/custom_lists.yaml` sources from that's missing or over a week old,
+with no per-run cap — so a newly added one (or a batch of them) shows up
+before the daily run's rotation gets to it.
 
 **Standalone analyses** (network-free, read already-stored state):
 `--rank-services`, `--recommend-favorites`, `--similar-to TITLE`,

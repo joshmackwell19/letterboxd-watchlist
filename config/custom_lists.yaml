@@ -16,12 +16,23 @@
 #                     nominations, festival lineups (Cannes/Venice/TIFF/
 #                     San Sebastián etc. — one list per edition works too).
 #   include/exclude:  manual per-film overrides, by Letterboxd slug.
+#   home:             false to keep a list off Home (Films-tab dropdown only).
+#   group:            heading it sits under in the Films-tab dropdown.
 #
-# Order here is the order sections appear on Home.
+# Festival sources are mostly mundof's (full competition histories,
+# 1930s/40s–2026) and neperfectionist's (winners and competitions for the
+# rest), plus the festivals' own accounts where they publish one list per
+# edition (TIFF, NYFF) — all checked for completeness and currency when
+# added.
+#
+# Order here is the order sections appear on Home and in the dropdown.
 
 lists:
+  # ---------- On Home ----------
+
   - key: oscar-best-picture
     name: Oscar Best Picture nominees
+    group: Awards
     # SJHoneywell's list: all 622 nominees 1927/28–2025 (98th ceremony),
     # including Sunrise (the one-off "Unique and Artistic Production"
     # award). The most complete of the full-history lists checked.
@@ -30,16 +41,19 @@ lists:
 
   - key: brian-de-palma
     name: Brian De Palma
+    group: People
     rules:
       - director: Brian De Palma
 
   - key: al-pacino
     name: Al Pacino
+    group: People
     rules:
       - starring: Al Pacino
 
   - key: french-new-wave
     name: French New Wave
+    group: Movements
     # The core Nouvelle Vague / Left Bank directors, limited to the
     # movement's era — a director-only rule would also pull in e.g.
     # Godard's 2010s essay films. Hand-tune edge cases with include/exclude.
@@ -59,3 +73,282 @@ lists:
           - Jean Eustache
         year_from: 1958
         year_to: 1973
+
+  - key: cannes-competition
+    name: Cannes — In Competition
+    group: Cannes
+    letterboxd_lists:
+      - mundof/list/competition-officielle-festival-de-cannes   # 1946–2026
+
+  - key: venice-competition
+    name: Venice — In Competition
+    group: Venice
+    letterboxd_lists:
+      - mundof/list/venice-film-festival-competition-mostra-internazionale   # 1932–2026
+
+  - key: berlinale-competition
+    name: Berlinale — In Competition
+    group: Berlin
+    letterboxd_lists:
+      - mundof/list/berlin-international-film-festival-berlinale   # 1951–2026
+
+  - key: tiff
+    name: TIFF — Official Selection
+    group: Toronto (TIFF)
+    # TIFF's own account, one list per edition.
+    letterboxd_lists:
+      - tiff_net/list/1976-toronto-international-film-festival
+      - tiff_net/list/1977-toronto-international-film-festival
+      - tiff_net/list/1978-toronto-international-film-festival
+      - tiff_net/list/1979-toronto-international-film-festival
+      - tiff_net/list/1980-toronto-international-film-festival
+      - tiff_net/list/1981-toronto-international-film-festival
+      - tiff_net/list/1982-toronto-international-film-festival
+      - tiff_net/list/1983-toronto-international-film-festival
+      - tiff_net/list/1984-toronto-international-film-festival
+      - tiff_net/list/1985-toronto-international-film-festival
+      - tiff_net/list/1986-toronto-international-film-festival
+      - tiff_net/list/1987-toronto-international-film-festival
+      - tiff_net/list/1988-toronto-international-film-festival
+      - tiff_net/list/1989-toronto-international-film-festival
+      - tiff_net/list/1990-toronto-international-film-festival
+      - tiff_net/list/1991-toronto-international-film-festival
+      - tiff_net/list/1992-toronto-international-film-festival
+      - tiff_net/list/1993-toronto-international-film-festival
+      - tiff_net/list/1994-toronto-international-film-festival
+      - tiff_net/list/1995-toronto-international-film-festival
+      - tiff_net/list/1996-toronto-international-film-festival
+      - tiff_net/list/1997-toronto-international-film-festival
+      - tiff_net/list/1998-toronto-international-film-festival
+      - tiff_net/list/1999-toronto-international-film-festival
+      - tiff_net/list/2000-toronto-international-film-festival
+      - tiff_net/list/2001-toronto-international-film-festival
+      - tiff_net/list/2002-toronto-international-film-festival
+      - tiff_net/list/2003-toronto-international-film-festival
+      - tiff_net/list/2004-toronto-international-film-festival
+      - tiff_net/list/2005-toronto-international-film-festival
+      - tiff_net/list/2006-toronto-international-film-festival
+      - tiff_net/list/2007-toronto-international-film-festival
+      - tiff_net/list/2008-toronto-international-film-festival
+      - tiff_net/list/2009-toronto-international-film-festival
+      - tiff_net/list/2010-toronto-international-film-festival
+      - tiff_net/list/2011-toronto-international-film-festival
+      - tiff_net/list/2012-toronto-international-film-festival
+      - tiff_net/list/2013-toronto-international-film-festival
+      - tiff_net/list/2014-toronto-international-film-festival
+      - tiff_net/list/2015-toronto-international-film-festival
+      - tiff_net/list/2016-toronto-international-film-festival
+      - tiff_net/list/2017-toronto-international-film-festival
+      - tiff_net/list/2018-toronto-international-film-festival
+      - tiff_net/list/2019-toronto-international-film-festival
+      - tiff_net/list/2020-toronto-international-film-festival
+      - tiff_net/list/2021-toronto-international-film-festival
+      - tiff_net/list/2022-toronto-international-film-festival
+      - tiff_net/list/2023-toronto-international-film-festival
+      - tiff_net/list/2024-toronto-international-film-festival
+      - tiff_net/list/2025-toronto-international-film-festival
+      - tiff_net/list/2026-toronto-international-film-festival
+
+  - key: san-sebastian-competition
+    name: San Sebastián — Official Competition
+    group: San Sebastián
+    letterboxd_lists:
+      - neperfectionist/list/san-sebastian-san-sebastian-international
+
+  - key: nyff-main-slate
+    name: New York Film Festival — Main Slate
+    group: More festivals
+    # Film at Lincoln Center's own account, one list per edition (the 60th
+    # has no separate "main slate" list, so its full-lineup one stands in).
+    letterboxd_lists:
+      - filmlinc/list/1st-new-york-film-festival-main-slate-selections
+      - filmlinc/list/2nd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/3rd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/4th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/5th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/6th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/7th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/8th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/9th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/10th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/11th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/12th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/13th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/14th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/15th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/16th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/17th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/18th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/19th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/20th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/21st-new-york-film-festival-main-slate-selections
+      - filmlinc/list/22nd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/23rd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/24th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/25th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/26th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/27th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/28th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/29th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/30th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/31st-new-york-film-festival-main-slate-selections
+      - filmlinc/list/32nd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/33rd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/34th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/35th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/36th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/37th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/38th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/39th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/40th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/41st-new-york-film-festival-main-slate-selections
+      - filmlinc/list/42nd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/43rd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/44th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/45th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/46th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/47th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/48th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/49th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/50th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/51st-new-york-film-festival-main-slate-selections
+      - filmlinc/list/52nd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/53rd-new-york-film-festival-main-slate-selections
+      - filmlinc/list/54th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/55th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/56th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/57th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/58th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/59th-new-york-film-festival-main-slate-selections
+      - filmlinc/list/61st-new-york-film-festival-main-slate-selections
+      - filmlinc/list/60th-new-york-film-festival
+      - filmlinc/list/nyff62-main-slate
+      - filmlinc/list/nyff63-main-slate
+      - filmlinc/list/nyff64-main-slate
+
+  # ---------- Films-tab dropdown only ----------
+
+  - key: cannes-palme-dor
+    name: Palme d'Or winners
+    group: Cannes
+    home: false
+    letterboxd_lists: [mundof/list/palme-dor-festival-de-cannes-golden-palm]
+
+  - key: cannes-grand-prix
+    name: Cannes Grand Prix winners
+    group: Cannes
+    home: false
+    letterboxd_lists: [cannestracker/list/grand-prix-winners]
+
+  - key: cannes-un-certain-regard
+    name: Cannes — Un Certain Regard
+    group: Cannes
+    home: false
+    letterboxd_lists: [mundof/list/un-certain-regard-festival-de-cannes-1978]
+
+  - key: cannes-directors-fortnight
+    name: Cannes — Directors' Fortnight
+    group: Cannes
+    home: false
+    letterboxd_lists: [mundof/list/quinzaine-des-realisateurs-quinzaine-des]
+
+  - key: cannes-critics-week
+    name: Cannes — Critics' Week
+    group: Cannes
+    home: false
+    letterboxd_lists: [mundof/list/semaine-de-la-critique-festival-de-cannes]
+
+  - key: cannes-out-of-competition
+    name: Cannes — Out of Competition
+    group: Cannes
+    home: false
+    letterboxd_lists: [mundof/list/hors-competition-festival-de-cannes-out-of]
+
+  - key: cannes-camera-dor
+    name: Caméra d'Or winners
+    group: Cannes
+    home: false
+    letterboxd_lists: [mundof/list/camera-dor-festival-de-cannes-golden-camera]
+
+  - key: cannes-any
+    name: Cannes — Any selection
+    group: Cannes
+    home: false
+    # Every film screened in any Cannes section (~5,900 films).
+    letterboxd_lists: [mundof/list/cannes-you-feel-it-the-ultimate-most-exhaustive]
+
+  - key: venice-golden-lion
+    name: Golden Lion winners
+    group: Venice
+    home: false
+    letterboxd_lists: [mundof/list/leone-doro-mostra-internazionale-darte-cinematografica]
+
+  - key: berlinale-golden-bear
+    name: Golden Bear winners
+    group: Berlin
+    home: false
+    letterboxd_lists: [neperfectionist/list/golden-bear-goldener-bar-winners-of-berlin]
+
+  - key: tiff-peoples-choice
+    name: TIFF People's Choice winners
+    group: Toronto (TIFF)
+    home: false
+    letterboxd_lists: [neperfectionist/list/tiff-toronto-international-film-festival]
+
+  - key: san-sebastian-golden-shell
+    name: Golden Shell winners
+    group: San Sebastián
+    home: false
+    letterboxd_lists: [neperfectionist/list/golden-shell-winners-of-san-sebastian-film]
+
+  - key: locarno-competition
+    name: Locarno — Official Competition
+    group: More festivals
+    home: false
+    letterboxd_lists: [neperfectionist/list/locarno-locarno-international-film-festival]
+
+  - key: locarno-golden-leopard
+    name: Golden Leopard winners
+    group: More festivals
+    home: false
+    letterboxd_lists: [neperfectionist/list/golden-leopard-winners-of-locarno-film-festival]
+
+  - key: sundance-winners
+    name: Sundance Grand Jury Prize winners
+    group: More festivals
+    home: false
+    # U.S./World Dramatic and Documentary juries.
+    letterboxd_lists: [neperfectionist/list/sundance-film-festival-winners-us-dramatic]
+
+  - key: sxsw-winners
+    name: SXSW winners
+    group: More festivals
+    home: false
+    letterboxd_lists: [neperfectionist/list/sxsw-south-by-southwest-film-festival-winners]
+
+  - key: karlovy-vary-crystal-globe
+    name: Karlovy Vary Crystal Globe winners
+    group: More festivals
+    home: false
+    letterboxd_lists: [neperfectionist/list/crystal-globe-kristalovy-globus-winners-of]
+
+  - key: rotterdam-tiger
+    name: Rotterdam Tiger Award winners
+    group: More festivals
+    home: false
+    letterboxd_lists: [neperfectionist/list/tiger-award-winners-of-international-film]
+
+  - key: sitges-winners
+    name: Sitges winners
+    group: More festivals
+    home: false
+    letterboxd_lists: [neperfectionist/list/sitges-winners-of-sitges-international-film]
+
+  - key: bfi-london-winners
+    name: BFI London Film Festival winners
+    group: More festivals
+    home: false
+    # Best Film and Audience Award, from the BFI's own account.
+    letterboxd_lists:
+      - bfi/list/every-best-film-winner-at-the-bfi-london
+      - bfi/list/every-bfi-london-film-festival-audience-award

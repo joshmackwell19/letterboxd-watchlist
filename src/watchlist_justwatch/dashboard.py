@@ -13,7 +13,7 @@ from .brands import (
 from .cinemas import listing_match_key, match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
-from .custom_lists import CustomList, matches as custom_list_matches, source_total
+from .custom_lists import CustomList, matches as custom_list_matches
 from .languages import LANGUAGE_NAMES, is_subtitled, language_name
 from .state import StateDoc
 
@@ -631,7 +631,8 @@ def _leaving_soon_section(state: StateDoc, films_all_offers: dict[str, list[dict
 
 
 def _custom_list_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
-                          custom_lists: list[CustomList], list_sources: dict[str, set[str]]) -> list[dict]:
+                          custom_lists: list[CustomList], list_sources: dict[str, set[str]],
+                          list_totals: dict[str, int] | None = None) -> list[dict]:
     """One section per config/custom_lists.yaml entry, in config order.
     Unlike every other Home section these carry the *whole* matching set
     (the page collapses it to a preview client-side) and ignore/don't feed
@@ -643,6 +644,8 @@ def _custom_list_sections(state: StateDoc, films_all_offers: dict[str, list[dict
 
     sections = []
     for cl in custom_lists:
+        if not cl.home:
+            continue
         members = [
             slug for slug, film in state.films.items()
             if custom_list_matches(cl, slug, film.director, film.starring, film.year, list_sources)
@@ -657,7 +660,7 @@ def _custom_list_sections(state: StateDoc, films_all_offers: dict[str, list[dict
             and custom_list_matches(cl, slug, entry.get("director"), entry.get("starring"), entry.get("year"),
                                     list_sources)
         )
-        total = source_total(cl, list_sources)
+        total = (list_totals or {}).get(cl.key)
         parts = [f"{len(members)} on your watchlist"]
         if total is not None:
             parts.append(f"{seen} of {total} seen")
@@ -678,7 +681,8 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
                           films_by_slug: dict[str, dict], discovery_films: dict[str, dict],
                           dismissed_recommendations: set[str],
                           watch_together: dict[str, dict], custom_lists: list[CustomList] = (),
-                          list_sources: dict[str, set[str]] | None = None) -> list[dict]:
+                          list_sources: dict[str, set[str]] | None = None,
+                          list_totals: dict[str, int] | None = None) -> list[dict]:
     # Same merge order and the same already-reclassified discovery films as
     # the payload's own films_by_slug, so a card here and the quick-look it
     # opens can't disagree about what a film costs.
@@ -709,7 +713,7 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     # Your own curated lists next — deliberate interests outrank
     # algorithmic discovery. Appended directly rather than via add(): see
     # _custom_list_sections for why they sit outside the dedupe.
-    sections.extend(_custom_list_sections(state, films_all_offers, custom_lists, list_sources or {}))
+    sections.extend(_custom_list_sections(state, films_all_offers, custom_lists, list_sources or {}, list_totals))
 
     # Recommended-from-recent-watches and top-rated next — general
     # discovery, not tied to a specific person — so they're not buried
@@ -969,10 +973,13 @@ def build_dashboard_data(
     dismissed_recommendations: set[str] = frozenset(),
     watch_together: dict[str, dict] | None = None,
     custom_lists: list[CustomList] = (),
-    list_sources: dict[str, dict] | None = None,
+    list_sources: dict[str, set[str]] | None = None,
+    list_totals: dict[str, int] | None = None,
 ) -> dict:
     watch_together = watch_together or {}
-    source_slugs = {path: set(entry["slugs"]) for path, entry in (list_sources or {}).items()}
+    # Already narrowed to watchlist/diary slugs by the DB (see
+    # db.load_custom_list_memberships) — membership is all that's needed here.
+    source_slugs = list_sources or {}
 
     # state.films is Josh's watchlist UNION Sarah's (see main.py's
     # combined_films) — offers/quick-look are computed for all of it so her
@@ -1027,12 +1034,12 @@ def build_dashboard_data(
         "main_brands": main_brands,
         "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, discovery_films,
                                               dismissed_recommendations, watch_together, custom_lists,
-                                              source_slugs),
+                                              source_slugs, list_totals),
         "films": rows,
         # Films-tab dropdown options — config order, lists with no current
         # watchlist members left out (same as their Home sections).
         "custom_lists": [
-            {"key": cl.key, "name": cl.name, "count": n}
+            {"key": cl.key, "name": cl.name, "group": cl.group, "count": n}
             for cl in custom_lists
             if (n := sum(cl.key in r["custom_lists"] for r in rows))
         ],
@@ -4687,11 +4694,21 @@ function renderFilmsListSelect() {
   allOpt.value = '';
   allOpt.textContent = 'Focus on a list...';
   select.appendChild(allOpt);
+  // Grouped lists go under an <optgroup> per `group` (first-seen order,
+  // same as config order); ungrouped ones sit at the top level.
+  const groups = new Map();
   lists.forEach(list => {
     const opt = document.createElement('option');
     opt.value = list.key;
     opt.textContent = list.name + ' (' + list.count + ')';
-    select.appendChild(opt);
+    if (!list.group) { select.appendChild(opt); return; }
+    if (!groups.has(list.group)) {
+      const og = document.createElement('optgroup');
+      og.label = list.group;
+      groups.set(list.group, og);
+      select.appendChild(og);
+    }
+    groups.get(list.group).appendChild(opt);
   });
   select.value = activeList || '';
 }

@@ -16,6 +16,9 @@ no separate removal step. A list's members come from any combination of:
   custom_list_sources table — see main.py's _refresh_custom_list_sources —
   since the dashboard build itself must stay network-free.
 - `include`/`exclude`: manual per-slug overrides on top of the above.
+
+`home: false` keeps a list out of Home (Films-tab dropdown only), and
+`group` sorts it under a heading in that dropdown.
 """
 import unicodedata
 from dataclasses import dataclass, field
@@ -34,6 +37,8 @@ class CustomList:
     letterboxd_lists: list[str] = field(default_factory=list)
     include: frozenset[str] = frozenset()
     exclude: frozenset[str] = frozenset()
+    home: bool = True
+    group: str | None = None
 
 
 def _as_list(value) -> list:
@@ -96,6 +101,8 @@ def load_custom_lists(path: Path) -> list[CustomList]:
             letterboxd_lists=[normalize_list_path(p) for p in _as_list(entry.get("letterboxd_lists"))],
             include=frozenset(_as_list(entry.get("include"))),
             exclude=frozenset(_as_list(entry.get("exclude"))),
+            home=bool(entry.get("home", True)),
+            group=entry.get("group"),
         ))
     return result
 
@@ -136,14 +143,14 @@ def matches(cl: CustomList, slug: str, director, starring, year: int | None,
     return any(_rule_matches(rule, director, starring, year) for rule in cl.rules)
 
 
-def source_total(cl: CustomList, sources: dict[str, set[str]]) -> int | None:
-    """Size of the whole defined set, when it's actually knowable — only for
-    a purely source-backed list (e.g. "622 Best Picture nominees"). A
-    rule-based list's full extent (every De Palma film ever made) isn't
-    something the stored metadata can answer, so no total there."""
-    if cl.rules or not cl.letterboxd_lists:
-        return None
-    if not all(p in sources for p in cl.letterboxd_lists):
-        return None
-    members = set().union(*(sources[p] for p in cl.letterboxd_lists)) | cl.include
-    return len(members - cl.exclude)
+def total_groups(custom_lists: list[CustomList]) -> dict[str, tuple[list[str], list[str], list[str]]]:
+    """key -> (sources, include, exclude) for every list whose full extent
+    is actually knowable — only a purely source-backed list (e.g. "622 Best
+    Picture nominees"). A rule-based list's full extent (every De Palma film
+    ever made) isn't something the stored metadata can answer. Counted
+    server-side by db.custom_list_source_totals."""
+    return {
+        cl.key: (list(cl.letterboxd_lists), sorted(cl.include), sorted(cl.exclude))
+        for cl in custom_lists
+        if cl.letterboxd_lists and not cl.rules
+    }

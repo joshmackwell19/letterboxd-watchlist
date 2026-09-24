@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from watchlist_justwatch.custom_lists import (
-    CustomList, load_custom_lists, matches, normalize_list_path, source_total,
+    CustomList, load_custom_lists, matches, normalize_list_path, total_groups,
 )
 from watchlist_justwatch.dashboard import _build_home_sections, _custom_list_sections
 from watchlist_justwatch.models import FilmState
@@ -68,7 +68,16 @@ lists:
     assert matches(cl, "extra", [], [], None, sources)
     assert not matches(cl, "nope", [], [], None, sources)
     assert not matches(cl, "b", [], [], None, sources)
-    assert source_total(cl, sources) == 2   # a + extra, nope excluded
+    assert total_groups([cl]) == {"o": (["someone/list/best-picture"], ["extra"], ["nope"])}
+
+
+def test_rule_based_lists_have_no_knowable_total(tmp_path):
+    lists = _load(tmp_path, """
+lists:
+  - {key: r, name: R, rules: [{director: X}]}
+  - {key: mixed, name: M, rules: [{director: X}], letterboxd_lists: [u/list/a]}
+""")
+    assert total_groups(lists) == {}
 
 
 def test_unknown_rule_key_fails_loudly(tmp_path):
@@ -115,7 +124,7 @@ def test_section_orders_watchable_first_and_counts_seen_from_diary(tmp_path):
 def test_source_backed_section_reports_seen_out_of_total(tmp_path):
     [cl] = _load(tmp_path, "lists:\n  - {key: o, name: Oscars, letterboxd_lists: [u/list/bp]}\n")
     state = StateDoc(films={"a": _film("a")}, diary={"b": {"year": 2000}})
-    [section] = _custom_list_sections(state, {}, [cl], {"u/list/bp": {"a", "b", "c"}})
+    [section] = _custom_list_sections(state, {}, [cl], {"u/list/bp": {"a", "b"}}, {"o": 3})
     assert section["subtitle"] == "1 on your watchlist · 1 of 3 seen"
 
 
@@ -156,4 +165,24 @@ lists:
     rows = {r["slug"]: r for r in data["films"]}
     assert rows["a"]["custom_lists"] == ["dp"]
     assert rows["b"]["custom_lists"] == []
-    assert data["custom_lists"] == [{"key": "dp", "name": "De Palma", "count": 1}]
+    assert data["custom_lists"] == [{"key": "dp", "name": "De Palma", "group": None, "count": 1}]
+
+
+def test_home_false_lists_stay_off_home_but_stay_in_the_dropdown(tmp_path):
+    from watchlist_justwatch.dashboard import build_dashboard_data
+
+    lists = _load(tmp_path, """
+lists:
+  - {key: dp, name: De Palma, rules: [{director: Brian De Palma}]}
+  - {key: uc, name: Un Certain Regard, group: Cannes, home: false, letterboxd_lists: [u/list/ucr]}
+""")
+    state = StateDoc(films={"a": _film("a", director=["Brian De Palma"])}, josh_watchlist={"a"})
+
+    data = build_dashboard_data(state, set(), {}, [], set(), custom_lists=lists,
+                                list_sources={"u/list/ucr": {"a"}})
+
+    assert [s["key"] for s in data["home_sections"] if s.get("custom_list")] == ["list:dp"]
+    assert data["custom_lists"] == [
+        {"key": "dp", "name": "De Palma", "group": None, "count": 1},
+        {"key": "uc", "name": "Un Certain Regard", "group": "Cannes", "count": 1},
+    ]

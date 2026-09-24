@@ -370,12 +370,57 @@ def set_watch_together_statuses_batch(database_url: str, decisions: list[tuple[s
         )
 
 
-def load_custom_list_sources(database_url: str) -> dict[str, dict]:
-    """source ("user/list/slug") -> {slugs, fetched_at}."""
+def custom_list_source_fetch_times(database_url: str) -> dict[str, str]:
+    """source -> fetched_at, without pulling any slugs — all the refresh
+    step needs to decide what's stale."""
     with psycopg.connect(database_url) as conn:
         _ensure_schema(conn)
-        rows = conn.execute("SELECT source, slugs, fetched_at FROM custom_list_sources").fetchall()
-    return {source: {"slugs": slugs, "fetched_at": fetched_at} for source, slugs, fetched_at in rows}
+        return dict(conn.execute("SELECT source, fetched_at FROM custom_list_sources").fetchall())
+
+
+def load_custom_list_memberships(database_url: str, relevant_slugs: set[str]) -> dict[str, set[str]]:
+    """source -> the subset of its slugs that are in `relevant_slugs` (the
+    watchlist plus the diary — the only films the dashboard can say
+    anything about). Intersected server-side: festival sources run to
+    thousands of films each, and shipping every one of them on every
+    dashboard regen is exactly the kind of read that has blown Neon's
+    free-tier transfer quota before (see get_meta_value)."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            "SELECT s.source, COALESCE(array_agg(e) FILTER (WHERE e IS NOT NULL), '{}') "
+            "FROM custom_list_sources s "
+            "LEFT JOIN LATERAL jsonb_array_elements_text(s.slugs) e ON e = ANY(%s) "
+            "GROUP BY s.source",
+            (list(relevant_slugs),),
+        ).fetchall()
+    return {source: set(slugs) for source, slugs in rows}
+
+
+def custom_list_source_totals(database_url: str, groups: dict[str, tuple[list[str], list[str], list[str]]]
+                              ) -> dict[str, int]:
+    """key -> distinct film count across (sources + include - exclude), per
+    group — the "of N" in a list's "M of N seen". Counted server-side for
+    the same transfer-quota reason as load_custom_list_memberships. A group
+    whose sources aren't all cached yet is left out (total unknown)."""
+    if not groups:
+        return {}
+    totals: dict[str, int] = {}
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        cached = {row[0] for row in conn.execute("SELECT source FROM custom_list_sources").fetchall()}
+        for key, (sources, include, exclude) in groups.items():
+            if not sources or not set(sources) <= cached:
+                continue
+            (count,) = conn.execute(
+                "SELECT count(*) FROM ("
+                "  SELECT jsonb_array_elements_text(slugs) AS e FROM custom_list_sources WHERE source = ANY(%s)"
+                "  UNION SELECT unnest(%s::text[])"
+                ") u WHERE NOT (e = ANY(%s))",
+                (sources, include, exclude),
+            ).fetchone()
+            totals[key] = count
+    return totals
 
 
 def save_custom_list_source(database_url: str, source: str, slugs: list[str], fetched_at: str) -> None:

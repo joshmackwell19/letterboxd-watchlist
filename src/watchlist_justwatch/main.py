@@ -32,10 +32,11 @@ from .config import (
     load_config, load_dismissed_recommendations, load_favorites, load_global_subscriptions,
     load_main_services, load_revisitable_services,
 )
-from .custom_lists import all_source_paths, load_custom_lists
+from .custom_lists import all_source_paths, load_custom_lists, total_groups
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import (
-    get_meta_value, load_custom_list_sources, load_state, load_watch_together, save_custom_list_source,
+    custom_list_source_fetch_times, custom_list_source_totals, get_meta_value,
+    load_custom_list_memberships, load_state, load_watch_together, save_custom_list_source,
     save_state, seed_pending_watch_together, set_watch_together_status, set_watch_together_statuses_batch,
 )
 from .diff import build_report
@@ -88,6 +89,11 @@ DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
 # Source lists (award nominees, festival lineups) change rarely — no need
 # to re-walk a 600-film list's pages every single day.
 CUSTOM_LIST_SOURCE_REFRESH_DAYS = 7
+# Per daily run — festival sources number in the hundreds once per-year
+# lineups are included (TIFF and NYFF alone are ~115 lists), so each run
+# refreshes only the stalest few rather than hammering Letterboxd with
+# every one on the same day. 30/day cycles ~200 sources inside the week.
+CUSTOM_LIST_SOURCES_PER_RUN = 30
 
 # JustWatch offers are the slow, rate-limit-fragile part of each run (see
 # justwatch_client.resolve_and_fetch's mandatory pacing sleep) and rarely
@@ -223,20 +229,27 @@ def _resolved_cinema_matches(
     return resolved
 
 
-def _refresh_custom_list_sources(database_url: str, custom_lists, warn, *, force: bool = False) -> dict[str, dict]:
+def _refresh_custom_list_sources(database_url: str, custom_lists, warn, *, force: bool = False,
+                                 limit: int | None = None) -> dict[str, int]:
     """Fetches each Letterboxd list a custom list sources from, skipping any
-    fetched within CUSTOM_LIST_SOURCE_REFRESH_DAYS unless forced. A failed
-    or empty fetch warns and keeps the previously cached copy (same
-    carry-forward-on-failure pattern as the cinema fetchers). Returns the
-    full cached set, ready to hand to build_dashboard_data."""
-    cached = load_custom_list_sources(database_url)
+    fetched within CUSTOM_LIST_SOURCE_REFRESH_DAYS unless forced, stalest
+    (never-fetched first) up to `limit` per call. A failed or empty fetch
+    warns and keeps the previously cached copy (same carry-forward-on-
+    failure pattern as the cinema fetchers). Returns source -> film count
+    for whatever was actually fetched."""
+    fetch_times = custom_list_source_fetch_times(database_url)
     now = datetime.now(timezone.utc)
-    for path in all_source_paths(custom_lists):
-        previous = cached.get(path)
-        if previous and not force:
-            age = now - datetime.fromisoformat(previous["fetched_at"])
-            if age < timedelta(days=CUSTOM_LIST_SOURCE_REFRESH_DAYS):
-                continue
+    stale_cutoff = now - timedelta(days=CUSTOM_LIST_SOURCE_REFRESH_DAYS)
+    due = [
+        path for path in all_source_paths(custom_lists)
+        if force or path not in fetch_times or datetime.fromisoformat(fetch_times[path]) < stale_cutoff
+    ]
+    due.sort(key=lambda path: fetch_times.get(path, ""))
+    if limit is not None:
+        due = due[:limit]
+
+    fetched: dict[str, int] = {}
+    for path in due:
         try:
             slugs = fetch_list_slugs(path)
         except LetterboxdFetchError as exc:
@@ -248,8 +261,21 @@ def _refresh_custom_list_sources(database_url: str, custom_lists, warn, *, force
             warn(f"custom list source {path!r} returned no films, keeping cached copy")
             continue
         save_custom_list_source(database_url, path, slugs, now.isoformat())
-        cached[path] = {"slugs": slugs, "fetched_at": now.isoformat()}
-    return cached
+        fetched[path] = len(slugs)
+    return fetched
+
+
+def _custom_list_inputs(database_url: str, custom_lists, state: StateDoc) -> dict:
+    """build_dashboard_data's custom-list kwargs, read from the cached
+    sources — only watchlist/diary members and per-list totals, never the
+    full source lists (see db.load_custom_list_memberships)."""
+    if not custom_lists:
+        return {"custom_lists": []}
+    return {
+        "custom_lists": custom_lists,
+        "list_sources": load_custom_list_memberships(database_url, set(state.films) | set(state.diary)),
+        "list_totals": custom_list_source_totals(database_url, total_groups(custom_lists)),
+    }
 
 
 def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
@@ -589,10 +615,10 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     save_state(database_url, current_state)
     watch_together = load_watch_together(database_url)
     custom_lists = load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH)
-    list_sources = _refresh_custom_list_sources(database_url, custom_lists, _warn)
+    _refresh_custom_list_sources(database_url, custom_lists, _warn, limit=CUSTOM_LIST_SOURCES_PER_RUN)
     dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable,
                                           dismissed, watch_together=watch_together,
-                                          custom_lists=custom_lists, list_sources=list_sources)
+                                          **_custom_list_inputs(database_url, custom_lists, current_state))
     DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
 
     # A discovery section or a per-film check failing is already caught and
@@ -716,8 +742,8 @@ def main() -> None:
                          help="One-time import of a legacy data/state.json file into the database "
                               "at --database-url, then exit")
     parser.add_argument("--refresh-custom-lists", action="store_true",
-                         help="Re-fetch every Letterboxd list config/custom_lists.yaml sources from "
-                              "(ignoring the weekly staleness window) into the database, then exit — "
+                         help="Fetch every Letterboxd list config/custom_lists.yaml sources from that's "
+                              "missing or over a week old (no per-run cap) into the database, then exit — "
                               "for a newly added source to show up before the next daily run")
     parser.add_argument("--check-for-new-log", action="store_true",
                          help="Check the Letterboxd RSS feed for a log entry newer than the last check "
@@ -831,10 +857,14 @@ def main() -> None:
 
     if args.refresh_custom_lists:
         custom_lists = load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH)
-        cached = _refresh_custom_list_sources(args.database_url, custom_lists,
-                                              lambda msg: print(f"warning: {msg}", file=sys.stderr), force=True)
-        for path in all_source_paths(custom_lists):
-            print(f"{path}: {len(cached.get(path, {}).get('slugs', []))} films")
+        # Everything missing or stale, with no per-run cap — the point is to
+        # seed a newly added source (or a whole new batch of them) now
+        # rather than waiting out the daily run's rotation.
+        fetched = _refresh_custom_list_sources(args.database_url, custom_lists,
+                                               lambda msg: print(f"warning: {msg}", file=sys.stderr))
+        for path, count in fetched.items():
+            print(f"{path}: {count} films")
+        print(f"Fetched {len(fetched)} source(s); the rest were already fresh.")
         sys.exit(0)
 
     if args.set_watch_together_status:
@@ -877,8 +907,8 @@ def main() -> None:
         watch_together = load_watch_together(args.database_url)
         data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable, dismissed,
                                     watch_together=watch_together,
-                                    custom_lists=load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH),
-                                    list_sources=load_custom_list_sources(args.database_url))
+                                    **_custom_list_inputs(args.database_url,
+                                                          load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH), state))
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
         sys.exit(0)

@@ -5220,12 +5220,12 @@ const serviceCols = [
   { key: 'film_count', sort: r => r.film_count, dir: -1 },
   { key: 'unique_film_count', sort: r => r.unique_film_count, dir: -1 },
 ];
-// "Subscription needed" starts off: it's 847 of the 1,662 rows here, all of
-// them services Josh doesn't pay for, and they arrive ahead of anything
-// useful on a tab that's read to answer "what's on the things I've got".
-// The toggle sits right there, and the active-filter row says it's on, so
-// the rest is one tap away rather than hidden.
-const serviceFilterState = { have: true, could_get_again: true, free: true, subscription: false };
+// Every type on by default, like the Films and Country tabs. Subscription-
+// needed used to start off, back when the tab was a row per (service,
+// country) and those were 847 of 1,662 rows — one service per card is 327,
+// sorted with the ones you have at the top, so hiding the rest costs more
+// in surprise than it saves in scrolling.
+const serviceFilterState = { have: true, could_get_again: true, free: true, subscription: true };
 let serviceSarahFilter = 'all';
 
 let serviceSortKey = 'film_count', serviceSortDir = -1;

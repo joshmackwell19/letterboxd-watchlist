@@ -3,6 +3,7 @@ import re
 import unicodedata
 import time
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -23,6 +24,27 @@ _HEADERS = {
 
 class CinemaFetchError(Exception):
     pass
+
+
+# Every venue is in London and every stored showtime is a naive London
+# wall-clock ISO string — so "has this showing passed" has to be asked in
+# London time too, not the runner's (GitHub Actions runs in UTC, which is
+# an hour behind all summer).
+LONDON = ZoneInfo("Europe/London")
+
+
+def london_now() -> datetime:
+    return datetime.now(LONDON).replace(tzinfo=None)
+
+
+def drop_past_showings(showings: list[dict], now: datetime | None = None) -> list[dict]:
+    """Only the showings that haven't started yet. Applied when a run
+    stores the listing (which matters most for a venue whose fetch failed
+    and was carried forward — otherwise its last good listing would be
+    carried forward, and shown, indefinitely) and again when the
+    dashboard is built."""
+    now_iso = (now or london_now()).isoformat()
+    return [s for s in showings if s["showtime"] >= now_iso]
 
 
 def _get(url: str, *, params: dict | None = None, max_retries: int = 3,
@@ -252,6 +274,13 @@ def _parse_barbican_time(day: date, text: str) -> datetime | None:
 # ---------- Vue Fulham Broadway ----------
 # Official, versioned JSON API — no HTML parsing at all. cinemaId 10046
 # verified against myvue.com/cinema/fulham-broadway.
+#
+# myvue.com now sits behind a Cloudflare managed challenge that every
+# datacenter IP gets (GitHub Actions included), whichever browser
+# curl_cffi impersonates — the HTML page and the API alike answer 403
+# "Just a moment...". So the direct API is still tried first (it works
+# from a residential connection, and carries the most detail), and when
+# it's refused the same programme comes from CinemaGuide instead.
 
 VUE_CINEMA_SLUG = "fulham-broadway"
 VUE_CINEMA_ID = "10046"
@@ -259,16 +288,39 @@ VUE_WHATS_ON_URL = "https://www.myvue.com/cinema/{slug}/whats-on"
 VUE_API_URL = "https://www.myvue.com/api/microservice/showings/cinemas/{cinema_id}/films"
 VUE_DAYS_AHEAD = 7
 
+# cinemaguide.co.uk's own backend (a public Firebase function its SPA
+# calls): Vue's whole forward programme in one request, with Vue's own
+# booking links, times in UTC. Unofficial — if it ever changes shape the
+# parse comes back empty and the fetch fails soft like any other venue.
+CINEMAGUIDE_SCREENINGS_URL = "https://europe-west2-cinema-viewer1.cloudfunctions.net/api/getScreenings"
+CINEMAGUIDE_VUE_FULHAM_SLUG = "vue-london-fulham-broadway"
 
-def fetch_vue(*, cinema_slug: str = VUE_CINEMA_SLUG, cinema_id: str = VUE_CINEMA_ID,
-              days_ahead: int = VUE_DAYS_AHEAD, now: datetime | None = None) -> list[dict]:
+
+def fetch_vue(*, now: datetime | None = None) -> list[dict]:
+    # The direct route failing is expected on every Actions run, so it
+    # isn't worth a warning of its own — only both routes failing is.
+    try:
+        return _fetch_vue_direct(now=now)
+    except Exception as direct_exc:
+        try:
+            return _fetch_vue_cinemaguide()
+        except CinemaFetchError as fallback_exc:
+            raise CinemaFetchError(f"{direct_exc}; fallback: {fallback_exc}") from fallback_exc
+
+
+def _fetch_vue_direct(*, cinema_slug: str = VUE_CINEMA_SLUG, cinema_id: str = VUE_CINEMA_ID,
+                      days_ahead: int = VUE_DAYS_AHEAD, now: datetime | None = None) -> list[dict]:
     # The showings API is gated behind an anonymous-session JWT that only
     # Vue's own HTML page sets as a cookie — a cold request straight to
     # the API 401s. One throwaway page visit first (same curl_cffi
     # session, so the cookie carries over) unlocks the real API calls.
-    now = now or datetime.now()
+    now = now or london_now()
     session = curl_requests.Session()
-    session.get(VUE_WHATS_ON_URL.format(slug=cinema_slug), impersonate="chrome124", timeout=15)
+    page = session.get(VUE_WHATS_ON_URL.format(slug=cinema_slug), impersonate="chrome124", timeout=15)
+    if not page.ok:
+        # A 403 here is the Cloudflare challenge; every API call after it
+        # would fail the same way, so don't make seven more.
+        raise CinemaFetchError(f"Vue what's-on page request failed (HTTP {page.status_code})")
 
     showings: list[dict] = []
     for offset in range(days_ahead):
@@ -310,6 +362,63 @@ def _parse_vue(data: dict) -> list[dict]:
                     "poster_url": film.get("posterImageSrc"), "booking_url": booking_url,
                 })
     return showings
+
+
+def _fetch_vue_cinemaguide() -> list[dict]:
+    try:
+        response = requests.post(CINEMAGUIDE_SCREENINGS_URL, headers=_HEADERS, timeout=30, json={
+            "venues": [CINEMAGUIDE_VUE_FULHAM_SLUG], "page": 0, "initial_view": False,
+        })
+    except requests.RequestException as exc:
+        raise CinemaFetchError(f"CinemaGuide request for Vue failed ({exc})") from exc
+    if not response.ok:
+        raise CinemaFetchError(f"CinemaGuide request for Vue failed (HTTP {response.status_code})")
+    showings = _parse_cinemaguide(response.json())
+    if not showings:
+        # An empty programme for a nine-screen multiplex is a broken
+        # response, not a quiet week — fail so yesterday's is kept.
+        raise CinemaFetchError("CinemaGuide returned no Vue showings")
+    return showings
+
+
+def _parse_cinemaguide(data: dict) -> list[dict]:
+    meta_by_key = data.get("film_meta_data_map") or {}
+    films = (data.get("all_screenings_on_all_dates") or {}).get("film_data") or []
+    showings: list[dict] = []
+    for film in films:
+        meta = meta_by_key.get(film.get("title")) or {}
+        title = meta.get("display_film_title")
+        if not title:
+            continue
+        # 0 is what CinemaGuide says when it doesn't know the runtime.
+        duration_minutes = meta.get("length_in_minutes") or None
+        for day in film.get("screenings_data") or []:
+            for screening in day.get("screenings") or []:
+                showtime = _utc_iso_to_london(screening.get("time"))
+                if showtime is None:
+                    continue
+                booking_url = screening.get("link") or None
+                if booking_url:
+                    booking_url = booking_url.replace("myvue.com//", "myvue.com/", 1)
+                showings.append({
+                    "cinema": CINEMA_VUE_FULHAM, "title": title, "year": None,
+                    "showtime": showtime, "duration_minutes": duration_minutes,
+                    "director": None, "synopsis": meta.get("description") or None,
+                    "poster_url": meta.get("image_link") or None, "booking_url": booking_url,
+                })
+    return showings
+
+
+def _utc_iso_to_london(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(LONDON).replace(tzinfo=None).isoformat()
 
 
 # ---------- Riverside Studios ----------

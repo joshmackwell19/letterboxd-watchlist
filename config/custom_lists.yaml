@@ -1,0 +1,61 @@
+# Custom watchlist subsets, each shown as its own Home section (see
+# src/watchlist_justwatch/custom_lists.py). A list only ever shows films
+# still on your watchlist, so logging a film removes it automatically.
+#
+# Each list can combine:
+#   rules:            match on tracked metadata. A film matches if ANY rule
+#                     matches; a rule matches only if ALL its conditions do.
+#                     Conditions: director, starring (name or list of names,
+#                     accent/case-insensitive), year_from, year_to.
+#                     starring only covers the top 5 billed cast.
+#   letterboxd_lists: any Letterboxd list as a source ("user/list/slug" or
+#                     the full URL). Fetched by the daily run and refreshed
+#                     weekly — a newly added one appears after the next
+#                     daily run (or run --refresh-custom-lists locally).
+#                     Best for things metadata can't express: award
+#                     nominations, festival lineups (Cannes/Venice/TIFF/
+#                     San Sebastián etc. — one list per edition works too).
+#   include/exclude:  manual per-film overrides, by Letterboxd slug.
+#
+# Order here is the order sections appear on Home.
+
+lists:
+  - key: oscar-best-picture
+    name: Oscar Best Picture nominees
+    # SJHoneywell's list: all 622 nominees 1927/28–2025 (98th ceremony),
+    # including Sunrise (the one-off "Unique and Artistic Production"
+    # award). The most complete of the full-history lists checked.
+    letterboxd_lists:
+      - sjhoneywell/list/oscar-best-picture-nominees
+
+  - key: brian-de-palma
+    name: Brian De Palma
+    rules:
+      - director: Brian De Palma
+
+  - key: al-pacino
+    name: Al Pacino
+    rules:
+      - starring: Al Pacino
+
+  - key: french-new-wave
+    name: French New Wave
+    # The core Nouvelle Vague / Left Bank directors, limited to the
+    # movement's era — a director-only rule would also pull in e.g.
+    # Godard's 2010s essay films. Hand-tune edge cases with include/exclude.
+    rules:
+      - director:
+          - François Truffaut
+          - Jean-Luc Godard
+          - Claude Chabrol
+          - Éric Rohmer
+          - Jacques Rivette
+          - Agnès Varda
+          - Alain Resnais
+          - Jacques Demy
+          - Louis Malle
+          - Chris Marker
+          - Jacques Rozier
+          - Jean Eustache
+        year_from: 1958
+        year_to: 1973

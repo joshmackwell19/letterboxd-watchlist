@@ -260,6 +260,38 @@ def fetch_watchlist(
     return list(all_films.values())
 
 
+MAX_LIST_PAGES = 50
+
+
+def fetch_list_slugs(
+    list_path: str,
+    *,
+    impersonate: str = "chrome124",
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+    request_timeout_seconds: float = 15.0,
+    page_delay_seconds: float = 0.5,
+) -> list[str]:
+    """Every film slug on a Letterboxd list (`user/list/slug`), in list
+    order. Unlike the watchlist there's no total-count element to size the
+    pagination from, so this walks pages until one comes back empty —
+    capped at MAX_LIST_PAGES so a markup change can't loop forever."""
+    session = curl_requests.Session()
+    slugs: dict[str, None] = {}
+    for page_num in range(1, MAX_LIST_PAGES + 1):
+        if page_num > 1:
+            time.sleep(page_delay_seconds)
+        response = _fetch_url(session, f"https://letterboxd.com/{list_path}/page/{page_num}/",
+                               max_retries=max_retries, backoff_base_seconds=backoff_base_seconds,
+                               request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
+        page_slugs = ITEM_SLUG_RE.findall(response.text)
+        if not page_slugs:
+            break
+        for slug in page_slugs:
+            slugs[slug] = None
+    return list(slugs)
+
+
 def fetch_recent_watches(
     username: str,
     *,

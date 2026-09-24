@@ -56,6 +56,7 @@ stores none of it.
 | `report.py` / `html_email.py` / `weekly_digest.py` | Email rendering (plain text / HTML / the Friday digest) |
 | `notify.py` | Resend API wrapper |
 | `analysis.py` | `--rank-services`/`--recommend-favorites` standalone analyses |
+| `custom_lists.py` | User-defined watchlist subsets from `config/custom_lists.yaml` (rules on director/starring/year, Letterboxd lists as sources, manual include/exclude) — each becomes a Home section, recomputed against the current watchlist at build time |
 | `languages.py` | ISO 639-1 code → name, and the subtitled-film heuristic |
 | `brands.py`, `countries.py`, `availability.py` | Small lookup/normalization helpers |
 
@@ -70,6 +71,7 @@ stores none of it.
 | `josh_watchlist` / `sarah_watchlist` | `run()`, full replace | Membership only (slugs) — offer data lives in `films` regardless of which list |
 | `meta` | `run()`, full replace | `last_run_at`, `last_justwatch_check_date`, `last_seen_diary_guid`, `recent_watches`, `recent_additions` |
 | `watch_together` | **Incrementally** — `seed_pending_watch_together` (new pending rows) / `set_watch_together_statuses_batch` (Review tab decisions) | Deliberately *not* part of the full-replace — see `db.py`'s own comment on `save_state` |
+| `custom_list_sources` | **Incrementally** — `_refresh_custom_list_sources` (in `run()`, weekly per source, or forced via `--refresh-custom-lists`) | Cached slugs of each Letterboxd list a custom list sources from; a failed/empty fetch keeps the previous copy. Not part of `save_state`'s full replace |
 | `cinema_showtimes` | `run()`, full replace | Raw scraped rows from `cinemas.py` only — matching against the watchlist happens fresh in `dashboard.py` at build time, not stored |
 | `cinema_film_matches` | `run()`, full replace | The Letterboxd film each listing is showing, for the ~90% of the programme the watchlist can't name. Keyed by `cinemas.listing_match_key` (cleaned title + year), so the same film at three venues resolves once. Unlike the watchlist match this costs a TMDB search plus a Letterboxd page, so it's cached rather than recomputed at build time; a NULL slug is a listing with no Letterboxd film, remembered so it isn't retried daily |
 
@@ -168,6 +170,10 @@ stored raw package name, so a change here reaches the page on the next
 from the same TMDB search) and is grouped with those historically, but it
 never touches Letterboxd — so it also runs from Actions via
 `backfill-tmdb-ids.yml`.
+
+`--refresh-custom-lists` re-fetches every Letterboxd list
+`config/custom_lists.yaml` sources from, so a newly added one shows up
+before the next daily run.
 
 **Standalone analyses** (network-free, read already-stored state):
 `--rank-services`, `--recommend-favorites`, `--similar-to TITLE`,

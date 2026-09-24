@@ -32,10 +32,11 @@ from .config import (
     load_config, load_dismissed_recommendations, load_favorites, load_global_subscriptions,
     load_main_services, load_revisitable_services,
 )
+from .custom_lists import all_source_paths, load_custom_lists
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import (
-    get_meta_value, load_state, load_watch_together, save_state, seed_pending_watch_together,
-    set_watch_together_status, set_watch_together_statuses_batch,
+    get_meta_value, load_custom_list_sources, load_state, load_watch_together, save_custom_list_source,
+    save_state, seed_pending_watch_together, set_watch_together_status, set_watch_together_statuses_batch,
 )
 from .diff import build_report
 from .html_email import (
@@ -51,6 +52,7 @@ from .justwatch_client import resolve_and_fetch
 from .letterboxd import (
     LetterboxdFetchError,
     fetch_diary_ratings,
+    fetch_list_slugs,
     fetch_new_diary_entries,
     fetch_recent_watches,
     fetch_watched_films,
@@ -81,7 +83,11 @@ DEFAULT_FAVORITES_PATH = Path("config/favorites.yaml")
 DEFAULT_REVISITABLE_PATH = Path("config/revisitable_services.yaml")
 DEFAULT_DISMISSED_PATH = Path("config/dismissed_recommendations.yaml")
 DEFAULT_MAIN_SERVICES_PATH = Path("config/main_services.yaml")
+DEFAULT_CUSTOM_LISTS_PATH = Path("config/custom_lists.yaml")
 DEFAULT_DASHBOARD_PATH = Path("dashboard.html")
+# Source lists (award nominees, festival lineups) change rarely — no need
+# to re-walk a 600-film list's pages every single day.
+CUSTOM_LIST_SOURCE_REFRESH_DAYS = 7
 
 # JustWatch offers are the slow, rate-limit-fragile part of each run (see
 # justwatch_client.resolve_and_fetch's mandatory pacing sleep) and rarely
@@ -215,6 +221,35 @@ def _resolved_cinema_matches(
         time.sleep(0.2)
 
     return resolved
+
+
+def _refresh_custom_list_sources(database_url: str, custom_lists, warn, *, force: bool = False) -> dict[str, dict]:
+    """Fetches each Letterboxd list a custom list sources from, skipping any
+    fetched within CUSTOM_LIST_SOURCE_REFRESH_DAYS unless forced. A failed
+    or empty fetch warns and keeps the previously cached copy (same
+    carry-forward-on-failure pattern as the cinema fetchers). Returns the
+    full cached set, ready to hand to build_dashboard_data."""
+    cached = load_custom_list_sources(database_url)
+    now = datetime.now(timezone.utc)
+    for path in all_source_paths(custom_lists):
+        previous = cached.get(path)
+        if previous and not force:
+            age = now - datetime.fromisoformat(previous["fetched_at"])
+            if age < timedelta(days=CUSTOM_LIST_SOURCE_REFRESH_DAYS):
+                continue
+        try:
+            slugs = fetch_list_slugs(path)
+        except LetterboxdFetchError as exc:
+            warn(f"custom list source {path!r} fetch failed, keeping cached copy ({exc})")
+            continue
+        if not slugs:
+            # An empty result is far more likely a markup change or a
+            # renamed list than a list that's genuinely been emptied.
+            warn(f"custom list source {path!r} returned no films, keeping cached copy")
+            continue
+        save_custom_list_source(database_url, path, slugs, now.isoformat())
+        cached[path] = {"slugs": slugs, "fetched_at": now.isoformat()}
+    return cached
 
 
 def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
@@ -553,8 +588,11 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     # Resend is having an outage; the email is a nice-to-have on top.
     save_state(database_url, current_state)
     watch_together = load_watch_together(database_url)
+    custom_lists = load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH)
+    list_sources = _refresh_custom_list_sources(database_url, custom_lists, _warn)
     dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable,
-                                          dismissed, watch_together=watch_together)
+                                          dismissed, watch_together=watch_together,
+                                          custom_lists=custom_lists, list_sources=list_sources)
     DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
 
     # A discovery section or a per-film check failing is already caught and
@@ -677,6 +715,10 @@ def main() -> None:
     parser.add_argument("--migrate-json-to-db", type=Path, metavar="STATE_JSON",
                          help="One-time import of a legacy data/state.json file into the database "
                               "at --database-url, then exit")
+    parser.add_argument("--refresh-custom-lists", action="store_true",
+                         help="Re-fetch every Letterboxd list config/custom_lists.yaml sources from "
+                              "(ignoring the weekly staleness window) into the database, then exit — "
+                              "for a newly added source to show up before the next daily run")
     parser.add_argument("--check-for-new-log", action="store_true",
                          help="Check the Letterboxd RSS feed for a log entry newer than the last check "
                               "(one cheap request, no watchlist/JustWatch calls). Prints 'new_log=true' "
@@ -787,6 +829,14 @@ def main() -> None:
         print(f"Backfilled {updated}/{len(missing)} films, written to the database.")
         sys.exit(0)
 
+    if args.refresh_custom_lists:
+        custom_lists = load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH)
+        cached = _refresh_custom_list_sources(args.database_url, custom_lists,
+                                              lambda msg: print(f"warning: {msg}", file=sys.stderr), force=True)
+        for path in all_source_paths(custom_lists):
+            print(f"{path}: {len(cached.get(path, {}).get('slugs', []))} films")
+        sys.exit(0)
+
     if args.set_watch_together_status:
         slug, status = args.set_watch_together_status
         if status not in ("confirmed", "declined"):
@@ -826,7 +876,9 @@ def main() -> None:
         state = load_state(args.database_url)
         watch_together = load_watch_together(args.database_url)
         data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable, dismissed,
-                                    watch_together=watch_together)
+                                    watch_together=watch_together,
+                                    custom_lists=load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH),
+                                    list_sources=load_custom_list_sources(args.database_url))
         args.dashboard_path.write_text(render_dashboard_html(data))
         print(f"Wrote {args.dashboard_path}")
         sys.exit(0)

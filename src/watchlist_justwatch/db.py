@@ -89,6 +89,17 @@ CREATE TABLE IF NOT EXISTS cinema_showtimes (
     poster_url TEXT,
     booking_url TEXT
 );
+-- Cached members of each Letterboxd list a custom list sources from (see
+-- custom_lists.py). Written per-source by _refresh_custom_list_sources,
+-- deliberately NOT part of save_state's full replace (same as
+-- watch_together) so the standalone --refresh-custom-lists flag can
+-- update it without a full pipeline run, and a failed fetch simply
+-- leaves the previous copy in place.
+CREATE TABLE IF NOT EXISTS custom_list_sources (
+    source TEXT PRIMARY KEY,
+    slugs JSONB NOT NULL,
+    fetched_at TEXT NOT NULL
+);
 """
 
 
@@ -356,4 +367,22 @@ def set_watch_together_statuses_batch(database_url: str, decisions: list[tuple[s
         conn.cursor().executemany(
             "UPDATE watch_together SET status = %s, decided_at = %s WHERE slug = %s",
             [(status, decided_at, slug) for slug, status, decided_at in decisions],
+        )
+
+
+def load_custom_list_sources(database_url: str) -> dict[str, dict]:
+    """source ("user/list/slug") -> {slugs, fetched_at}."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute("SELECT source, slugs, fetched_at FROM custom_list_sources").fetchall()
+    return {source: {"slugs": slugs, "fetched_at": fetched_at} for source, slugs, fetched_at in rows}
+
+
+def save_custom_list_source(database_url: str, source: str, slugs: list[str], fetched_at: str) -> None:
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO custom_list_sources (source, slugs, fetched_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (source) DO UPDATE SET slugs = EXCLUDED.slugs, fetched_at = EXCLUDED.fetched_at",
+            (source, Jsonb(slugs), fetched_at),
         )

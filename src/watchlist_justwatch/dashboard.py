@@ -13,6 +13,7 @@ from .brands import (
 from .cinemas import listing_match_key, match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
+from .custom_lists import CustomList, matches as custom_list_matches, source_total
 from .languages import LANGUAGE_NAMES, is_subtitled, language_name
 from .state import StateDoc
 
@@ -629,13 +630,55 @@ def _leaving_soon_section(state: StateDoc, films_all_offers: dict[str, list[dict
     return {"key": "leaving_soon", "header": "Leaving soon", "films": films}
 
 
+def _custom_list_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
+                          custom_lists: list[CustomList], list_sources: dict[str, set[str]]) -> list[dict]:
+    """One section per config/custom_lists.yaml entry, in config order.
+    Unlike every other Home section these carry the *whole* matching set
+    (the page collapses it to a preview client-side) and ignore/don't feed
+    the cross-section dedupe — a list is only useful if it's complete, and
+    a De Palma film also showing up under "Top rated" is fine. Ordered
+    watchable-now first, then by rating, same as _top_rated_section."""
+    def has_have(slug: str) -> bool:
+        return any(o["classification"] == "have" for o in films_all_offers.get(slug, []))
+
+    sections = []
+    for cl in custom_lists:
+        members = [
+            slug for slug, film in state.films.items()
+            if custom_list_matches(cl, slug, film.director, film.starring, film.year, list_sources)
+        ]
+        if not members:
+            continue
+        members.sort(key=lambda s: (not has_have(s), -(state.films[s].rating or 0), state.films[s].title))
+
+        seen = sum(
+            1 for slug, entry in state.diary.items()
+            if slug not in state.films
+            and custom_list_matches(cl, slug, entry.get("director"), entry.get("starring"), entry.get("year"),
+                                    list_sources)
+        )
+        total = source_total(cl, list_sources)
+        parts = [f"{len(members)} on your watchlist"]
+        if total is not None:
+            parts.append(f"{seen} of {total} seen")
+        elif seen:
+            parts.append(f"{seen} seen")
+
+        sections.append({
+            "key": f"list:{cl.key}", "header": cl.name, "subtitle": " · ".join(parts),
+            "custom_list": True, "films": [_mini_card(state.films[s]) for s in members],
+        })
+    return sections
+
+
 MAX_PERSON_SECTIONS = 4
 
 
 def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
                           films_by_slug: dict[str, dict], discovery_films: dict[str, dict],
                           dismissed_recommendations: set[str],
-                          watch_together: dict[str, dict]) -> list[dict]:
+                          watch_together: dict[str, dict], custom_lists: list[CustomList] = (),
+                          list_sources: dict[str, set[str]] | None = None) -> list[dict]:
     # Same merge order and the same already-reclassified discovery films as
     # the payload's own films_by_slug, so a card here and the quick-look it
     # opens can't disagree about what a film costs.
@@ -662,6 +705,11 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     add(_leaving_soon_section(state, films_all_offers, used))
     add(_recently_added_section(state, used))
     add(_watch_together_section(state, watch_together, used))
+
+    # Your own curated lists next — deliberate interests outrank
+    # algorithmic discovery. Appended directly rather than via add(): see
+    # _custom_list_sections for why they sit outside the dedupe.
+    sections.extend(_custom_list_sections(state, films_all_offers, custom_lists, list_sources or {}))
 
     # Recommended-from-recent-watches and top-rated next — general
     # discovery, not tied to a specific person — so they're not buried
@@ -920,8 +968,11 @@ def build_dashboard_data(
     revisitable: set[str],
     dismissed_recommendations: set[str] = frozenset(),
     watch_together: dict[str, dict] | None = None,
+    custom_lists: list[CustomList] = (),
+    list_sources: dict[str, dict] | None = None,
 ) -> dict:
     watch_together = watch_together or {}
+    source_slugs = {path: set(entry["slugs"]) for path, entry in (list_sources or {}).items()}
 
     # state.films is Josh's watchlist UNION Sarah's (see main.py's
     # combined_films) — offers/quick-look are computed for all of it so her
@@ -954,6 +1005,11 @@ def build_dashboard_data(
         info = watch_together.get(r["slug"], {})
         r["watch_together_status"] = info.get("status")
         r["watch_together_added_at"] = info.get("added_at")
+        film = josh_films[r["slug"]]
+        r["custom_lists"] = [
+            cl.key for cl in custom_lists
+            if custom_list_matches(cl, film.slug, film.director, film.starring, film.year, source_slugs)
+        ]
         showing = soonest_cinema_showings.get(r["slug"])
         if showing is not None:
             r["cinema_note"] = _cinema_note(showing)
@@ -970,8 +1026,16 @@ def build_dashboard_data(
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
         "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, discovery_films,
-                                              dismissed_recommendations, watch_together),
+                                              dismissed_recommendations, watch_together, custom_lists,
+                                              source_slugs),
         "films": rows,
+        # Films-tab dropdown options — config order, lists with no current
+        # watchlist members left out (same as their Home sections).
+        "custom_lists": [
+            {"key": cl.key, "name": cl.name, "count": n}
+            for cl in custom_lists
+            if (n := sum(cl.key in r["custom_lists"] for r in rows))
+        ],
         "services": _service_rows(josh_state, josh_offers),
         "countries": _country_rows(josh_state, josh_offers),
         # Watchlist entries win over discovery ones for the same slug: both
@@ -1506,6 +1570,12 @@ _TEMPLATE = """<!DOCTYPE html>
   .modal-card .detail-body h3 { padding-right: 34px; }
   .home-section { margin-bottom: 24px; }
   .home-section-header { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
+  .home-section-subtitle { font-weight: 400; color: var(--text-faint); margin-left: 8px; font-size: 12px; }
+  .film-card.hidden, #filmsListSelect.hidden { display: none; }
+  .home-section-more {
+    margin-top: 10px; background: none; border: 1px solid var(--hairline-strong); color: var(--text);
+    border-radius: 999px; padding: 6px 14px; font-size: 12px; cursor: pointer;
+  }
   .film-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
   .film-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px;
@@ -1932,6 +2002,7 @@ _TEMPLATE = """<!DOCTYPE html>
     <div class="controls" data-view="films" id="controls-films">
       <select id="filmsCountrySelect"></select>
       <select id="filmsGenreSelect"></select>
+      <select id="filmsListSelect"></select>
       <div class="search-wrap">
         <input type="text" id="search" placeholder="Search title, year, director, cast...">
         <span class="search-clear hidden" id="searchClear">✕</span>
@@ -3106,6 +3177,8 @@ document.getElementById('sarahGrid').addEventListener('click', event => {
 document.getElementById('sarahSearch').addEventListener('input', renderSarah);
 wireSearchClear('sarahSearch', 'sarahSearchClear', renderSarah);
 
+const CUSTOM_LIST_PREVIEW = 6;
+
 function renderHome() {
   const container = document.getElementById('homeSections');
   container.innerHTML = '';
@@ -3115,16 +3188,41 @@ function renderHome() {
     const header = document.createElement('h2');
     header.className = 'home-section-header';
     header.textContent = section.header;
+    if (section.subtitle) {
+      const sub = document.createElement('span');
+      sub.className = 'home-section-subtitle';
+      sub.textContent = section.subtitle;
+      header.appendChild(sub);
+    }
     wrap.appendChild(header);
 
     const grid = document.createElement('div');
     grid.className = 'film-cards';
-    section.films.forEach(film => {
+    section.films.forEach((film, i) => {
       const card = filmCardShell(film, '');
       addDismissButton(card, film.slug);
+      // Custom lists carry their whole matching set — show a preview and
+      // let the rest expand in place rather than a wall of cards.
+      if (section.custom_list && i >= CUSTOM_LIST_PREVIEW) card.classList.add('hidden');
       grid.appendChild(card);
     });
     wrap.appendChild(grid);
+
+    if (section.custom_list && section.films.length > CUSTOM_LIST_PREVIEW) {
+      const more = document.createElement('button');
+      more.className = 'home-section-more';
+      const collapsedLabel = 'Show all ' + section.films.length;
+      more.textContent = collapsedLabel;
+      more.addEventListener('click', () => {
+        const expanding = more.textContent === collapsedLabel;
+        grid.querySelectorAll('.film-card').forEach((card, i) => {
+          if (i >= CUSTOM_LIST_PREVIEW) card.classList.toggle('hidden', !expanding);
+        });
+        more.textContent = expanding ? 'Show fewer' : collapsedLabel;
+        if (!expanding) wrap.scrollIntoView({ block: 'start' });
+      });
+      wrap.appendChild(more);
+    }
 
     container.appendChild(wrap);
   });
@@ -4493,6 +4591,7 @@ let filmSortKey = 'title', filmSortDir = 1;
 let activeCountry = null;
 let activeService = null;
 let activeGenre = null;
+let activeList = null;
 const filmsFilterState = { have: true, free: true, could_get_again: true, subscription: true };
 let filmsSarahFilter = 'all';
 let notHaveOnly = false;
@@ -4544,6 +4643,7 @@ function baseFilteredFilms() {
   return DATA.films.filter(row => {
     if (q && !searchHaystack(row).includes(q)) return false;
     if (notHaveOnly && row.have_service) return false;
+    if (activeList && !(row.custom_lists || []).includes(activeList)) return false;
     if (!sarahFilterMatches(row.watch_together_status, filmsSarahFilter)) return false;
     if (activeService && !row.main[activeService]) return false;
     return true;
@@ -4573,6 +4673,32 @@ function updateFilmsGenreSelect(counts) {
     select.appendChild(opt);
   });
   select.value = activeGenre || '';
+}
+
+// Counts are each list's full watchlist membership (static), not narrowed
+// by the other active filters — a list is a fixed set you pick into, not
+// a facet of whatever's currently shown like genre is.
+function renderFilmsListSelect() {
+  const select = document.getElementById('filmsListSelect');
+  const lists = DATA.custom_lists || [];
+  select.classList.toggle('hidden', !lists.length);
+  select.innerHTML = '';
+  const allOpt = document.createElement('option');
+  allOpt.value = '';
+  allOpt.textContent = 'Focus on a list...';
+  select.appendChild(allOpt);
+  lists.forEach(list => {
+    const opt = document.createElement('option');
+    opt.value = list.key;
+    opt.textContent = list.name + ' (' + list.count + ')';
+    select.appendChild(opt);
+  });
+  select.value = activeList || '';
+}
+
+function customListName(key) {
+  const list = (DATA.custom_lists || []).find(l => l.key === key);
+  return list ? list.name : key;
 }
 
 function countryCountsFromRows(rows) {
@@ -4616,7 +4742,7 @@ function renderActiveFilmFilters() {
   container.innerHTML = '';
   const searchVal = document.getElementById('search').value.trim();
   const anyToggleOff = CLASSIFICATIONS.some(k => !filmsFilterState[k]);
-  if (!activeCountry && !activeService && !activeGenre && !searchVal && !notHaveOnly && filmsSarahFilter === 'all' && !anyToggleOff) return;
+  if (!activeCountry && !activeService && !activeGenre && !activeList && !searchVal && !notHaveOnly && filmsSarahFilter === 'all' && !anyToggleOff) return;
   if (activeCountry) {
     const name = (DATA.countryNames && DATA.countryNames[activeCountry]) || activeCountry;
     const chip = document.createElement('span');
@@ -4630,6 +4756,13 @@ function renderActiveFilmFilters() {
     chip.className = 'filter-chip';
     chip.textContent = activeGenre + ' ✕';
     chip.addEventListener('click', () => { activeGenre = null; renderFilms(); });
+    container.appendChild(chip);
+  }
+  if (activeList) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = customListName(activeList) + ' ✕';
+    chip.addEventListener('click', () => { activeList = null; renderFilms(); });
     container.appendChild(chip);
   }
   if (activeService) {
@@ -4682,6 +4815,7 @@ function renderActiveFilmFilters() {
     activeCountry = null;
     activeService = null;
     activeGenre = null;
+    activeList = null;
     document.getElementById('search').value = '';
     document.getElementById('searchClear').classList.add('hidden');
     notHaveOnly = false;
@@ -4708,6 +4842,7 @@ function renderFilmSarahFilter() {
 }
 
 function renderFilms() {
+  renderFilmsListSelect();
   const preGenre = baseFilteredFilms();
   updateFilmsGenreSelect(genreCountsFromRows(preGenre));
   const base = activeGenre ? preGenre.filter(row => (row.genre || []).includes(activeGenre)) : preGenre;
@@ -4849,6 +4984,10 @@ document.getElementById('filmsCountrySelect').addEventListener('change', e => {
 });
 document.getElementById('filmsGenreSelect').addEventListener('change', e => {
   activeGenre = e.target.value || null;
+  renderFilms();
+});
+document.getElementById('filmsListSelect').addEventListener('change', e => {
+  activeList = e.target.value || null;
   renderFilms();
 });
 document.getElementById('filmsSortSelect').addEventListener('change', e => {

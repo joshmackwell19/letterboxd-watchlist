@@ -49,6 +49,7 @@ from .letterboxd import (
     parse_following_page,
     parse_member_ratings_page,
     parse_rated_films_page,
+    parse_tmdb_kind,
 )
 
 # Shrinkage, in "ratings' worth" of pull toward zero: a film with 10 corpus
@@ -70,6 +71,13 @@ BLOCK_COOLDOWN = timedelta(hours=24)
 # Picks outside the watchlist need more neighbours behind them than
 # anything else — they're the ones nothing else vouches for.
 MIN_SUPPORT_PICKS = 5
+# Picks are chosen from this many times as many of the best-predicted
+# films, since some of them will turn out to be TV.
+PICK_POOL = 3
+# A scrape that saved something this recently is taken to still be
+# running, and --taste-recommend leaves Letterboxd alone rather than
+# double the rate the scrape's delays were chosen for.
+SCRAPE_ACTIVE_WINDOW = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -79,15 +87,26 @@ class TasteParams:
     neighbours: int = 100      # how many of the most similar raters predict
     lambda_pred: float = 1.0   # damping toward the baseline when few neighbours rated a film
     min_support: int = 3       # neighbours who rated a film before it gets a prediction at all
+    # What a film's expected rating is measured from: "corpus" (the scraped
+    # members' own shrunk average) or "letterboxd" (its Letterboxd average,
+    # where one is stored — every member's vote rather than a few dozen).
+    baseline: str = "corpus"
 
     @property
     def label(self) -> str:
-        return f"Taste twins ({self.neighbours} nbrs, damping {self.lambda_pred:g})"
+        name = "Letterboxd + twins" if self.baseline == "letterboxd" else "Taste twins"
+        return f"{name} ({self.neighbours} nbrs, damping {self.lambda_pred:g})"
 
 
 DEFAULT_PARAMS = TasteParams()
 EVAL_GRID = [replace(DEFAULT_PARAMS, neighbours=n, lambda_pred=lp)
              for n in (30, 100, 300) for lp in (0.5, 1.0, 2.0)]
+# No 300: it can't differ from 100 until more than 100 raters correlate.
+LETTERBOXD_GRID = [replace(DEFAULT_PARAMS, baseline="letterboxd", neighbours=n, lambda_pred=lp)
+                   for n in (30, 100) for lp in (0.5, 1.0, 2.0)]
+# The corpus-centred taste layer added straight onto the Letterboxd
+# average, kept in the evaluation to show what re-centring is worth.
+SIMPLE_SWAP_LABEL = "Letterboxd + corpus twins (simple swap)"
 
 
 @dataclass(frozen=True)
@@ -154,6 +173,30 @@ def my_residuals(ratings: dict[str, float], film_info: dict[str, tuple], mu: flo
             ids.append(info[0])
             residuals.append(rating - mu - offset - info[1])
     return ids, residuals
+
+
+def letterboxd_offset(ratings: dict[str, float], community: dict[str, float]) -> float:
+    """How far above (or below) the Letterboxd average Josh rates, on the
+    films that have one. Unshrunk: it's measured over hundreds of films."""
+    diffs = [r - community[slug] for slug, r in ratings.items() if slug in community]
+    return sum(diffs) / len(diffs) if diffs else 0.0
+
+
+def letterboxd_residuals(ratings: dict[str, float], film_info: dict[str, tuple], community: dict[str, float],
+                         offset: float) -> tuple[list[int], list[float], list[float]]:
+    """(film ids, residuals, Letterboxd averages) for the rated films the
+    corpus knows that have a Letterboxd average — my_residuals measured
+    from that average instead of the corpus's estimate of it."""
+    ids: list[int] = []
+    residuals: list[float] = []
+    means: list[float] = []
+    for slug, rating in ratings.items():
+        info = film_info.get(slug)
+        if info is not None and slug in community:
+            ids.append(info[0])
+            residuals.append(rating - community[slug] - offset)
+            means.append(community[slug])
+    return ids, residuals, means
 
 
 def select_neighbours(similarities: list[tuple[int, str, int, float]], params: TasteParams) -> list[Neighbour]:
@@ -424,45 +467,91 @@ def _screened_slugs(conn) -> set[str]:
     return {slug for slug, _, _ in db.screened_pages(conn)}
 
 
+def _neighbour_offsets(conn, similarities: list[tuple[int, str, int, float]], cfg: TasteParams, mu: float,
+                       target_ids: list[int], film_means: dict[int, float] | None = None) -> dict[int, dict]:
+    """film id -> db.rater_predictions row, for the targets enough of
+    `cfg`'s neighbours rated."""
+    neighbours = select_neighbours(similarities, cfg)
+    if not neighbours:
+        return {}
+    rows = db.rater_predictions(
+        conn, [n.rater_id for n in neighbours], [n.weight for n in neighbours], mu=mu,
+        lambda_pred=cfg.lambda_pred, min_support=cfg.min_support, target_film_ids=target_ids,
+        film_means=film_means, lambda_rater=LAMBDA_RATER,
+    )
+    return {row["film_id"]: row for row in rows}
+
+
 def _evaluate_split(conn, train: dict[str, float], test: list[str], actual: dict[str, float],
                     film_info: dict[str, tuple], community: dict[str, float], mu: float,
-                    configs: list[TasteParams]) -> tuple[dict[str, list[tuple[float, float]]], dict[str, int], int]:
+                    configs: list[TasteParams], screened: set[str]
+                    ) -> tuple[dict[str, list[tuple[float, float]]], dict[str, int], dict[str, int]]:
     """(method -> [(predicted, actual)], method -> films the CF layer
-    covered, raters who qualified as similar) for one train/test split."""
+    covered, baseline -> raters who qualified as similar) for one
+    train/test split."""
     film_bias = {slug: info[1] for slug, info in film_info.items()}
     offset = my_offset(train, film_bias, mu)
     train_mean = sum(train.values()) / len(train)
-    community_diffs = [r - community[s] for s, r in train.items() if s in community]
-    community_offset = sum(community_diffs) / len(community_diffs) if community_diffs else 0.0
+    lb_offset = letterboxd_offset(train, community)
+    # The taste layers built on the Letterboxd average fall back exactly as
+    # the plain baseline does where there's no average, so any difference
+    # between them is the taste layer's doing.
+    lb_base = {s: community[s] + lb_offset if s in community else train_mean for s in test}
+
+    def on_letterboxd(s: str, by_id: dict[int, dict]) -> float:
+        row = by_id.get(film_info[s][0]) if s in community else None
+        return clamp_rating(lb_base[s] + row["nb_offset"] if row else lb_base[s])
 
     pairs: dict[str, list[tuple[float, float]]] = {
         "Your average": [(train_mean, actual[s]) for s in test],
-        "Letterboxd average + your offset": [
-            (clamp_rating(community[s] + community_offset) if s in community else train_mean, actual[s])
-            for s in test],
+        "Letterboxd average + your offset": [(clamp_rating(lb_base[s]), actual[s]) for s in test],
         "Corpus consensus + your offset": [(clamp_rating(mu + offset + film_bias[s]), actual[s]) for s in test],
     }
     coverage: dict[str, int] = {}
-
-    ids, residuals = my_residuals(train, film_info, mu, offset)
-    params = configs[0]
-    similarities = db.rater_similarities(conn, ids, residuals, mu=mu, min_overlap=params.min_overlap)
+    similar: dict[str, int] = {}
     target_ids = [film_info[s][0] for s in test]
-    for cfg in configs:
-        neighbours = select_neighbours(similarities, cfg)
-        rows = db.rater_predictions(
-            conn, [n.rater_id for n in neighbours], [n.weight for n in neighbours], mu=mu,
-            lambda_pred=cfg.lambda_pred, min_support=cfg.min_support, target_film_ids=target_ids,
-        ) if neighbours else []
-        by_id = {row["film_id"]: row for row in rows}
-        method_pairs = []
-        for s in test:
-            row = by_id.get(film_info[s][0])
-            base = mu + offset + film_bias[s]
-            method_pairs.append((clamp_rating(base + row["nb_offset"] if row else base), actual[s]))
-        pairs[cfg.label] = method_pairs
-        coverage[cfg.label] = len(by_id)
-    return pairs, coverage, len(similarities)
+
+    corpus_configs = [c for c in configs if c.baseline == "corpus"]
+    if corpus_configs:
+        ids, residuals = my_residuals(train, film_info, mu, offset)
+        similarities = db.rater_similarities(conn, ids, residuals, mu=mu,
+                                             min_overlap=corpus_configs[0].min_overlap)
+        similar["corpus"] = len(similarities)
+        default_rows = None
+        for cfg in corpus_configs:
+            by_id = _neighbour_offsets(conn, similarities, cfg, mu, target_ids)
+            method_pairs = []
+            for s in test:
+                row = by_id.get(film_info[s][0])
+                base = mu + offset + film_bias[s]
+                method_pairs.append((clamp_rating(base + row["nb_offset"] if row else base), actual[s]))
+            pairs[cfg.label] = method_pairs
+            coverage[cfg.label] = len(by_id)
+            if cfg == DEFAULT_PARAMS:
+                default_rows = by_id
+        if default_rows is not None:
+            pairs[SIMPLE_SWAP_LABEL] = [(on_letterboxd(s, default_rows), actual[s]) for s in test]
+            coverage[SIMPLE_SWAP_LABEL] = sum(1 for s in test if s in community and film_info[s][0] in default_rows)
+
+    letterboxd_configs = [c for c in configs if c.baseline == "letterboxd"]
+    if letterboxd_configs:
+        ids, residuals, means = letterboxd_residuals(train, film_info, community, lb_offset)
+        similarities = db.rater_similarities(conn, ids, residuals, mu=mu,
+                                             min_overlap=letterboxd_configs[0].min_overlap, film_means=means)
+        similar["letterboxd"] = len(similarities)
+        # A neighbour's offset from Letterboxd is measured over these:
+        # held-out films included (an average is public knowledge, not
+        # Josh's held-out rating), screened films not — the raters were
+        # recruited for giving Josh's exact rating there, which would pull
+        # their offsets toward his. Screened films are never test targets,
+        # so no target loses its average.
+        film_means = {film_info[s][0]: community[s] for s in actual
+                      if s in film_info and s in community and s not in screened}
+        for cfg in letterboxd_configs:
+            by_id = _neighbour_offsets(conn, similarities, cfg, mu, target_ids, film_means)
+            pairs[cfg.label] = [(on_letterboxd(s, by_id), actual[s]) for s in test]
+            coverage[cfg.label] = sum(1 for s in test if s in community and film_info[s][0] in by_id)
+    return pairs, coverage, similar
 
 
 def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], watched_dates: dict[str, str | None],
@@ -471,7 +560,7 @@ def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], wa
     score every method on the same films. Films used for screening are
     never held out: their candidates were found *because* they gave Josh's
     exact rating, so predicting them back would flatter the engine."""
-    configs = configs or [DEFAULT_PARAMS, *[c for c in EVAL_GRID if c != DEFAULT_PARAMS]]
+    configs = configs or [DEFAULT_PARAMS, *[c for c in EVAL_GRID if c != DEFAULT_PARAMS], *LETTERBOXD_GRID]
     mu = _ensure_mu(conn)
     if mu is None:
         raise ValueError("the rater corpus is empty — run --scrape-raters first")
@@ -490,15 +579,16 @@ def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], wa
     for name, test_sets in splits:
         pooled: dict[str, list[tuple[float, float]]] = {}
         covered: Counter = Counter()
-        similar_counts = []
+        similar_counts: dict[str, list[int]] = {}
         for test_set in test_sets:
             train = {s: r for s, r in my_ratings.items() if s not in test_set}
             pairs, coverage, similar = _evaluate_split(conn, train, sorted(test_set), my_ratings, film_info,
-                                                       community, mu, configs)
+                                                       community, mu, configs, screened)
             for method, method_pairs in pairs.items():
                 pooled.setdefault(method, []).extend(method_pairs)
             covered.update(coverage)
-            similar_counts.append(similar)
+            for baseline, count in similar.items():
+                similar_counts.setdefault(baseline, []).append(count)
         total = sum(len(t) for t in test_sets)
         methods = []
         for method, method_pairs in pooled.items():
@@ -507,7 +597,8 @@ def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], wa
                 "spearman": spearman(method_pairs), "top_mean": top_share_mean(method_pairs),
                 "coverage": covered[method] / total if method in covered else None,
             })
-        results.append({"split": name, "films": total, "similar_raters": min(similar_counts),
+        results.append({"split": name, "films": total,
+                        "similar_raters": {baseline: min(counts) for baseline, counts in similar_counts.items()},
                         "actual_mean": sum(my_ratings[s] for t in test_sets for s in t) / total,
                         "methods": methods})
     return {"rated": len(my_ratings), "testable": len(testable), "screened_excluded": len(screened & set(my_ratings)),
@@ -519,8 +610,12 @@ def render_evaluation(report: dict) -> str:
              f"(the corpus has the film, and it wasn't used for screening — "
              f"{report['screened_excluded']} were).", ""]
     for split in report["splits"]:
+        similar = split["similar_raters"]
+        similar_text = f"{similar.get('corpus', 0)} raters correlate with you"
+        if "letterboxd" in similar:
+            similar_text += f" ({similar['letterboxd']} measured against Letterboxd averages)"
         lines.append(f"{split['split']} — {split['films']:,} films, you rated them {split['actual_mean']:.2f}★ "
-                     f"on average; {split['similar_raters']} raters correlate with you.")
+                     f"on average; {similar_text}.")
         lines.append(f"  {'':44} {'RMSE':>6} {'MAE':>6} {'Spearman':>9} {'Top-10%':>8} {'Covered':>8}")
         for m in split["methods"]:
             spearman_text = f"{m['spearman']:.3f}" if m["spearman"] is not None else "—"
@@ -532,16 +627,107 @@ def render_evaluation(report: dict) -> str:
         "RMSE/MAE: typical error in stars (lower is better). Spearman: how well the ranking matches yours",
         "(1 is perfect). Top-10%: what you actually rated the films each method ranked highest — the number",
         "that matters for recommendations. Covered: films with enough neighbour ratings for the taste layer;",
-        "the rest fall back to corpus consensus. The engine earns its keep only if it beats",
-        "'Letterboxd average + your offset'.",
+        "the rest fall back to their baseline. 'Letterboxd + twins' measures everyone's ratings",
+        "from each film's Letterboxd average rather than the corpus's own estimate of it; the simple",
+        "swap adds the corpus-measured taste layer to the Letterboxd average unchanged. The engine",
+        "earns its keep only if it beats 'Letterboxd average + your offset'.",
     ]
     return "\n".join(lines)
 
 
+def films_only(rows: list[dict], picks: int, kind_of) -> tuple[list[dict], int]:
+    """The first `picks` of `rows` that are neither TV nor gone from
+    Letterboxd, and how many TV shows were passed over on the way.
+    `kind_of(row)` is only asked about rows that could still make the cut,
+    so a lookup that costs a request per film stops as soon as there are
+    enough. A row it can't answer for (None) is kept, not guessed at."""
+    kept: list[dict] = []
+    skipped = 0
+    for row in rows:
+        if len(kept) >= picks:
+            break
+        kind = kind_of(row)
+        if kind == "tv":
+            skipped += 1
+        elif kind != "gone":
+            kept.append(row)
+    return kept, skipped
+
+
+def scrape_looks_active(last_activity: str | None, now: datetime) -> bool:
+    return last_activity is not None and now - datetime.fromisoformat(last_activity) < SCRAPE_ACTIVE_WINDOW
+
+
+class FilmKindLookup:
+    """kind_of for films_only: a film's stored kind where it has one,
+    otherwise its /film/<slug>/ page's TMDB link ("movie"/"tv"; "gone" for
+    a 404), fetched through the same PoliteFetcher as the scrape. Each
+    answer goes to `save` as soon as it's known, and a block to `on_block`
+    the moment it happens, so a Ctrl-C or a dropped connection loses at
+    most the page in flight. Fetching stops at the first block or failure,
+    when `still_clear()` says another run has hit a block meanwhile, or at
+    a page with no TMDB link — every film page has one, so that's the
+    parser failing (Letterboxd's markup changing), not an answer, and it
+    isn't stored. `stopped` says why; anything unchecked is kept."""
+
+    def __init__(self, fetcher: PoliteFetcher | None, log=print, *, save=lambda film_id, kind: None,
+                 on_block=lambda: None, still_clear=lambda: True):
+        self.fetcher = fetcher
+        self.found: dict[int, str] = {}
+        self.stopped: str | None = None
+        self._log = log
+        self._save = save
+        self._on_block = on_block
+        self._still_clear = still_clear
+
+    def __call__(self, row: dict) -> str | None:
+        if row.get("tmdb_kind"):
+            return row["tmdb_kind"]
+        if row["film_id"] in self.found:
+            return self.found[row["film_id"]]
+        if self.fetcher is None or self.stopped:
+            return None
+        if not self._still_clear():
+            self.stopped = "cooldown"
+            self._log("Stopped checking picks for TV — Letterboxd has blocked another run meanwhile.")
+            return None
+        try:
+            html = self.fetcher.get(f"https://letterboxd.com/film/{row['slug']}/")
+        except LetterboxdBlockedError as exc:
+            self.stopped = "blocked"
+            self._on_block()
+            self._log(f"Stopped checking picks for TV — Letterboxd is refusing requests ({exc}).")
+            return None
+        except (LetterboxdFetchError, RequestBudgetExhausted) as exc:
+            self.stopped = "failed"
+            self._log(f"Stopped checking picks for TV ({str(exc) or 'request cap reached'}).")
+            return None
+        if html is None:
+            kind = "gone"
+        else:
+            kind = parse_tmdb_kind(html)
+            if kind is None:
+                self.stopped = "failed"
+                self._log(f"Stopped checking picks for TV — /film/{row['slug']}/ has no TMDB link the parser "
+                          f"recognises (has Letterboxd's markup changed?).")
+                return None
+        self.found[row["film_id"]] = kind
+        self._save(row["film_id"], kind)
+        if len(self.found) % 10 == 0:
+            self._log(f"Checked {len(self.found)} picks for TV ({self.fetcher.requests} requests so far).")
+        return kind
+
+
 def recommend(conn, my_ratings: dict[str, float], seen: set[str], watchlist: set[str], *,
-              params: TasteParams = DEFAULT_PARAMS, picks: int = 40) -> dict:
+              params: TasteParams = DEFAULT_PARAMS, picks: int = 40, fetcher: PoliteFetcher | None = None,
+              log=print, now=lambda: datetime.now(timezone.utc)) -> dict:
     """Neighbours, the best-predicted films Josh hasn't seen and hasn't
-    watchlisted, and his watchlist ranked by prediction."""
+    watchlisted, and his watchlist ranked by prediction. Letterboxd lists
+    TV alongside films, so with a `fetcher` each pick not already known to
+    be a film is checked on its film page first — once ever, the answer is
+    stored — and TV is left out. Not while a block's cooldown is running
+    or a scrape looks active, and a block met here starts one, as it would
+    for the scrape."""
     mu = _ensure_mu(conn)
     if mu is None:
         raise ValueError("the rater corpus is empty — run --scrape-raters first")
@@ -563,15 +749,32 @@ def recommend(conn, my_ratings: dict[str, float], seen: set[str], watchlist: set
         return rows
 
     excluded = [film_info[s][0] for s in seen | watchlist | set(my_ratings) if s in film_info]
-    top = with_prediction(db.rater_predictions(
+    pool = with_prediction(db.rater_predictions(
         conn, nb_ids, weights, mu=mu, lambda_pred=params.lambda_pred,
-        min_support=max(params.min_support, MIN_SUPPORT_PICKS), exclude_film_ids=excluded, limit=picks))
+        min_support=max(params.min_support, MIN_SUPPORT_PICKS), exclude_film_ids=excluded,
+        limit=picks * PICK_POOL))
+    def still_clear() -> bool:
+        return _cooldown_remaining(db.taste_meta_get(conn, "blocked_at"), now()) is None
+
+    if fetcher is not None and not still_clear():
+        log("Letterboxd blocked a recent run — not checking picks for TV until the cooldown ends.")
+        fetcher = None
+    elif fetcher is not None and scrape_looks_active(db.latest_scrape_activity(conn), now()):
+        log("A --scrape-raters run looks active — not checking picks for TV alongside it.")
+        fetcher = None
+    lookup = FilmKindLookup(
+        fetcher, log, save=lambda film_id, kind: db.set_rater_film_kinds(conn, {film_id: kind}),
+        on_block=lambda: db.taste_meta_set(conn, "blocked_at", now().isoformat()), still_clear=still_clear)
+    if fetcher is not None and any(not row.get("tmdb_kind") for row in pool[:picks]):
+        log("Checking new picks for TV on Letterboxd (a film page every few seconds)...")
+    top, tv_skipped = films_only(pool, picks, lookup)
     watchlist_ids = [film_info[s][0] for s in watchlist if s in film_info]
     ranked_watchlist = with_prediction(db.rater_predictions(
         conn, nb_ids, weights, mu=mu, lambda_pred=params.lambda_pred, min_support=params.min_support,
         target_film_ids=watchlist_ids)) if watchlist_ids else []
     return {"neighbours": neighbours, "picks": top, "watchlist": ranked_watchlist,
-            "watchlist_unscored": len(watchlist) - len(ranked_watchlist)}
+            "watchlist_unscored": len(watchlist) - len(ranked_watchlist), "tv_skipped": tv_skipped,
+            "picks_unchecked": sum(1 for row in top if lookup(row) is None)}
 
 
 def render_recommendations(result: dict, *, show_neighbours: int = 15, show_watchlist: int = 30) -> str:
@@ -584,6 +787,10 @@ def render_recommendations(result: dict, *, show_neighbours: int = 15, show_watc
     for row in result["picks"]:
         lines.append(f"  {row['predicted']:.1f}★  {row['name'] or row['slug']:55} "
                      f"{row['support']:3} matches rated it, avg {row['neighbour_mean']:.1f}★")
+    if result.get("tv_skipped"):
+        lines.append(f"  ({result['tv_skipped']} TV shows left out.)")
+    if result.get("picks_unchecked"):
+        lines.append(f"  ({result['picks_unchecked']} of these couldn't be checked for TV this time.)")
     lines += ["", "Your watchlist, best predicted first:"]
     for row in result["watchlist"][:show_watchlist]:
         lines.append(f"  {row['predicted']:.1f}★  {row['name'] or row['slug']:55} "

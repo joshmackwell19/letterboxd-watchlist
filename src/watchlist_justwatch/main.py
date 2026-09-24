@@ -767,17 +767,18 @@ def main() -> None:
     parser.add_argument("--max-raters", type=int, default=600,
                          help="--scrape-raters: most candidates to scrape this run (~12 requests each)")
     parser.add_argument("--request-delay", type=float, default=2.5,
-                         help="--scrape-raters: minimum seconds between requests (randomised up to 1.8x, "
+                         help="--scrape-raters/--taste-recommend: minimum seconds between requests (randomised up to 1.8x, "
                               "plus a longer pause every 100)")
     parser.add_argument("--max-requests", type=int, default=10000,
-                         help="--scrape-raters: hard cap on requests in one run")
+                         help="--scrape-raters/--taste-recommend: hard cap on requests in one run")
     parser.add_argument("--taste-eval", action="store_true",
                          help="Taste engine: hold out some of your ratings, predict them from the rest, "
                               "and compare against simpler predictions (network-free apart from the "
                               "database; the corpus is aggregated server-side), then exit")
     parser.add_argument("--taste-recommend", action="store_true",
                          help="Taste engine: print your closest taste matches, the best-predicted films "
-                              "you haven't seen, and your watchlist ranked by predicted rating, then exit")
+                              "you haven't seen (leaving out TV — a pick's film page is checked the first "
+                              "time it's suggested), and your watchlist ranked by predicted rating, then exit")
     args = parser.parse_args()
 
     if not args.database_url:
@@ -1069,7 +1070,11 @@ def main() -> None:
                                       {slug: entry["watched_date"] for slug, entry in diary.items()})
                     print(render_evaluation(report))
                 if args.taste_recommend:
-                    print(render_recommendations(recommend(conn, my_ratings, set(diary), watchlist)))
+                    # Checks each pick's film page for TV the first time it's suggested
+                    # (film pages, unlike /films/ grids, load fine from anywhere).
+                    fetcher = PoliteFetcher(delay_seconds=args.request_delay, max_requests=args.max_requests)
+                    print(render_recommendations(recommend(conn, my_ratings, set(diary), watchlist,
+                                                           fetcher=fetcher)))
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)

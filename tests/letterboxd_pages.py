@@ -50,6 +50,16 @@ def following_page(people: list[tuple[str, int]], *, next_href: str | None = Non
     return f'<table class="person-table"><tbody>{"".join(rows)}</tbody></table>{_pagination(next_href)}'
 
 
+def film_page(tmdb_kind: str | None) -> str:
+    """The IMDb/TMDB buttons from a /film/<slug>/ page, with the body's
+    data-tmdb-type saying "movie" whatever the film is, as the live site's does."""
+    tmdb = (f'<a href="https://www.themoviedb.org/{tmdb_kind}/84958/" class="micro-button track-event" '
+            f'data-track-action="TMDB" target="_blank" >TMDB</a>' if tmdb_kind else "")
+    return (f'<body class="film backdropped" data-tmdb-type="movie" data-tmdb-id="84958"> '
+            f'<p class="text-link text-footer"> <a href="http://www.imdb.com/title/tt9140554/maindetails" '
+            f'class="micro-button track-event" data-track-action="IMDb" target="_blank" >IMDb</a> {tmdb} </p></body>')
+
+
 CHALLENGE_PAGE = ('<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>'
                   '<meta http-equiv="refresh" content="360"></head><body></body></html>')
 

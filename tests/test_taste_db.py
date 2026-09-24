@@ -159,6 +159,49 @@ def test_recommend_finds_the_twin_and_follows_their_taste(conn):
     assert result["picks"] == []
 
 
+def _ids(conn, table: str, column: str, *names: str) -> dict[str, int]:
+    return dict(conn.execute(f"SELECT {column}, id FROM {table} WHERE {column} = ANY(%s)", (list(names),)).fetchall())
+
+
+def test_letterboxd_centred_similarity_ignores_the_corpus_view_of_each_film(conn):
+    # x rates a and b a star above their Letterboxd averages and c at its
+    # average (residuals 1, 1, 0) — exactly the shape of Josh's residuals.
+    _save(conn, "x", {"a": 8, "b": 10, "c": 4})
+    db.refresh_rater_baselines(conn, lambda_film=10, lambda_rater=10, now_iso=NOW.isoformat())
+    films = _ids(conn, "rater_films", "slug", "a", "b", "c")
+    film_ids = [films[s] for s in ("a", "b", "c")]
+    mine = [0.4, 0.4, -0.6]
+    mu = db.taste_meta_get(conn, "mu")
+
+    centred = db.rater_similarities(conn, film_ids, mine, mu=mu, min_overlap=3, film_means=[3.0, 4.0, 2.0])
+    assert [(username, overlap) for _, username, overlap, _ in centred] == [("x", 3)]
+    assert centred[0][3] == pytest.approx(1.0)
+    # Measured from the corpus's own (one-rater) view of the films instead,
+    # x's raw ratings leak through and the match is no longer exact.
+    (uncentred,) = db.rater_similarities(conn, film_ids, mine, mu=mu, min_overlap=3)
+    assert uncentred[3] < 0.99
+
+
+def test_letterboxd_centred_predictions_measure_each_neighbour_from_the_average(conn):
+    _save(conn, "x", {"a": 8, "b": 8, "c": 6, "no-average": 10})
+    db.refresh_rater_baselines(conn, lambda_film=10, lambda_rater=10, now_iso=NOW.isoformat())
+    films = _ids(conn, "rater_films", "slug", "a", "b", "c", "no-average")
+    x = _ids(conn, "raters", "username", "x")["x"]
+    mu = db.taste_meta_get(conn, "mu")
+
+    rows = db.rater_predictions(conn, [x], [1.0], mu=mu, lambda_pred=0, min_support=1,
+                                target_film_ids=[films["c"], films["no-average"]],
+                                film_means={films["a"]: 3.0, films["b"]: 4.0, films["c"]: 2.0}, lambda_rater=0)
+    by_slug = {row["slug"]: row for row in rows}
+    # x rates a, b and c 1, 0 and 1 star above their averages — an offset of
+    # 2/3 — which leaves c a third of a star above x's generosity alone.
+    assert by_slug["c"]["nb_offset"] == pytest.approx(1 / 3)
+    # A film with no average keeps the corpus-centred residual.
+    (rater_bias,) = conn.execute("SELECT bias FROM raters WHERE id = %s", (x,)).fetchone()
+    (film_bias,) = conn.execute("SELECT bias FROM rater_films WHERE id = %s", (films["no-average"],)).fetchone()
+    assert by_slug["no-average"]["nb_offset"] == pytest.approx(5.0 - mu - rater_bias - film_bias, abs=1e-5)
+
+
 def test_scoring_refreshes_baselines_a_dead_scrape_left_stale(conn):
     _save(conn, "alice", {"a": 10, "b": 2})
     db.refresh_rater_baselines(conn, lambda_film=0, lambda_rater=0, now_iso=NOW.isoformat())

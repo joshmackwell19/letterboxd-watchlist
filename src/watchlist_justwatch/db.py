@@ -127,6 +127,10 @@ CREATE TABLE IF NOT EXISTS rater_films (
     rating_count INTEGER NOT NULL DEFAULT 0,
     bias REAL NOT NULL DEFAULT 0
 );
+-- "movie" / "tv" from the film page's TMDB link, "gone" for a page that
+-- 404s, NULL until checked — see taste.recommend, which checks lazily and
+-- only for the films it's about to suggest.
+ALTER TABLE rater_films ADD COLUMN IF NOT EXISTS tmdb_kind TEXT;
 CREATE TABLE IF NOT EXISTS rater_ratings (
     rater_id INTEGER NOT NULL REFERENCES raters(id) ON DELETE CASCADE,
     film_id INTEGER NOT NULL REFERENCES rater_films(id),
@@ -633,6 +637,15 @@ def refresh_rater_baselines(conn: psycopg.Connection, *, lambda_film: float, lam
     return mu
 
 
+def latest_scrape_activity(conn: psycopg.Connection) -> str | None:
+    """When --scrape-raters last finished anything (a member, whatever
+    their status, or a screening page) — a heartbeat, so another command
+    about to request Letterboxd pages can tell a scrape is running."""
+    return conn.execute(
+        "SELECT greatest((SELECT max(scraped_at) FROM raters), (SELECT max(fetched_at) FROM rater_screened))"
+    ).fetchone()[0]
+
+
 def latest_rater_scrape(conn: psycopg.Connection) -> str | None:
     return conn.execute("SELECT max(scraped_at) FROM raters WHERE status = 'scraped'").fetchone()[0]
 
@@ -657,27 +670,32 @@ def rater_film_lookup(conn: psycopg.Connection, slugs: list[str]) -> dict[str, t
 
 
 def rater_similarities(conn: psycopg.Connection, film_ids: list[int], residuals: list[float], *,
-                       mu: float, min_overlap: int) -> list[tuple[int, str, int, float]]:
+                       mu: float, min_overlap: int,
+                       film_means: list[float] | None = None) -> list[tuple[int, str, int, float]]:
     """(rater id, username, films shared, Pearson correlation) for every
     rater who shares at least `min_overlap` rated films with the given
     residuals and correlates positively with them. The correlation is of
     residuals on both sides — each rating minus the global mean, the
     rater's own offset and the film's offset — so agreeing that a
     universally loved film is great counts for nothing, and agreeing that
-    it's overrated counts for a lot. One aggregate over the corpus; only
-    the per-rater result comes back."""
+    it's overrated counts for a lot. `film_means` (aligned with `film_ids`)
+    centres the rater's side on each film's Letterboxd average instead of
+    the corpus's own estimate of it, to match residuals measured the same
+    way. One aggregate over the corpus; only the per-rater result comes
+    back."""
     rows = conn.execute(
         "SELECT * FROM ("
         "  SELECT r.rater_id, u.username, count(*) AS overlap,"
-        "         corr(me.z, r.rating / 2.0 - %(mu)s - u.bias - f.bias) AS pearson"
-        "  FROM unnest(%(ids)s::int[], %(z)s::real[]) AS me(film_id, z)"
+        "         corr(me.z, r.rating / 2.0 - coalesce(me.m, %(mu)s + f.bias) - u.bias) AS pearson"
+        "  FROM unnest(%(ids)s::int[], %(z)s::real[], %(m)s::real[]) AS me(film_id, z, m)"
         "  JOIN rater_ratings r ON r.film_id = me.film_id"
         "  JOIN raters u ON u.id = r.rater_id"
         "  JOIN rater_films f ON f.id = r.film_id"
         "  GROUP BY r.rater_id, u.username"
         "  HAVING count(*) >= %(min_overlap)s"
         ") s WHERE pearson > 0",
-        {"ids": film_ids, "z": residuals, "mu": mu, "min_overlap": min_overlap},
+        {"ids": film_ids, "z": residuals, "m": film_means if film_means is not None else [None] * len(film_ids),
+         "mu": mu, "min_overlap": min_overlap},
     ).fetchall()
     return [(rater_id, username, overlap, float(pearson)) for rater_id, username, overlap, pearson in rows]
 
@@ -685,31 +703,64 @@ def rater_similarities(conn: psycopg.Connection, film_ids: list[int], residuals:
 def rater_predictions(conn: psycopg.Connection, neighbour_ids: list[int], weights: list[float], *,
                       mu: float, lambda_pred: float, min_support: int,
                       target_film_ids: list[int] | None = None, exclude_film_ids: list[int] | None = None,
-                      limit: int | None = None) -> list[dict]:
+                      limit: int | None = None, film_means: dict[int, float] | None = None,
+                      lambda_rater: float = 0.0) -> list[dict]:
     """Per film the neighbours rated: the film's offset, and the
     weight-averaged residual of the neighbours who rated it — shrunk toward
     zero by `lambda_pred` in the denominator, so a film two neighbours
     loved moves the prediction less than one twenty did. Restricted to
-    `target_film_ids` when given, never `exclude_film_ids`, best first."""
+    `target_film_ids` when given, never `exclude_film_ids`, best first.
+
+    `film_means` (film id -> Letterboxd average) re-centres the residuals
+    of the films it covers on that average, and each neighbour's own
+    offset on how they rate those films against it (shrunk by
+    `lambda_rater`, like refresh_rater_baselines) — so that the result can
+    go on top of the Letterboxd average. Left on the corpus's own
+    estimate, a residual would still carry whatever of the film's quality
+    its heavily shrunk corpus offset missed, and count it twice."""
+    means = film_means or {}
     rows = conn.execute(
+        "WITH lb AS (SELECT * FROM unnest(%(lb_ids)s::int[], %(lb_means)s::real[]) AS lb(film_id, m)),"
+        "     nb AS (SELECT * FROM unnest(%(ids)s::int[], %(w)s::real[]) AS nb(rater_id, w)),"
+        "     nb_lb AS ("
+        "       SELECT r.rater_id, sum(r.rating / 2.0 - lb.m) / (count(*) + %(lam_rater)s) AS b"
+        "       FROM nb JOIN rater_ratings r ON r.rater_id = nb.rater_id JOIN lb ON lb.film_id = r.film_id"
+        "       GROUP BY r.rater_id"
+        "     )"
         "SELECT * FROM ("
-        "  SELECT f.id, f.slug, f.name, f.bias, count(*) AS support,"
-        "         sum(nb.w * (r.rating / 2.0 - %(mu)s - u.bias - f.bias)) / (sum(nb.w) + %(lam)s) AS nb_offset,"
+        "  SELECT f.id, f.slug, f.name, f.bias, f.tmdb_kind, count(*) AS support,"
+        "         sum(nb.w * (r.rating / 2.0 - CASE WHEN lb.m IS NULL THEN %(mu)s + u.bias + f.bias"
+        "                                          ELSE lb.m + coalesce(nb_lb.b, 0) END))"
+        "           / (sum(nb.w) + %(lam)s) AS nb_offset,"
         "         avg(r.rating) / 2.0 AS neighbour_mean"
-        "  FROM unnest(%(ids)s::int[], %(w)s::real[]) AS nb(rater_id, w)"
+        "  FROM nb"
         "  JOIN rater_ratings r ON r.rater_id = nb.rater_id"
         "  JOIN raters u ON u.id = nb.rater_id"
         "  JOIN rater_films f ON f.id = r.film_id"
+        "  LEFT JOIN lb ON lb.film_id = f.id"
+        "  LEFT JOIN nb_lb ON nb_lb.rater_id = nb.rater_id"
         "  WHERE (%(targets)s::int[] IS NULL OR f.id = ANY(%(targets)s::int[]))"
         "    AND NOT (f.id = ANY(%(exclude)s::int[]))"
         "  GROUP BY f.id"
         "  HAVING count(*) >= %(min_support)s"
         ") s ORDER BY bias + nb_offset DESC LIMIT %(limit)s",
         {"ids": neighbour_ids, "w": weights, "mu": mu, "lam": lambda_pred, "min_support": min_support,
-         "targets": target_film_ids, "exclude": exclude_film_ids or [], "limit": limit},
+         "targets": target_film_ids, "exclude": exclude_film_ids or [], "limit": limit,
+         "lb_ids": list(means), "lb_means": list(means.values()), "lam_rater": lambda_rater},
     ).fetchall()
     return [
-        {"film_id": film_id, "slug": slug, "name": name, "bias": float(bias), "support": support,
-         "nb_offset": float(nb_offset), "neighbour_mean": float(neighbour_mean)}
-        for film_id, slug, name, bias, support, nb_offset, neighbour_mean in rows
+        {"film_id": film_id, "slug": slug, "name": name, "bias": float(bias), "tmdb_kind": tmdb_kind,
+         "support": support, "nb_offset": float(nb_offset), "neighbour_mean": float(neighbour_mean)}
+        for film_id, slug, name, bias, tmdb_kind, support, nb_offset, neighbour_mean in rows
     ]
+
+
+def set_rater_film_kinds(conn: psycopg.Connection, kinds: dict[int, str]) -> None:
+    """Records what taste.recommend found out (film id -> "movie"/"tv"/
+    "gone"), so each film's page is only ever checked once."""
+    if kinds:
+        conn.execute(
+            "UPDATE rater_films f SET tmdb_kind = k.kind "
+            "FROM unnest(%s::int[], %s::text[]) AS k(id, kind) WHERE f.id = k.id",
+            (list(kinds), list(kinds.values())),
+        )

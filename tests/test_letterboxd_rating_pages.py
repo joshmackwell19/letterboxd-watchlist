@@ -1,6 +1,6 @@
 import pytest
 
-from tests.letterboxd_pages import CHALLENGE_PAGE, following_page, grid_page, members_page
+from tests.letterboxd_pages import CHALLENGE_PAGE, film_page, following_page, grid_page, members_page
 from watchlist_justwatch.letterboxd import (
     LetterboxdBlockedError,
     LetterboxdFetchError,
@@ -8,6 +8,7 @@ from watchlist_justwatch.letterboxd import (
     parse_following_page,
     parse_member_ratings_page,
     parse_rated_films_page,
+    parse_tmdb_kind,
 )
 
 
@@ -71,6 +72,15 @@ def test_strict_fetch_stops_on_a_block_without_retrying(status):
 def test_strict_fetch_treats_a_challenge_page_as_a_block_even_on_200():
     with pytest.raises(LetterboxdBlockedError):
         fetch_page_strict(_Session(_Response(200, CHALLENGE_PAGE)), "u", sleep=lambda s: None)
+
+
+@pytest.mark.parametrize("kind", ["movie", "tv"])
+def test_tmdb_kind_comes_from_the_tmdb_button_not_the_body_attribute(kind):
+    assert parse_tmdb_kind(film_page(kind)) == kind
+
+
+def test_tmdb_kind_without_a_tmdb_button():
+    assert parse_tmdb_kind(film_page(None)) is None
 
 
 def test_strict_fetch_404_is_none():

@@ -1,15 +1,23 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from tests.letterboxd_pages import grid_page
+from tests.letterboxd_pages import film_page, grid_page
+from watchlist_justwatch.letterboxd import LetterboxdBlockedError
 from watchlist_justwatch.taste import (
+    FilmKindLookup,
     PoliteFetcher,
     RequestBudgetExhausted,
     TasteParams,
     choose_screening_films,
+    films_only,
     kfold,
+    letterboxd_offset,
+    letterboxd_residuals,
     my_offset,
     my_residuals,
     recent_holdout,
+    scrape_looks_active,
     scrape_profile,
     screen_hits,
     select_neighbours,
@@ -58,6 +66,29 @@ def test_my_offset_and_residuals_line_up_with_film_offsets():
     ids, residuals = my_residuals(ratings, film_info, mu=3.0, offset=offset)
     assert ids == [10, 11]
     assert residuals == pytest.approx([0.5 - offset, 0.5 - offset])
+
+
+def test_letterboxd_residuals_skip_films_without_an_average_or_outside_the_corpus():
+    ratings = {"a": 4.0, "b": 3.0, "no-average": 5.0, "not-in-corpus": 2.0}
+    community = {"a": 3.5, "b": 3.5, "not-in-corpus": 3.0}
+    film_info = {"a": (10, 0.2, 5, "A"), "b": (11, -0.2, 5, "B"), "no-average": (12, 0.0, 5, "N")}
+    offset = letterboxd_offset(ratings, community)
+    # (0.5 - 0.5 - 1.0) / 3, unshrunk, and not-in-corpus still counts toward it
+    assert offset == pytest.approx(-1 / 3)
+    ids, residuals, means = letterboxd_residuals(ratings, film_info, community, offset)
+    assert ids == [10, 11]
+    assert residuals == pytest.approx([0.5 + 1 / 3, -0.5 + 1 / 3])
+    assert means == [3.5, 3.5]
+
+
+def test_letterboxd_offset_without_any_averages():
+    assert letterboxd_offset({"a": 4.0}, {}) == 0.0
+
+
+def test_params_label_names_the_baseline():
+    assert TasteParams().label == "Taste twins (100 nbrs, damping 1)"
+    assert TasteParams(baseline="letterboxd", neighbours=30, lambda_pred=0.5).label == \
+        "Letterboxd + twins (30 nbrs, damping 0.5)"
 
 
 def test_kfold_partitions_deterministically():
@@ -137,3 +168,101 @@ def test_scrape_profile_missing_member_and_non_rater():
     silent = _fetcher({"https://letterboxd.com/quiet/films/page/1/": grid_page([("a", "A", None)], next_href="x")})
     assert scrape_profile(silent, "quiet") == []
     assert silent.requests == 1
+
+
+def _pick(film_id: int, slug: str, kind: str | None = None) -> dict:
+    return {"film_id": film_id, "slug": slug, "tmdb_kind": kind}
+
+
+def test_films_only_skips_tv_and_stops_asking_once_there_are_enough():
+    rows = [_pick(1, "a"), _pick(2, "show"), _pick(3, "b"), _pick(4, "deleted"), _pick(5, "c"), _pick(6, "d")]
+    kinds = {"a": "movie", "show": "tv", "b": None, "deleted": "gone", "c": "movie", "d": "movie"}
+    asked = []
+
+    def kind_of(row):
+        asked.append(row["slug"])
+        return kinds[row["slug"]]
+
+    kept, skipped = films_only(rows, 3, kind_of)
+    # an unchecked film is kept rather than guessed at; one Letterboxd has
+    # dropped is left out without counting as TV
+    assert [row["slug"] for row in kept] == ["a", "b", "c"]
+    assert skipped == 1
+    assert asked == ["a", "show", "b", "deleted", "c"]
+
+
+def test_scrape_looks_active_within_the_window_only():
+    now = datetime(2026, 9, 24, 22, 0, tzinfo=timezone.utc)
+    assert scrape_looks_active((now - timedelta(minutes=3)).isoformat(), now)
+    assert not scrape_looks_active((now - timedelta(minutes=30)).isoformat(), now)
+    assert not scrape_looks_active(None, now)
+
+
+LB_FILM = "https://letterboxd.com/film"
+
+
+def _lookup(pages: dict, **kwargs) -> FilmKindLookup:
+    def fetch(url):
+        page = pages[url]
+        if isinstance(page, Exception):
+            raise page
+        return page
+    kwargs.setdefault("log", lambda msg: None)
+    return FilmKindLookup(PoliteFetcher(delay_seconds=0, max_requests=100, fetch=fetch, sleep=lambda s: None),
+                          **kwargs)
+
+
+def test_film_kind_lookup_uses_what_is_stored_and_saves_each_answer_as_it_goes():
+    saved = []
+    lookup = _lookup({f"{LB_FILM}/loki/": film_page("tv"), f"{LB_FILM}/heat/": film_page("movie"),
+                      f"{LB_FILM}/deleted/": None}, save=lambda film_id, kind: saved.append((film_id, kind)))
+    assert lookup(_pick(1, "stored", "movie")) == "movie"
+    assert lookup(_pick(2, "loki")) == "tv"
+    assert saved == [(2, "tv")]
+    assert lookup(_pick(2, "loki")) == "tv"
+    assert lookup(_pick(3, "heat")) == "movie"
+    assert lookup(_pick(4, "deleted")) == "gone"
+    assert saved == [(2, "tv"), (3, "movie"), (4, "gone")]
+    assert lookup.found == dict(saved)
+    assert lookup.fetcher.requests == 3
+
+
+def test_film_kind_lookup_treats_a_page_without_a_tmdb_link_as_its_own_failure():
+    saved, logged = [], []
+    lookup = _lookup({f"{LB_FILM}/odd/": film_page(None), f"{LB_FILM}/heat/": film_page("movie")},
+                     save=lambda film_id, kind: saved.append(kind), log=logged.append)
+    assert lookup(_pick(1, "odd")) is None
+    assert lookup(_pick(2, "heat")) is None
+    assert lookup.stopped == "failed"
+    assert saved == [] and lookup.found == {}
+    assert lookup.fetcher.requests == 1
+    assert "markup" in logged[0]
+
+
+def test_film_kind_lookup_records_a_block_the_moment_it_happens():
+    blocks, logged = [], []
+    lookup = _lookup({f"{LB_FILM}/a/": LetterboxdBlockedError("HTTP 429"), f"{LB_FILM}/b/": film_page("tv")},
+                     on_block=lambda: blocks.append(1), log=logged.append)
+    assert lookup(_pick(1, "a")) is None
+    assert blocks == [1]
+    assert lookup(_pick(2, "b")) is None
+    assert lookup.stopped == "blocked"
+    assert lookup.fetcher.requests == 1
+    assert lookup.found == {}
+    assert "refusing" in logged[0]
+
+
+def test_film_kind_lookup_stops_when_another_run_has_been_blocked():
+    clear = iter([True, False])
+    lookup = _lookup({f"{LB_FILM}/a/": film_page("movie"), f"{LB_FILM}/b/": film_page("tv")},
+                     still_clear=lambda: next(clear))
+    assert lookup(_pick(1, "a")) == "movie"
+    assert lookup(_pick(2, "b")) is None
+    assert lookup.stopped == "cooldown"
+    assert lookup.fetcher.requests == 1
+
+
+def test_film_kind_lookup_without_a_fetcher_checks_nothing():
+    lookup = FilmKindLookup(None, lambda msg: None)
+    assert lookup(_pick(1, "a")) is None
+    assert lookup(_pick(2, "b", "tv")) == "tv"

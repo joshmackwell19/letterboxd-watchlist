@@ -17,8 +17,9 @@ no separate removal step. A list's members come from any combination of:
   since the dashboard build itself must stay network-free.
 - `include`/`exclude`: manual per-slug overrides on top of the above.
 
-`home: false` keeps a list out of Home (Films-tab dropdown only), and
-`group` sorts it under a heading in that dropdown.
+`home: false` keeps a list off the Lists tab (Films-tab dropdown only —
+the flag predates that tab, when these were Home sections), and `group`
+sorts it under a heading in the dropdown and picks its chip on Lists.
 """
 import unicodedata
 from dataclasses import dataclass, field

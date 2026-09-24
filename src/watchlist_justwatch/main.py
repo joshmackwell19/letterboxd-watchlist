@@ -35,8 +35,8 @@ from .config import (
 from .custom_lists import all_source_paths, load_custom_lists, total_groups
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import (
-    custom_list_source_fetch_times, custom_list_source_totals, get_meta_value,
-    load_custom_list_memberships, load_state, load_watch_together, save_custom_list_source,
+    connect, custom_list_source_fetch_times, custom_list_source_totals, get_meta_value,
+    load_custom_list_memberships, load_state, load_taste_inputs, load_watch_together, save_custom_list_source,
     save_state, seed_pending_watch_together, set_watch_together_status, set_watch_together_statuses_batch,
 )
 from .diff import build_report
@@ -55,6 +55,7 @@ from .letterboxd import (
     fetch_diary_ratings,
     fetch_list_slugs,
     fetch_new_diary_entries,
+    fetch_rated_films,
     fetch_recent_watches,
     fetch_watched_films,
     fetch_watchlist,
@@ -76,6 +77,10 @@ from .similar import (
     render_similar,
 )
 from .state import StateDoc, get_cached_entry_id
+from .taste import (
+    PoliteFetcher, community_ratings_from_diary, evaluate, my_ratings_from_diary, recommend,
+    render_evaluation, render_recommendations, scrape_raters,
+)
 from .tmdb_client import search_movie as _tmdb_search_movie
 from .weekly_digest import compute_weekly_digest
 
@@ -712,11 +717,12 @@ def main() -> None:
                               "keeps it current by merging in your last few watches each day.")
     parser.add_argument("--backfill-diary-ratings", action="store_true",
                          help="One-time backfill of personal_rating/is_rewatch/watched_date into "
-                              "state.diary from the dated diary pages (locally only, same IP block as "
-                              "--backfill-diary). The RSS feed only covers your last ~50 entries; this "
-                              "covers everything older. Doesn't include 'liked' — not reliably scrapable "
-                              "from the static diary page — only --check-for-new-log captures that, "
-                              "going forward.")
+                              "state.diary from the dated diary pages, then personal_rating again from "
+                              "your /films/ grid, which also covers films rated without ever being "
+                              "logged (locally only, same IP block as --backfill-diary). The RSS feed "
+                              "only covers your last ~50 entries; this covers everything older. Doesn't "
+                              "include 'liked' — not reliably scrapable from the static diary page — "
+                              "only --check-for-new-log captures that, going forward.")
     parser.add_argument("--backfill-language", action="store_true",
                          help="One-time TMDB-only backfill of original_language and tmdb_id for every "
                               "watchlist film missing either (normally fills in gradually via the "
@@ -750,6 +756,28 @@ def main() -> None:
                               "(one cheap request, no watchlist/JustWatch calls). Prints 'new_log=true' "
                               "or 'new_log=false' to stdout for a GitHub Actions step to read via "
                               "$GITHUB_OUTPUT, then exits.")
+    parser.add_argument("--scrape-raters", action="store_true",
+                         help="Taste engine, stage 1 (locally only — Letterboxd blocks these pages from "
+                              "datacenter IPs): find members who rate like you and scrape their public "
+                              "ratings into the database, then exit. Resumable; stops at the first sign "
+                              "of a block and then refuses to run again for 24h. See taste.py.")
+    parser.add_argument("--screen-films", type=int, default=200,
+                         help="--scrape-raters: how many of your most distinctive ratings to look up "
+                              "same-rating members for (one request each, skipping any already done)")
+    parser.add_argument("--max-raters", type=int, default=600,
+                         help="--scrape-raters: most candidates to scrape this run (~12 requests each)")
+    parser.add_argument("--request-delay", type=float, default=2.5,
+                         help="--scrape-raters: minimum seconds between requests (randomised up to 1.8x, "
+                              "plus a longer pause every 100)")
+    parser.add_argument("--max-requests", type=int, default=10000,
+                         help="--scrape-raters: hard cap on requests in one run")
+    parser.add_argument("--taste-eval", action="store_true",
+                         help="Taste engine: hold out some of your ratings, predict them from the rest, "
+                              "and compare against simpler predictions (network-free apart from the "
+                              "database; the corpus is aggregated server-side), then exit")
+    parser.add_argument("--taste-recommend", action="store_true",
+                         help="Taste engine: print your closest taste matches, the best-predicted films "
+                              "you haven't seen, and your watchlist ranked by predicted rating, then exit")
     args = parser.parse_args()
 
     if not args.database_url:
@@ -991,9 +1019,60 @@ def main() -> None:
                 continue
             state.diary[slug].update(fields)
             updated += 1
+        # The diary pages only know films that were logged; the /films/
+        # grid has a rating for every film ever rated, and it's each film's
+        # current rating rather than one viewing's — so it wins where the
+        # two disagree. Everything the taste engine does is measured
+        # against these, which is why the gaps matter.
+        try:
+            grid_ratings = fetch_rated_films(args.username)
+        except LetterboxdFetchError as exc:
+            print(f"warning: /films/ grid ratings skipped ({exc})", file=sys.stderr)
+            grid_ratings = {}
+        grid_filled = sum(1 for slug in grid_ratings
+                          if slug in state.diary and state.diary[slug].get("personal_rating") is None)
+        grid_missing = sum(1 for slug in grid_ratings if slug not in state.diary)
+        for slug, rating in grid_ratings.items():
+            if slug in state.diary:
+                state.diary[slug]["personal_rating"] = rating
         save_state(args.database_url, state)
         print(f"Backfilled ratings for {updated}/{len(ratings_by_slug)} diary entries "
-              f"({len(ratings_by_slug) - updated} scraped but not already in state.diary, skipped).")
+              f"({len(ratings_by_slug) - updated} scraped but not already in state.diary, skipped). "
+              f"The /films/ grid had {len(grid_ratings)} ratings: {grid_filled} filled a film with no "
+              f"rating yet, {grid_missing} are films not in state.diary (run --backfill-diary first "
+              f"to pick those up).")
+        sys.exit(0)
+
+    if args.scrape_raters:
+        if not args.username:
+            parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
+        diary, _ = load_taste_inputs(args.database_url)
+        my_ratings = my_ratings_from_diary(diary)
+        if len(my_ratings) < 50:
+            print(f"error: only {len(my_ratings)} of your films have a rating stored — run "
+                  f"--backfill-diary-ratings first", file=sys.stderr)
+            sys.exit(1)
+        outcome = scrape_raters(
+            args.database_url, args.username, my_ratings, community_ratings_from_diary(diary),
+            screen_films=args.screen_films, max_raters=args.max_raters,
+            fetcher=PoliteFetcher(delay_seconds=args.request_delay, max_requests=args.max_requests),
+        )
+        sys.exit({"blocked": 2, "network": 1, "cooldown": 1}.get(outcome, 0))
+
+    if args.taste_eval or args.taste_recommend:
+        diary, watchlist = load_taste_inputs(args.database_url)
+        my_ratings = my_ratings_from_diary(diary)
+        try:
+            with connect(args.database_url) as conn:
+                if args.taste_eval:
+                    report = evaluate(conn, my_ratings, community_ratings_from_diary(diary),
+                                      {slug: entry["watched_date"] for slug, entry in diary.items()})
+                    print(render_evaluation(report))
+                if args.taste_recommend:
+                    print(render_recommendations(recommend(conn, my_ratings, set(diary), watchlist)))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
         sys.exit(0)
 
     if args.recommend_favorites:

@@ -27,6 +27,13 @@ Dashboard person page (a director's or actor's full filmography)
 Cloudflare Worker (worker/) ──► TMDB + Letterboxd + JustWatch, live ──► rendered client-side
 ```
 
+Separately, the taste engine (`taste.py`) builds a corpus of *other*
+Letterboxd members' public ratings, scraped from a home connection by
+`--scrape-raters` into the `rater_*` tables, and predicts how Josh would
+rate a film from the members whose ratings track his. Not wired into
+`run()` or the dashboard yet — `--taste-eval` first has to show it beats
+simply trusting the Letterboxd average.
+
 `main.py`'s `run()` is the only thing that scrapes or writes most of
 Postgres. Everything downstream of the database (the dashboard itself, the
 Worker) only ever reads it or makes small, targeted writes to specific
@@ -42,7 +49,7 @@ stores none of it.
 | File | Responsibility |
 |---|---|
 | `main.py` | CLI entrypoint; `run()` is the daily pipeline, everything else is a one-off flag (see below) |
-| `letterboxd.py` | Scrapes Letterboxd (watchlist, diary, film detail pages) via `curl_cffi` browser impersonation |
+| `letterboxd.py` | Scrapes Letterboxd (watchlist, diary, film detail pages, and for the taste engine other members' rating grids, film members-by-rating tables and following lists) via `curl_cffi` browser impersonation. `fetch_page_strict` is the long-scrape variant: a 403/429/503 or Cloudflare "Just a moment..." page raises `LetterboxdBlockedError` with no retry |
 | `justwatch_client.py` | Wraps `simple-justwatch-python-api`; `resolve_and_fetch` matches a film to JustWatch and pulls its offers |
 | `tmdb_client.py` | Thin TMDB API wrapper — search, similar/recommended, discover, person credits, `original_language` |
 | `config.py` | Loads `config/*.yaml`; the have/free_tier/subscription classification logic |
@@ -50,6 +57,7 @@ stores none of it.
 | `state.py` | `StateDoc` — the in-memory shape of everything in Postgres for one run |
 | `models.py` | `FilmState`/`OfferRecord`/`WatchlistFilm` — the core data shapes |
 | `diff.py` | Classifies what's new since yesterday (`have`/`free_tier`/`new_possible`/new films/unmatched) for the daily email |
+| `taste.py` | The taste engine (user-user collaborative filtering). Collects: screens `/film/<slug>/members/rated/<stars>/` for members who gave Josh's most distinctive ratings (furthest from the Letterboxd average) the same score, plus who he follows, then scrapes the most promising candidates' `/films/` grids through `PoliteFetcher` (randomised delays, a request cap, stop on the first block). Scores: Pearson over shared films of residuals (rating minus corpus mean, the rater's own offset and the film's), shrunk by overlap, top-N neighbours' weighted residuals damped toward the baseline. `evaluate` holds out Josh's ratings — never the screened films, whose candidates were found *because* they matched him — and compares against "Letterboxd average + your offset". The SQL itself lives in `db.py` |
 | `similar.py` | TMDB-correlated discovery (`because_you_watched`, by director/cast/genre, hidden gems, popular, rewatch) |
 | `cinemas.py` | Scrapes showtimes for 4 London cinemas (Prince Charles, Barbican, Vue Fulham Broadway, Riverside Studios) — one fetcher per venue, each a different mechanism (plain HTML, a JSON API, an opaque-token AJAX endpoint). `clean_listing_title` strips what the venue added and the film doesn't have ("(10th Anniversary)", "- IMAX", a re-release year); `match_watchlist_film` matches a listing against the watchlist by title, and `resolve_listing_to_letterboxd` finds the Letterboxd film for everything else (TMDB for the id, then `/tmdb/<id>/` for the slug), with its two network calls injected so the matching judgement is testable without either |
 | `dashboard.py` | Builds the dashboard's JSON payload from `StateDoc` and renders `dashboard.html` (template + embedded JS live in this one file); `_search_taxonomy` is what lets the page classify a *searched* film's offers without duplicating `brands.py`/`config.py` in JS. The film detail view (the long look behind quick look's "Full details") adds no payload of its own — its director/cast/genre relations are derived in JS from `films_by_slug`, which already carries every watchlist and discovery film — TMDB's own answer to the same questions arrives separately, from the Worker, and is merged in behind the local one. The person page (any director/actor name is a link to it) is the same shape one level up, and shares the film page's back-trail: `detailTrail` holds both kinds of stop, so film → director → another of their films unwinds one step at a time |
@@ -73,6 +81,8 @@ stores none of it.
 | `watch_together` | **Incrementally** — `seed_pending_watch_together` (new pending rows) / `set_watch_together_statuses_batch` (Review tab decisions) | Deliberately *not* part of the full-replace — see `db.py`'s own comment on `save_state` |
 | `custom_list_sources` | **Incrementally** — `_refresh_custom_list_sources` (in `run()`: sources over a week old, stalest first, capped at `CUSTOM_LIST_SOURCES_PER_RUN`; or uncapped via `--refresh-custom-lists`) | Cached slugs of each Letterboxd list a custom list sources from — festival sources run to thousands of films each, so the dashboard never reads them whole: `load_custom_list_memberships`/`custom_list_source_totals` intersect and count server-side. A failed/empty fetch keeps the previous copy. Not part of `save_state`'s full replace |
 | `cinema_showtimes` | `run()`, full replace | Raw scraped rows from `cinemas.py` only — matching against the watchlist happens fresh in `dashboard.py` at build time, not stored |
+| `raters` / `rater_films` / `rater_ratings` | **Incrementally** — `--scrape-raters`, one rater per transaction | The taste engine's corpus: other members' ratings (half-stars as `SMALLINT`, films as integer ids to keep ~1.5M rows near 100–150MB). `bias` columns are shrunk baseline offsets from `refresh_rater_baselines`. Only ever aggregated server-side (`rater_similarities`/`rater_predictions` return a few hundred rows) — reading it out whole would be the Neon transfer-quota mistake again |
+| `rater_screened` / `taste_meta` | **Incrementally** — `--scrape-raters` | Which screening pages are done (so runs resume), and small values: corpus mean `mu`, `baselines_at`, `blocked_at`. `taste_meta` exists because `save_state` replaces `meta` wholesale |
 | `cinema_film_matches` | `run()`, full replace | The Letterboxd film each listing is showing, for the ~90% of the programme the watchlist can't name. Keyed by `cinemas.listing_match_key` (cleaned title + year), so the same film at three venues resolves once. Unlike the watchlist match this costs a TMDB search plus a Letterboxd page, so it's cached rather than recomputed at build time; a NULL slug is a listing with no Letterboxd film, remembered so it isn't retried daily |
 
 ## GitHub Actions workflows (`.github/workflows/`)
@@ -176,6 +186,14 @@ never touches Letterboxd — so it also runs from Actions via
 with no per-run cap — so a newly added one (or a batch of them) shows up
 before the daily run's rotation gets to it.
 
+**The taste engine** (see `taste.py`): `--scrape-raters` (local only —
+datacenter IPs get Cloudflare challenges on nearly every request; resumable;
+tune with `--screen-films`, `--max-raters`, `--request-delay`,
+`--max-requests`), then `--taste-eval` and `--taste-recommend` (database
+only, run anywhere). `--backfill-diary-ratings` also reads Josh's own
+`/films/` grid now, since the diary pages miss every film rated without
+being logged — and those ratings are what everything is measured against.
+
 **Standalone analyses** (network-free, read already-stored state):
 `--rank-services`, `--recommend-favorites`, `--similar-to TITLE`,
 `--email-audit`, `--email-audit-by-country`, `--weekly-digest`.
@@ -187,6 +205,14 @@ before the daily run's rotation gets to it.
 
 - **Letterboxd blocks GitHub Actions' IP range** from anything under
   `/username/films/` (diary included) — those backfills must run locally.
+- **The taste engine's scrape stops at the first block and then waits
+  24h** (`taste_meta.blocked_at`) — deliberately, since retrying through
+  a Cloudflare challenge is how a temporary one becomes a lasting block
+  on the home connection every local backfill depends on. It never logs
+  in, so the Letterboxd account itself isn't involved. Don't route it
+  through a VPN or rotate IPs to get past a block: VPN exits are
+  datacenter ranges, which get challenged far more, and evading the block
+  defeats the point of stopping.
 - **Neon's free-tier data-transfer quota has been exceeded twice before**
   (both fixed by reading less per run, not by removing the underlying
   pattern) — current usage is small (~14MB DB, batched writes since the
@@ -226,6 +252,10 @@ films from still agrees with `_classify` itself) — not an
 integration suite against a real database, which would need a Postgres
 fixture and is a bigger lift for less immediate value than covering the
 logic most likely to silently regress.
+
+The taste engine's SQL has its own tests (`tests/test_taste_db.py`),
+skipped unless `TASTE_TEST_DATABASE_URL` points at a **local** throwaway
+Postgres — they empty the taste tables, so they refuse any other host.
 
 On the Worker side, `/film-relations` and `/person` are covered against a
 stubbed TMDB — including their subrequest counts, which are the thing that

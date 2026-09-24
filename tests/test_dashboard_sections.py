@@ -204,6 +204,10 @@ def _showing(title: str, year: int, showtime: str, cinema: str = "Prince Charles
 
 # ---------- _cinema_listings ----------
 
+# Before every showtime below, so none of them has passed yet.
+_CINEMA_NOW = datetime(2026, 9, 1)
+
+
 def test_cinema_listings_merges_a_matched_film_across_cinemas_into_one_row():
     # The same watchlist film showing at two different cinemas should be
     # ONE row with both cinemas' showtimes attached, not two cards.
@@ -217,7 +221,7 @@ def test_cinema_listings_merges_a_matched_film_across_cinemas_into_one_row():
         _showing("TAXI DRIVER!", 1976, "2026-09-10T20:00:00", cinema="Barbican"),
     ]
 
-    rows = _cinema_listings(state)
+    rows = _cinema_listings(state, now=_CINEMA_NOW)
 
     assert len(rows) == 1
     row = rows[0]
@@ -240,7 +244,7 @@ def test_cinema_listings_keeps_unmatched_same_title_films_separate_per_cinema():
         _showing("Mystery Film", None, "2026-09-10T20:00:00", cinema="Riverside Studios"),
     ]
 
-    rows = _cinema_listings(state)
+    rows = _cinema_listings(state, now=_CINEMA_NOW)
 
     assert len(rows) == 2
     assert all(row["matched_slug"] is None for row in rows)
@@ -253,9 +257,25 @@ def test_cinema_listings_sorts_by_soonest_showtime():
         _showing("Sooner Film", None, "2026-09-09T18:00:00"),
     ]
 
-    rows = _cinema_listings(state)
+    rows = _cinema_listings(state, now=_CINEMA_NOW)
 
     assert [r["title"] for r in rows] == ["Sooner Film", "Later Film"]
+
+
+def test_cinema_listings_drops_showings_that_have_already_started():
+    state = StateDoc(films={})
+    state.cinema_showtimes = [
+        _showing("Split Film", None, "2026-09-09T18:00:00"),
+        _showing("Split Film", None, "2026-09-10T20:00:00"),
+        _showing("Finished Film", None, "2026-09-09T12:00:00", cinema="Barbican"),
+    ]
+
+    rows = _cinema_listings(state, now=datetime(2026, 9, 9, 18, 30))
+
+    # A film with a showing still to come keeps just that one; a film
+    # whose every showing has passed leaves no row behind.
+    assert [r["title"] for r in rows] == ["Split Film"]
+    assert [s["showtime"] for s in rows[0]["showtimes"]] == ["2026-09-10T20:00:00"]
 
 
 # ---------- _build_home_sections director/cast section cap ----------

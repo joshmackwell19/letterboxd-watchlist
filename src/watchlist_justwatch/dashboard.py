@@ -10,7 +10,7 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import listing_match_key, match_watchlist_film
+from .cinemas import drop_past_showings, listing_match_key, match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
@@ -546,12 +546,9 @@ def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> di
     cinemas in cinemas.py, mapped to its single soonest showing — shared
     by the Home section below and the Films tab's own per-card note, so
     both agree on which showing counts as "next" for a given film."""
-    now_iso = (now or datetime.now()).isoformat()
     soonest_by_slug: dict[str, dict] = {}
 
-    for showing in state.cinema_showtimes:
-        if showing["showtime"] < now_iso:
-            continue
+    for showing in drop_past_showings(state.cinema_showtimes, now):
         slug = match_watchlist_film(showing["title"], showing["year"], state.films)
         if slug is None or slug not in state.films:
             continue
@@ -863,7 +860,7 @@ def _search_taxonomy(
     }
 
 
-def _cinema_listings(state: StateDoc) -> list[dict]:
+def _cinema_listings(state: StateDoc, now: datetime | None = None) -> list[dict]:
     """One row per film for the full Cinemas tab — a matched watchlist
     film showing at several of the four cinemas merges into a single row
     (grouped by slug, the one reliable cross-cinema identity a match
@@ -885,7 +882,9 @@ def _cinema_listings(state: StateDoc) -> list[dict]:
         if match and match.get("slug")
     }
 
-    for showing in state.cinema_showtimes:
+    # Only what's still to come — a film whose last showing has passed drops
+    # off the tab entirely, since no showtimes means no row.
+    for showing in drop_past_showings(state.cinema_showtimes, now):
         slug = match_watchlist_film(showing["title"], showing["year"], state.films)
         # Everything the watchlist can't name — most of the programme — falls
         # back to the Letterboxd film run() resolved for it. That match is
@@ -2179,6 +2178,37 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <script>
 const DATA = __DATA__;
+
+// Cinema showtimes are as of the last build, and the page can be open for
+// hours (or a day) after it — so anything that's started since drops off
+// here, before anything renders, and a film with nothing left to see
+// drops off entirely. Showtimes are London wall-clock strings with no
+// offset, which Date reads as the viewer's own local time — London, here.
+(function dropPastShowtimes() {
+  const now = Date.now();
+  DATA.cinemas = DATA.cinemas
+    .map(row => ({ ...row, showtimes: row.showtimes.filter(s => new Date(s.showtime).getTime() >= now) }))
+    .filter(row => row.showtimes.length);
+
+  // The film cards' "next showing" note was worked out at build time too.
+  // Rows are sorted soonest-first, so the first left is the next one.
+  const nextBySlug = new Map();
+  DATA.cinemas.forEach(row => { if (row.matched_slug) nextBySlug.set(row.matched_slug, row.showtimes[0]); });
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const note = s => {
+    const d = new Date(s.showtime);
+    const h = d.getHours() % 12 || 12;
+    const time = h + ':' + String(d.getMinutes()).padStart(2, '0') + (d.getHours() < 12 ? 'am' : 'pm');
+    return s.cinema + ' — ' + DAYS[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()] + ', ' + time;
+  };
+  DATA.films.forEach(row => {
+    if (!row.cinema_note) return;
+    const next = nextBySlug.get(row.slug);
+    row.cinema_note = next ? note(next) : null;
+  });
+})();
+
 const TABS = ['home', 'lists', 'services', 'films', 'cinemas'];
 
 function esc(text) {
@@ -5254,9 +5284,13 @@ function renderCinemas() {
   const q = document.getElementById('cinemaSearch').value.trim().toLowerCase();
   renderActiveCinemaFilters();
 
+  // Local dates, not toISOString()'s UTC ones — showtimes are London
+  // wall-clock, and in summer UTC's "today" ends an hour early.
+  const localIso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
   const now = new Date();
-  const todayIso = now.toISOString().slice(0, 10);
-  const tomorrowIso = new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
+  const todayIso = localIso(now);
+  const tomorrowIso = localIso(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
 
   const frag = document.createDocumentFragment();
   DATA.cinemas.forEach(row => {

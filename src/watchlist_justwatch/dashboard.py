@@ -324,6 +324,40 @@ def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> 
 
 
 
+def _for_you_data(for_you: dict | None, films_by_slug: dict[str, dict], josh_slugs: set[str],
+                  dismissed: set[str], seen: set[str] = frozenset()) -> dict | None:
+    """The For you tab's payload: state.for_you (see for_you.py) narrowed to
+    what the page actually ships. Everything it names has to be openable —
+    a film dropped from the watchlist since this morning, or a pick
+    dismissed from Home, would otherwise be a tile that goes nowhere — and
+    nothing it suggests may already be logged: build_for_you leaves seen
+    films out, but a payload carried forward from a failed run predates
+    the latest diary."""
+    if not for_you:
+        return None
+
+    def offered(slug: str) -> bool:
+        # Dismissing only ever applies to recommendations, never to a film
+        # Josh put on his own watchlist (see isDiscoveryOnly on the page).
+        return slug in films_by_slug and (slug in josh_slugs or slug not in dismissed)
+
+    def suggestable(slug: str) -> bool:
+        return slug not in seen and offered(slug)
+
+    scores = {slug: entry for slug, entry in for_you["scores"].items() if offered(slug)}
+    return {
+        **{key: for_you[key] for key in ("generated_at", "corpus", "your_offset", "matches", "loved")},
+        "scores": scores,
+        "watchlist": [slug for slug in for_you["watchlist"]
+                      if slug in josh_slugs and slug in scores and slug not in seen],
+        "picks": [slug for slug in for_you["picks"] if slug not in josh_slugs and suggestable(slug)],
+        "fans_also_loved": {
+            source: kept for source, suggestions in for_you["fans_also_loved"].items()
+            if (kept := [slug for slug in suggestions if suggestable(slug)])
+        },
+    }
+
+
 def _reclassified_discovery_films(
     discovery_films: dict[str, dict], config: dict[str, CountryConfig],
     global_subscriptions: list[str], revisitable: set[str],
@@ -1038,6 +1072,8 @@ def build_dashboard_data(
         # and show offers judged on some earlier day's config.
         "films_by_slug": {**discovery_films, **films_by_slug},
         "sarah_films": sarah_films,
+        "for_you": _for_you_data(state.for_you, {**discovery_films, **films_by_slug}, {r["slug"] for r in rows},
+                                 dismissed_recommendations, set(state.diary)),
         "cinemas": _cinema_listings(state),
         "settings": _settings_data(config, global_subscriptions),
         "search_taxonomy": _search_taxonomy(state, config, global_subscriptions, revisitable),
@@ -1802,6 +1838,228 @@ _TEMPLATE = """<!DOCTYPE html>
     .bottom-nav-btn.active { color: var(--accent); }
     .bottom-nav-btn svg { width: 21px; height: 21px; stroke: currentColor; }
   }
+  /* ---------- For you: the taste engine's tab ---------- */
+  .fy-layout { display: block; }
+  .fy-main, .fy-side { min-width: 0; }
+  @media (min-width: 1000px) {
+    .fy-layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 28px; align-items: start; }
+    /* Just under the fixed app bar, whose height updateAppBarOffset publishes. */
+    .fy-side { position: sticky; top: calc(var(--app-bar-height, 150px) + 16px); }
+  }
+  .fy-empty { margin: 20px 0; }
+
+  /* Hero: one film, the best estimate on a service you have. The poster is
+     reused blurred as the backdrop, since the payload carries no stills. */
+  .fy-hero {
+    position: relative; overflow: hidden; border-radius: 18px; margin-bottom: 26px;
+    background: var(--surface); border: 1px solid var(--hairline); box-shadow: var(--shadow);
+  }
+  .fy-hero-bg {
+    position: absolute; inset: -40px; background-size: cover; background-position: center 30%;
+    filter: blur(34px) saturate(1.3); opacity: 0.5; transform: scale(1.1);
+  }
+  .fy-hero-bg::after {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(14, 16, 19, 0.15) 0%, rgba(23, 26, 31, 0.78) 55%, var(--surface) 100%);
+  }
+  .fy-hero-inner { position: relative; padding: 16px 16px 18px; }
+  .fy-eyebrow-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .fy-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+  .fy-another {
+    background: rgba(0, 0, 0, 0.28); border: 1px solid var(--hairline-strong); color: var(--text-muted);
+    font-size: 11.5px; font-weight: 500; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  }
+  .fy-another:hover { color: var(--text); border-color: var(--text-muted); }
+  .fy-hero-main { display: flex; gap: 14px; align-items: flex-start; }
+  .fy-hero-poster {
+    width: 108px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 9px; flex-shrink: 0;
+    background: var(--hairline); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55);
+  }
+  .fy-hero-body { min-width: 0; flex: 1; }
+  .fy-hero-body h2 { font-size: 21px; font-weight: 700; margin: 2px 0 4px; letter-spacing: -0.015em; line-height: 1.2; }
+  .fy-hero-body h2 span { color: var(--text-faint); font-weight: 400; }
+  .fy-hero-meta { font-size: 12.5px; color: var(--text-muted); margin: 0 0 3px; }
+  .fy-hero-genre { font-size: 12px; color: #c98a7d; margin: 0 0 12px; }
+  .fy-scores { display: flex; gap: 8px; flex-wrap: wrap; }
+  .fy-score {
+    display: flex; flex-direction: column; gap: 1px; padding: 7px 11px 6px; border-radius: 11px;
+    border: 1px solid var(--hairline-strong); background: rgba(0, 0, 0, 0.22); min-width: 0;
+  }
+  .fy-score b { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+  .fy-score span { font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
+  .fy-score-you { border-color: rgba(79, 209, 197, 0.45); background: var(--accent-soft); }
+  .fy-score-you b { color: var(--accent); }
+  .fy-score-lb b { color: #4ade80; }
+  .fy-why { margin: 14px 0 0; padding: 12px 0 0; border-top: 1px solid var(--hairline); }
+  .fy-why-count { font-size: 12.5px; color: var(--text-muted); margin: 0 0 10px; line-height: 1.45; }
+  .fy-why-count b { color: var(--text); font-weight: 600; }
+  .fy-because-label {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-faint); margin: 0 0 7px;
+  }
+  .fy-because-label.fy-accent { color: var(--accent); }
+  .fy-because { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .fy-because-item { display: flex; gap: 7px; align-items: center; min-width: 0; }
+  .fy-because-item img, .fy-because-blank {
+    width: 26px; height: 39px; object-fit: cover; border-radius: 3px; flex-shrink: 0; background: var(--hairline);
+  }
+  .fy-because-item span {
+    font-size: 11.5px; color: var(--text); line-height: 1.25; min-width: 0;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .fy-hero-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .fy-watch-btn {
+    flex: 1 1 auto; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    background: #4ade80; color: #06200f; text-decoration: none; font-size: 13.5px; font-weight: 700;
+    padding: 11px 16px; border-radius: 999px; white-space: nowrap;
+  }
+  .fy-watch-btn i { font-style: normal; font-weight: 500; opacity: 0.75; }
+  .fy-watch-btn svg { width: 13px; height: 13px; fill: currentColor; }
+  .fy-watch-btn:hover { filter: brightness(1.08); }
+  .fy-details-btn {
+    flex: 0 0 auto; background: rgba(0, 0, 0, 0.25); border: 1px solid var(--hairline-strong); color: var(--text);
+    padding: 10px 16px; border-radius: 999px; font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .fy-details-btn:hover { border-color: var(--text-muted); }
+  .fy-also { font-size: 11.5px; color: var(--text-faint); margin: 10px 2px 0; }
+  .fy-also b { color: var(--text-muted); font-weight: 600; }
+
+  /* Section heads: the Home header, with a right-aligned aside. */
+  .fy-section { margin-bottom: 28px; }
+  .fy-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 0 10px; }
+  .fy-section-head .home-section-header { margin: 0; }
+  .fy-section-head .aside { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; }
+
+  /* Watchlist cards: the Home card, plus a rank on the poster and a line for
+     the estimate and its reason. */
+  .fy-tonight { grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); }
+  /* The "fans also loved" line is one ellipsised line; without min-width 0
+     on the grid item its nowrap text widens the whole track past the screen. */
+  .fy-tonight > .film-card { min-width: 0; }
+  .fy-rank-wrap { position: relative; flex-shrink: 0; line-height: 0; }
+  .fy-rank {
+    position: absolute; top: -6px; left: -6px; min-width: 20px; height: 20px; padding: 0 5px;
+    border-radius: 999px; background: var(--bg); border: 1px solid var(--hairline-strong);
+    color: var(--text); font-size: 10.5px; font-weight: 700; line-height: 18px; text-align: center;
+  }
+  .fy-card-est { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 5px; }
+  .fy-pill {
+    display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; white-space: nowrap;
+  }
+  .fy-card-why { font-size: 11px; color: var(--text-muted); }
+  .fy-card-because { font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fy-card-because b { color: var(--text-muted); font-weight: 500; }
+  .fy-card-services { margin-top: 5px; }
+  .fy-card-services .badge i { font-style: normal; opacity: 0.7; }
+
+  /* New to you: poster-forward, since these are films you may never have
+     heard of and the artwork does the first half of the persuading. */
+  .fy-picks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 10px; }
+  .fy-pick {
+    display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 0; background: none; border: none;
+    color: inherit; text-align: left; cursor: pointer; font: inherit; -webkit-tap-highlight-color: transparent;
+  }
+  .fy-pick-poster {
+    position: relative; border-radius: 8px; overflow: hidden; aspect-ratio: 2 / 3; margin-bottom: 5px;
+    background: var(--hairline); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  }
+  .fy-pick-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .fy-pick:hover .fy-pick-poster img { opacity: 0.82; }
+  .fy-pick-est, .fy-tile-est {
+    position: absolute; left: 6px; bottom: 6px; padding: 2px 7px; border-radius: 999px;
+    background: rgba(8, 10, 12, 0.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    color: var(--accent); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .fy-pick-title {
+    font-size: 12px; font-weight: 600; line-height: 1.3; color: var(--text);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .fy-pick-title span { color: var(--text-faint); font-weight: 400; }
+  .fy-pick-loved { font-size: 11px; color: var(--text-muted); }
+  .fy-pick-avail { font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fy-pick-avail.have { color: #4ade80; }
+  .fy-pick-avail.free { color: #60a5fa; }
+  .fy-pick-avail.none { color: var(--text-faint); font-weight: 400; }
+
+  /* Taste matches + how it works */
+  .fy-panel { background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px; box-shadow: var(--shadow); }
+  .fy-sarah {
+    display: flex; gap: 11px; align-items: flex-start; padding: 11px 12px; margin-bottom: 14px;
+    border-radius: 11px; background: rgba(244, 114, 182, 0.09); border: 1px solid rgba(244, 114, 182, 0.25);
+  }
+  .fy-sarah svg { width: 18px; height: 18px; stroke: #f472b6; flex-shrink: 0; margin-top: 1px; }
+  .fy-sarah b { display: block; font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .fy-sarah p { margin: 0; font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+  .fy-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .fy-stat { padding: 9px 10px; border-radius: 10px; background: var(--surface-2); }
+  .fy-stat b { display: block; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+  .fy-stat span { display: block; font-size: 10.5px; color: var(--text-muted); line-height: 1.3; margin-top: 2px; }
+  .fy-list-head {
+    display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin: 0 0 8px;
+  }
+  .fy-match {
+    display: grid; grid-template-columns: 22px minmax(0, 1fr) 70px; gap: 3px 9px; align-items: center;
+    padding: 6px 0; border-top: 1px solid var(--hairline); font-size: 12px;
+  }
+  .fy-match-rank { color: var(--text-faint); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+  .fy-match-name { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fy-match-name.sarah { color: #f472b6; font-weight: 600; }
+  .fy-match-n { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; font-size: 11.5px; }
+  .fy-match-bar { grid-column: 2 / 4; height: 4px; border-radius: 2px; background: var(--hairline); overflow: hidden; }
+  .fy-match-bar span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+  .fy-match.is-sarah .fy-match-bar span { background: #f472b6; }
+  .fy-privacy { font-size: 11px; color: var(--text-faint); margin: 10px 0 0; line-height: 1.45; }
+  .fy-how {
+    margin-top: 12px; padding: 12px 14px; border-radius: 12px; border: 1px dashed var(--hairline-strong);
+    font-size: 12px; color: var(--text-muted); line-height: 1.55;
+  }
+  .fy-how h4 { margin: 0 0 5px; font-size: 12.5px; color: var(--text); font-weight: 600; }
+  .fy-how p { margin: 0 0 6px; }
+  .fy-how p:last-child { margin-bottom: 0; }
+  .fy-how .updated { color: var(--text-faint); font-size: 11px; }
+
+  /* Quick look's "why" block, and the film page's taste section */
+  .fy-ql-why {
+    margin-top: 14px; padding: 12px 14px; border-radius: 12px; background: var(--accent-soft);
+    border: 1px solid rgba(79, 209, 197, 0.3);
+  }
+  .fy-ql-why .fy-scores, .fy-film-why .fy-scores { margin-bottom: 10px; }
+  .fy-ql-why .fy-score { background: rgba(0, 0, 0, 0.2); }
+  .fy-film-why .fy-because { max-width: 560px; }
+
+  /* Home, on a phone: the way to Lists now that it's out of the bottom nav. */
+  .lists-btn { margin-left: 6px; border-color: var(--hairline-strong); color: var(--text-muted); }
+
+  @media (min-width: 701px) {
+    .fy-hero-inner { padding: 22px 24px; }
+    .fy-hero-main { gap: 22px; }
+    .fy-hero-poster { width: 150px; }
+    .fy-hero-body h2 { font-size: 26px; }
+    .fy-watch-btn { flex: 0 0 auto; }
+    .fy-hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 22px; align-items: end; }
+    .fy-hero-grid .fy-why { margin: 0; padding: 0 0 0 20px; border-top: none; border-left: 1px solid var(--hairline); }
+    .fy-hero-grid .fy-because { grid-template-columns: 1fr; gap: 7px; }
+    .fy-picks { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 18px 14px; }
+  }
+  /* Where the two-column hero leaves its body too narrow for the poster,
+     title and watch button (a narrow desktop window, and once the taste
+     matches column takes 358px from 1000px up), the why stacks underneath. */
+  @media (min-width: 701px) and (max-width: 859px), (min-width: 1000px) and (max-width: 1279px) {
+    .fy-hero-grid { display: block; }
+    .fy-hero-grid .fy-why { margin: 14px 0 0; padding: 12px 0 0; border-left: none; border-top: 1px solid var(--hairline); }
+    .fy-hero-grid .fy-because { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  }
+  .fy-watch-btn { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .fy-phone-only { display: none; }
+  @media (max-width: 700px) {
+    .fy-hero { margin-bottom: 22px; }
+    .fy-hero-actions .fy-watch-btn { flex: 1 1 100%; }
+    .fy-hero-actions .fy-details-btn { flex: 1 1 0; }
+    .fy-desk-only { display: none; }
+    .fy-phone-only { display: block; }
+  }
 </style>
 </head>
 <body>
@@ -1822,6 +2080,12 @@ _TEMPLATE = """<!DOCTYPE html>
           <path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path>
         </svg>
         Home<span class="new-badge home-new-badge hidden"></span>
+      </button>
+      <button class="tab-btn" id="tab-foryou">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"></path><path d="M18.5 16v4M16.5 18h4"></path>
+        </svg>
+        For you
       </button>
       <button class="tab-btn" id="tab-lists">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -2022,6 +2286,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <section class="view active" id="view-home">
   <div class="surprise-bar mobile-only-bar">
     <button class="surprise-btn" id="surpriseMeBtnMobile">🎲 Surprise me</button>
+    <button class="surprise-btn lists-btn" id="listsBtnMobile">Your lists →</button>
   </div>
   <div id="homeSections">
     <div class="film-cards">
@@ -2031,6 +2296,10 @@ _TEMPLATE = """<!DOCTYPE html>
       <div class="skeleton-card"></div>
     </div>
   </div>
+</section>
+
+<section class="view" id="view-foryou">
+  <div id="forYouContent"></div>
 </section>
 
 <section class="view" id="view-lists">
@@ -2124,11 +2393,15 @@ _TEMPLATE = """<!DOCTYPE html>
     </svg>
     Home<span class="new-badge home-new-badge hidden"></span>
   </button>
-  <button class="bottom-nav-btn" id="nav-lists">
+  <!-- For you takes Lists' slot on a phone: five buttons is all the bar
+       holds, and Lists is the one you go looking for deliberately — it's a
+       button on Home instead (see listsBtnMobile). The desktop tab row
+       has room for both. -->
+  <button class="bottom-nav-btn" id="nav-foryou">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 6h2M4 12h2M4 18h2M9 6h11M9 12h11M9 18h11"></path>
+      <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"></path><path d="M18.5 16v4M16.5 18h4"></path>
     </svg>
-    Lists
+    For you
   </button>
   <button class="bottom-nav-btn" id="nav-services">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -2209,7 +2482,7 @@ const DATA = __DATA__;
   });
 })();
 
-const TABS = ['home', 'lists', 'services', 'films', 'cinemas'];
+const TABS = ['home', 'foryou', 'lists', 'services', 'films', 'cinemas'];
 
 function esc(text) {
   if (text == null) return '';
@@ -2366,6 +2639,7 @@ function wireSearchClear(inputId, clearId, rerender) {
 }
 
 document.getElementById('tab-home').addEventListener('click', () => showView('home'));
+document.getElementById('tab-foryou').addEventListener('click', () => showView('foryou'));
 document.getElementById('tab-lists').addEventListener('click', () => showView('lists'));
 document.getElementById('tab-services').addEventListener('click', () => showView('services'));
 document.getElementById('tab-films').addEventListener('click', () => showView('films'));
@@ -2374,7 +2648,8 @@ document.getElementById('tab-review').addEventListener('click', () => showView('
 document.getElementById('tab-sarah').addEventListener('click', () => showView('sarah'));
 document.getElementById('tab-settings').addEventListener('click', () => { renderSettings(); showView('settings'); });
 document.getElementById('nav-home').addEventListener('click', () => showView('home'));
-document.getElementById('nav-lists').addEventListener('click', () => showView('lists'));
+document.getElementById('nav-foryou').addEventListener('click', () => showView('foryou'));
+document.getElementById('listsBtnMobile').addEventListener('click', () => showView('lists'));
 document.getElementById('nav-services').addEventListener('click', () => showView('services'));
 document.getElementById('nav-films').addEventListener('click', () => showView('films'));
 document.getElementById('nav-cinemas').addEventListener('click', () => showView('cinemas'));
@@ -2703,7 +2978,9 @@ function showView(name, options) {
   TABS.forEach(n => {
     const isActive = n === owner;
     document.getElementById('tab-' + n).classList.toggle('active', isActive);
-    document.getElementById('nav-' + n).classList.toggle('active', isActive);
+    // Lists has no bottom-nav button (For you took its slot on a phone).
+    const navBtn = document.getElementById('nav-' + n);
+    if (navBtn) navBtn.classList.toggle('active', isActive);
   });
   // Settings is a fifth desktop tab but not one of mobile's 4 bottom-nav
   // destinations (mobile keeps its own small gear icon instead) — handled
@@ -3259,6 +3536,359 @@ function renderSections(container, sections, filmsFor) {
 
 function renderHome() {
   renderSections(document.getElementById('homeSections'), DATA.home_sections);
+}
+
+// ---------- For you ----------
+// The taste engine's tab (see for_you.py): tonight's pick, the watchlist
+// ranked by estimate, new films to try, and whose ratings the estimates
+// come from. Every film it names is one the page already ships in
+// films_by_slug, so quick look and the film page work on it as anywhere
+// else. DATA.for_you is null until the daily run has built it once.
+const FOR_YOU = DATA.for_you;
+const WATCHLIST_ROWS = {};
+DATA.films.forEach(row => { WATCHLIST_ROWS[row.slug] = row; });
+
+function fyEstimate(value) {
+  return '≈' + value.toFixed(1) + '★';
+}
+
+// One offer per brand for a classification, at its best country: a home
+// market first, and one with a link to press before one without.
+function fyBrandsBy(offers, classification) {
+  const rank = o => {
+    const home = HOME_COUNTRY_CODES.indexOf(o.country);
+    return (home < 0 ? 9 : home) * 2 + (o.url ? 0 : 1);
+  };
+  const best = new Map();
+  const counts = new Map();
+  (offers || []).filter(o => o.classification === classification).forEach(o => {
+    counts.set(o.brand, (counts.get(o.brand) || 0) + 1);
+    const current = best.get(o.brand);
+    if (!current || rank(o) < rank(current)) best.set(o.brand, o);
+  });
+  return [...best.values()].sort((a, b) => rank(a) - rank(b) || counts.get(b.brand) - counts.get(a.brand));
+}
+
+function fyOfferBadge(o) {
+  const label = esc(o.brand) + ' <i>' + esc(countryLabel(o.country)) + '</i>';
+  const cls = 'badge badge-' + o.classification;
+  return o.url
+    ? '<a class="' + cls + ' badge-link" href="' + escAttr(o.url) + '" target="_blank" rel="noopener">' + label + ' ↗</a>'
+    : '<span class="' + cls + '">' + label + '</span>';
+}
+
+// Josh's own favourites a film's fans love unusually often — the "why".
+function fyBecauseHtml(slugs, label) {
+  const items = (slugs || []).filter(slug => FOR_YOU.loved[slug]).map(slug => {
+    const loved = FOR_YOU.loved[slug];
+    const img = loved.poster_url
+      ? '<img loading="lazy" src="' + escAttr(posterThumbUrl(loved.poster_url)) + '" alt="" onerror="this.style.visibility=&quot;hidden&quot;">'
+      : '<span class="fy-because-blank"></span>';
+    return '<div class="fy-because-item">' + img + '<span>' + esc(loved.title) + '</span></div>';
+  });
+  if (!items.length) return '';
+  return '<div class="fy-because-label">' + esc(label) + '</div><div class="fy-because">' + items.join('') + '</div>';
+}
+
+function fyScoresHtml(score, film) {
+  const letterboxd = film.rating != null
+    ? '<div class="fy-score fy-score-lb"><b>' + film.rating.toFixed(2) + '★</b><span>Letterboxd average</span></div>'
+    : '';
+  return '<div class="fy-scores">' +
+    '<div class="fy-score fy-score-you"><b>' + fyEstimate(score.predicted) + '</b><span>estimate for you</span></div>' +
+    letterboxd + '</div>';
+}
+
+function fyLovedHtml(score) {
+  return '<p class="fy-why-count"><b>' + score.lovers + ' of the ' + score.support + '</b> taste matches who’ve rated it ' +
+    'gave it 4½★ or more — they average ' + score.neighbour_mean.toFixed(1) + '★.</p>';
+}
+
+// The same "why" block quick look shows for anything opened from this tab.
+function forYouQuickLook(slug) {
+  openQuickLook(slug);
+  const score = FOR_YOU && FOR_YOU.scores[slug];
+  const film = filmBySlug(slug);
+  if (!score || !film) return;
+  const block = document.createElement('div');
+  block.className = 'fy-ql-why';
+  block.innerHTML = '<div class="fy-because-label fy-accent">Why it’s here</div>' +
+    fyScoresHtml(score, film) + fyLovedHtml(score) + fyBecauseHtml(score.because, 'Its fans also loved your');
+  const content = document.getElementById('quickLookContent');
+  content.insertBefore(block, content.querySelector('.quick-look-more'));
+}
+
+function forYouEntries(slugs) {
+  return slugs
+    .filter(slug => DATA.films_by_slug[slug] && FOR_YOU.scores[slug])
+    .map(slug => ({ slug, film: { ...DATA.films_by_slug[slug], slug }, score: FOR_YOU.scores[slug] }));
+}
+
+function forYouHeroHtml(entry) {
+  const film = entry.film;
+  const have = fyBrandsBy(film.all_offers, 'have');
+  const top = have[0];
+  const meta = [];
+  if (film.genre && film.genre.length) meta.push(esc(film.genre.join(', ')));
+  if (film.runtime_minutes != null) meta.push(formatRuntime(film.runtime_minutes));
+  const watch = top
+    ? '<a class="fy-watch-btn" href="' + escAttr(top.url || filmLetterboxdUrl(film)) + '" target="_blank" rel="noopener">' +
+        '<svg viewBox="0 0 12 12"><path d="M2.5 1.2v9.6L10.5 6z"/></svg>' +
+        esc(top.brand) + ' <i>' + esc(countryLabel(top.country)) + '</i></a>'
+    : '';
+  const also = have.length > 1
+    ? '<p class="fy-also">Also on <b>' + esc(have.slice(1, 4).map(o => o.brand).join(', ')) + '</b></p>' : '';
+  const actions = '<div class="fy-hero-actions">' + watch +
+    '<button type="button" class="fy-details-btn" data-slug="' + escAttr(entry.slug) + '">Details</button></div>' + also;
+  const poster = film.poster_url
+    ? '<img class="fy-hero-poster" src="' + escAttr(film.poster_url) + '" alt="">'
+    : '<div class="fy-hero-poster"></div>';
+  return (film.poster_url
+      ? '<div class="fy-hero-bg" style="background-image:url(&quot;' + escAttr(film.poster_url) + '&quot;)"></div>' : '') +
+    '<div class="fy-hero-inner">' +
+      '<div class="fy-eyebrow-row"><span class="fy-eyebrow">Tonight’s pick · on your services</span>' +
+        '<button type="button" class="fy-another">Another ↻</button></div>' +
+      '<div class="fy-hero-grid">' +
+        '<div class="fy-hero-main">' + poster +
+          '<div class="fy-hero-body">' +
+            '<h2>' + esc(film.title) + (film.year ? ' <span>' + film.year + '</span>' : '') + '</h2>' +
+            (film.director ? '<p class="fy-hero-meta">' + esc(film.director) + '</p>' : '') +
+            (meta.length ? '<p class="fy-hero-genre">' + meta.join(' · ') + '</p>' : '') +
+            fyScoresHtml(entry.score, film) +
+            '<div class="fy-desk-only">' + actions + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="fy-why">' + fyLovedHtml(entry.score) +
+          fyBecauseHtml(entry.score.because, 'Its fans also loved your') + '</div>' +
+      '</div>' +
+      '<div class="fy-phone-only">' + actions + '</div>' +
+    '</div>';
+}
+
+function forYouCard(entry, rank) {
+  const have = fyBrandsBy(entry.film.all_offers, 'have');
+  const shown = have.slice(0, 2);
+  const because = (entry.score.because || []).filter(slug => FOR_YOU.loved[slug])
+    .slice(0, 2).map(slug => esc(FOR_YOU.loved[slug].title)).join(', ');
+  const extra =
+    '<div class="fy-card-est"><span class="fy-pill">' + fyEstimate(entry.score.predicted) + ' for you</span>' +
+      '<span class="fy-card-why">' + entry.score.lovers + ' of ' + entry.score.support + ' matches loved it</span></div>' +
+    (because ? '<div class="fy-card-because">Fans also loved your <b>' + because + '</b></div>' : '') +
+    '<div class="fy-card-services badge-wrap">' + shown.map(fyOfferBadge).join(' ') +
+      (have.length > shown.length ? ' <span class="badge badge-subscription">+' + (have.length - shown.length) + ' more</span>' : '') +
+    '</div>';
+  const card = filmCardShell(WATCHLIST_ROWS[entry.slug] || entry.film, extra);
+  const img = card.querySelector('.poster-thumb, .poster-placeholder');
+  if (img) {
+    const wrap = document.createElement('span');
+    wrap.className = 'fy-rank-wrap';
+    img.replaceWith(wrap);
+    wrap.appendChild(img);
+    wrap.insertAdjacentHTML('beforeend', '<span class="fy-rank">' + rank + '</span>');
+  }
+  return card;
+}
+
+function forYouPickTile(entry) {
+  const have = fyBrandsBy(entry.film.all_offers, 'have');
+  const free = fyBrandsBy(entry.film.all_offers, 'free');
+  let avail;
+  if (have.length) avail = '<span class="fy-pick-avail have">' + esc(have.slice(0, 2).map(o => o.brand).join(' · ')) + '</span>';
+  else if (free.length) avail = '<span class="fy-pick-avail free">Free · ' + esc(free[0].brand) + '</span>';
+  else avail = '<span class="fy-pick-avail none">Not on your services</span>';
+  const watchable = watchableNowClass(entry.film, null);
+  const tile = document.createElement('button');
+  tile.type = 'button';
+  tile.className = 'fy-pick';
+  tile.innerHTML =
+    '<span class="fy-pick-poster">' +
+      (entry.film.poster_url
+        ? '<img loading="lazy" src="' + escAttr(posterThumbUrl(entry.film.poster_url)) + '" alt="">'
+        : '<span class="poster-tile-fallback">' + esc(entry.film.title) + '</span>') +
+      (watchable ? '<span class="poster-dot poster-dot-' + watchable + '"></span>' : '') +
+      '<span class="fy-pick-est">' + fyEstimate(entry.score.predicted) + '</span></span>' +
+    '<span class="fy-pick-title">' + esc(entry.film.title) + (entry.film.year ? ' <span>' + entry.film.year + '</span>' : '') + '</span>' +
+    '<span class="fy-pick-loved">' + entry.score.lovers + ' of ' + entry.score.support + ' matches loved it</span>' +
+    avail;
+  tile.addEventListener('click', () => forYouQuickLook(entry.slug));
+  return tile;
+}
+
+function forYouMatchesHtml() {
+  const matches = FOR_YOU.matches;
+  const maxWeight = Math.max(...matches.closest.map(m => m.weight), 0.001);
+  const heart = '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"></path></svg>';
+  const sarah = matches.sarah
+    ? '<div class="fy-sarah">' + heart + '<div><b>Sarah is your #' + matches.sarah.rank + ' match</b>' +
+        '<p>You’ve both rated ' + matches.sarah.overlap + ' of the same films, and her ratings track yours (r = ' +
+        matches.sarah.pearson.toFixed(2) + ').</p></div></div>'
+    : '';
+  const rows = matches.closest.map((m, i) =>
+    '<div class="fy-match' + (m.is_sarah ? ' is-sarah' : '') + '">' +
+      '<span class="fy-match-rank">' + (i + 1) + '</span>' +
+      '<span class="fy-match-name' + (m.is_sarah ? ' sarah' : '') + '">' + (m.is_sarah ? 'Sarah' : 'Letterboxd member') + '</span>' +
+      '<span class="fy-match-n">' + m.overlap + ' shared</span>' +
+      '<span class="fy-match-bar"><span style="width:' + Math.round(100 * m.weight / maxWeight) + '%"></span></span>' +
+    '</div>').join('');
+  const offset = (FOR_YOU.your_offset >= 0 ? '+' : '−') + Math.abs(FOR_YOU.your_offset).toFixed(2) + '★';
+  const offsetCaption = 'you rate ' + (FOR_YOU.your_offset >= 0 ? 'above' : 'below') + ' the average member';
+  const updated = new Date(FOR_YOU.generated_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  const unscored = DATA.films.filter(row => !FOR_YOU.scores[row.slug]).length;
+  return '<div class="fy-section-head"><h2 class="home-section-header">Your taste matches</h2>' +
+      '<span class="aside">' + matches.count + ' of ' + FOR_YOU.corpus.raters + ' members</span></div>' +
+    '<div class="fy-panel">' + sarah +
+      '<div class="fy-stats">' +
+        '<div class="fy-stat"><b>' + matches.count + '</b><span>members who rate like you</span></div>' +
+        '<div class="fy-stat"><b>' + Math.round(FOR_YOU.corpus.ratings / 1000) + 'k</b><span>ratings behind every estimate</span></div>' +
+        '<div class="fy-stat"><b>' + offset + '</b><span>' + offsetCaption + '</span></div>' +
+      '</div>' +
+      '<div class="fy-list-head"><span>Closest ' + matches.closest.length + '</span><span>films rated in common</span></div>' +
+      rows +
+      '<p class="fy-privacy">Bar = how much each one counts: agreement, weighted by how many films you share. ' +
+        'Other members stay unnamed because this page is public.</p>' +
+    '</div>' +
+    '<div class="fy-how">' +
+      '<h4>How this works</h4>' +
+      '<p>From ' + FOR_YOU.corpus.ratings.toLocaleString('en-GB') + ' public ratings by ' + FOR_YOU.corpus.raters +
+        ' Letterboxd members, the ' + matches.count + ' whose ratings rise and fall most like yours are your matches. ' +
+        'A film’s estimate starts from how it’s usually rated and moves with how your matches rated it, compared ' +
+        'with what each of them normally gives.</p>' +
+      '<p>It’s an estimate, not a verdict — it hasn’t yet been shown to beat simply trusting the Letterboxd ' +
+        'average, which is why the two sit side by side.</p>' +
+      '<p class="updated">Updated ' + esc(updated) + ' · ' + unscored + ' watchlist films too few matches have rated get no estimate</p>' +
+    '</div>';
+}
+
+const FOR_YOU_PREVIEW = 6;
+const FOR_YOU_PICKS_PREVIEW = 9;
+
+function renderForYou() {
+  const content = document.getElementById('forYouContent');
+  if (!FOR_YOU) {
+    content.innerHTML = '<p class="muted fy-empty">Nothing here yet — the taste engine builds this once a day, ' +
+      'and hasn’t had enough to go on so far.</p>';
+    return;
+  }
+  // Tonight is the watchlist on a service you have, best estimate first
+  // (films you've already logged are left out upstream — see for_you.py).
+  const tonight = forYouEntries(FOR_YOU.watchlist).filter(e => WATCHLIST_ROWS[e.slug] && WATCHLIST_ROWS[e.slug].have_service);
+  const picks = forYouEntries(FOR_YOU.picks);
+  content.innerHTML =
+    '<div class="fy-layout">' +
+      '<div class="fy-main">' +
+        (tonight.length ? '<div class="fy-hero"></div>' : '') +
+        '<div class="fy-section">' +
+          '<div class="fy-section-head"><h2 class="home-section-header">Tonight on your services' +
+            '<span class="home-section-subtitle">your watchlist, best estimate first</span></h2></div>' +
+          '<div class="film-cards fy-tonight"></div>' +
+          '<button type="button" class="home-section-more fy-tonight-more"></button>' +
+        '</div>' +
+        '<div class="fy-section fy-picks-section">' +
+          '<div class="fy-section-head"><h2 class="home-section-header">New to you' +
+            '<span class="home-section-subtitle">not on your watchlist yet</span></h2>' +
+            '<span class="aside">' + picks.length + ' picks</span></div>' +
+          '<div class="fy-picks"></div>' +
+          '<button type="button" class="home-section-more fy-picks-more"></button>' +
+        '</div>' +
+      '</div>' +
+      '<aside class="fy-side">' + forYouMatchesHtml() + '</aside>' +
+    '</div>';
+
+  let heroIndex = 0;
+  let tonightExpanded = false;
+  const hero = content.querySelector('.fy-hero');
+  const tonightGrid = content.querySelector('.fy-tonight');
+  const tonightMore = content.querySelector('.fy-tonight-more');
+
+  function drawTonight() {
+    // Each card keeps its place in the whole ranking, whichever one "Another"
+    // has put in the hero.
+    const heroAt = heroIndex % tonight.length;
+    const rest = tonight.map((entry, i) => ({ entry, rank: i + 1 })).filter((_, i) => i !== heroAt);
+    const shown = tonightExpanded ? rest : rest.slice(0, FOR_YOU_PREVIEW);
+    tonightGrid.innerHTML = '';
+    shown.forEach(item => tonightGrid.appendChild(forYouCard(item.entry, item.rank)));
+    tonightMore.hidden = rest.length <= FOR_YOU_PREVIEW;
+    tonightMore.textContent = tonightExpanded ? 'Show fewer' : 'Show all ' + rest.length;
+    if (!tonight.length) {
+      tonightGrid.innerHTML = '<p class="muted">Nothing on your watchlist has an estimate and is on a service you have.</p>';
+    }
+  }
+  function drawHero() {
+    if (!hero) return;
+    const entry = tonight[heroIndex % tonight.length];
+    hero.innerHTML = forYouHeroHtml(entry);
+    hero.querySelector('.fy-another').addEventListener('click', () => {
+      heroIndex++;
+      drawHero();
+      drawTonight();
+    });
+    hero.querySelectorAll('.fy-details-btn').forEach(btn =>
+      btn.addEventListener('click', () => openFilmDetail(entry.slug, 'foryou')));
+  }
+  drawHero();
+  drawTonight();
+  tonightMore.addEventListener('click', () => { tonightExpanded = !tonightExpanded; drawTonight(); });
+  tonightGrid.addEventListener('click', event => {
+    if (event.target.closest('a')) return;
+    const card = event.target.closest('.film-card');
+    if (card) forYouQuickLook(card.dataset.slug);
+  });
+
+  const picksGrid = content.querySelector('.fy-picks');
+  const picksMore = content.querySelector('.fy-picks-more');
+  let picksExpanded = false;
+  function drawPicks() {
+    picksGrid.innerHTML = '';
+    (picksExpanded ? picks : picks.slice(0, FOR_YOU_PICKS_PREVIEW)).forEach(entry => picksGrid.appendChild(forYouPickTile(entry)));
+    picksMore.hidden = picks.length <= FOR_YOU_PICKS_PREVIEW;
+    picksMore.textContent = picksExpanded ? 'Show fewer' : 'Show all ' + picks.length;
+  }
+  drawPicks();
+  picksMore.addEventListener('click', () => { picksExpanded = !picksExpanded; drawPicks(); });
+}
+
+// The film page's two taste sections: why the engine rates this film the
+// way it does (for a film it has an estimate for) — short, so it sits above
+// "Where to watch", which for a widely streamed film is a wall of badges —
+// and "if you like this, see…", the unseen films this one's fans love
+// unusually often, below it with the other more-like-this rows. Drawn
+// straight away with the page's own data, ahead of the live TMDB layer.
+function forYouFilmSections(film) {
+  const sections = { why: null, see: null };
+  if (!FOR_YOU) return sections;
+  const score = FOR_YOU.scores[film.slug];
+  if (score) {
+    const why = document.createElement('div');
+    why.className = 'film-section fy-film-why';
+    why.innerHTML = '<div class="film-section-head"><h3>What your taste matches think</h3>' +
+        '<span class="count">' + score.support + ' of your ' + FOR_YOU.matches.count + ' matches have rated it</span></div>' +
+      fyScoresHtml(score, film) + fyLovedHtml(score) + fyBecauseHtml(score.because, 'Because you loved');
+    sections.why = why;
+  }
+  const suggestions = (FOR_YOU.fans_also_loved[film.slug] || []).filter(slug => DATA.films_by_slug[slug]);
+  if (suggestions.length) {
+    const see = document.createElement('div');
+    see.className = 'film-section fy-see';
+    see.innerHTML = '<div class="film-section-head"><h3>If you like this, see…</h3>' +
+      '<span class="count">films its fans love unusually often</span></div>';
+    const grid = document.createElement('div');
+    grid.className = 'poster-grid';
+    suggestions.forEach(slug => {
+      const tile = buildPosterTile({ ...DATA.films_by_slug[slug], slug }, HOME_COUNTRY_CODES[0], f => openFilmDetail(f.slug));
+      const estimate = FOR_YOU.scores[slug];
+      if (estimate) {
+        const tag = document.createElement('span');
+        tag.className = 'fy-tile-est';
+        tag.textContent = fyEstimate(estimate.predicted);
+        tile.appendChild(tag);
+      }
+      grid.appendChild(tile);
+    });
+    see.appendChild(grid);
+    sections.see = see;
+  }
+  return sections;
 }
 
 function openQuickLookFromCard(event) {
@@ -4273,10 +4903,14 @@ function renderFilmDetail(slug) {
     container.appendChild(block);
   }
 
+  const taste = forYouFilmSections(film);
+  if (taste.why) container.appendChild(taste.why);
+
   const avail = document.createElement('div');
   avail.className = 'film-section';
   avail.innerHTML = '<div class="film-section-head"><h3>Where to watch</h3></div>' + availabilityGroupsHtml(film);
   container.appendChild(avail);
+  if (taste.see) container.appendChild(taste.see);
 
   const relations = document.createElement('div');
   relations.id = 'filmDetailRelations';
@@ -5957,10 +6591,13 @@ function updateAppBarOffset() {
   }
   const barHeight = document.getElementById('appBar').offsetHeight;
   document.body.style.paddingTop = (barHeight + 20) + 'px';
+  // For the sticky taste-matches column on For you.
+  document.documentElement.style.setProperty('--app-bar-height', barHeight + 'px');
 }
 window.addEventListener('resize', updateAppBarOffset);
 
 renderHome();
+renderForYou();
 renderLists();
 renderFilmFilterToggles();
 renderFilmSarahFilter();

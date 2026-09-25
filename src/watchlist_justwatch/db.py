@@ -263,6 +263,7 @@ def load_state(database_url: str) -> StateDoc:
         sarah_watchlist=sarah_watchlist,
         cinema_showtimes=cinema_showtimes,
         cinema_matches=cinema_matches,
+        for_you=meta.get("for_you"),
     )
 
 
@@ -364,6 +365,7 @@ def save_state(database_url: str, state: StateDoc) -> None:
                 ("last_seen_diary_guid", Jsonb(state.last_seen_diary_guid)),
                 ("recent_watches", Jsonb(state.recent_watches)),
                 ("recent_additions", Jsonb(state.recent_additions)),
+                ("for_you", Jsonb(state.for_you)),
             ],
         )
 
@@ -764,3 +766,78 @@ def set_rater_film_kinds(conn: psycopg.Connection, kinds: dict[int, str]) -> Non
             "FROM unnest(%s::int[], %s::text[]) AS k(id, kind) WHERE f.id = k.id",
             (list(kinds), list(kinds.values())),
         )
+
+
+def taste_because(conn: psycopg.Connection, neighbour_ids: list[int], target_film_ids: list[int],
+                  loved_film_ids: list[int], *, top: int = 3, min_shared: int = 2) -> dict[int, list[tuple[int, int]]]:
+    """The "because you loved" line: for each target film, which of Josh's
+    own favourites (`loved_film_ids`) the neighbours who loved the target
+    (4.5+) love unusually often — the share of the target's fans who loved
+    it, minus the share of all the neighbours who did, so The Dark Knight
+    (loved by everyone) never explains anything. target id -> up to `top`
+    (favourite id, fans in common), best first. One aggregate; only the
+    winners come back."""
+    rows = conn.execute(
+        "WITH nb AS (SELECT unnest(%(nb)s::int[]) AS rater_id),"
+        "     fans AS (SELECT r.film_id AS t, r.rater_id FROM rater_ratings r JOIN nb USING (rater_id)"
+        "              WHERE r.film_id = ANY(%(targets)s::int[]) AND r.rating >= 9),"
+        "     fan_counts AS (SELECT t, count(*) AS n FROM fans GROUP BY t),"
+        "     lovers AS (SELECT r.film_id AS l, r.rater_id FROM rater_ratings r JOIN nb USING (rater_id)"
+        "                WHERE r.film_id = ANY(%(loved)s::int[]) AND r.rating >= 9),"
+        "     base AS (SELECT l, count(*)::float / %(n_nb)s AS p FROM lovers GROUP BY l),"
+        "     shared AS (SELECT f.t, lv.l, count(*) AS n FROM fans f JOIN lovers lv USING (rater_id)"
+        "                WHERE lv.l <> f.t GROUP BY f.t, lv.l HAVING count(*) >= %(min_shared)s),"
+        "     ranked AS (SELECT s.t, s.l, s.n, s.n::float / fc.n - b.p AS lift,"
+        "                       row_number() OVER (PARTITION BY s.t ORDER BY s.n::float / fc.n - b.p DESC, s.l) AS rk"
+        "                FROM shared s JOIN fan_counts fc USING (t) JOIN base b USING (l))"
+        "SELECT t, l, n FROM ranked WHERE rk <= %(top)s AND lift > 0 ORDER BY t, rk",
+        {"nb": neighbour_ids, "targets": target_film_ids, "loved": loved_film_ids,
+         "n_nb": max(len(neighbour_ids), 1), "min_shared": min_shared, "top": top},
+    ).fetchall()
+    result: dict[int, list[tuple[int, int]]] = {}
+    for target, loved, shared in rows:
+        result.setdefault(target, []).append((loved, shared))
+    return result
+
+
+def taste_fans_also_loved(conn: psycopg.Connection, source_film_ids: list[int], candidate_film_ids: list[int], *,
+                          top: int = 8, min_fans: int = 5, min_shared: int = 3) -> dict[int, list[int]]:
+    """"If you like this, see…": for each source film, the candidates its
+    fans (every scraped member who rated it 4.5+) love unusually often —
+    share of its fans who loved the candidate, minus the share of all
+    scraped members who did, so a crowd-pleaser doesn't follow every film
+    around. Films with fewer than `min_fans` fans get nothing rather than
+    a list built on two people. source id -> up to `top` candidate ids,
+    best first."""
+    rows = conn.execute(
+        "WITH fans AS (SELECT film_id AS s, rater_id FROM rater_ratings"
+        "              WHERE film_id = ANY(%(sources)s::int[]) AND rating >= 9),"
+        "     fan_counts AS (SELECT s, count(*) AS n FROM fans GROUP BY s HAVING count(*) >= %(min_fans)s),"
+        "     lovers AS (SELECT film_id AS c, rater_id FROM rater_ratings"
+        "                WHERE film_id = ANY(%(cands)s::int[]) AND rating >= 9),"
+        "     base AS (SELECT c, count(*)::float / greatest((SELECT count(*) FROM raters WHERE status = 'scraped'), 1)"
+        "                AS p FROM lovers GROUP BY c),"
+        "     shared AS (SELECT f.s, lv.c, count(*) AS n FROM fans f JOIN fan_counts USING (s)"
+        "                JOIN lovers lv USING (rater_id) WHERE lv.c <> f.s"
+        "                GROUP BY f.s, lv.c HAVING count(*) >= %(min_shared)s),"
+        "     ranked AS (SELECT sh.s, sh.c, sh.n::float / fc.n - b.p AS lift,"
+        "                       row_number() OVER (PARTITION BY sh.s ORDER BY sh.n::float / fc.n - b.p DESC, sh.c) AS rk"
+        "                FROM shared sh JOIN fan_counts fc USING (s) JOIN base b USING (c))"
+        "SELECT s, c FROM ranked WHERE rk <= %(top)s AND lift > 0 ORDER BY s, rk",
+        {"sources": source_film_ids, "cands": candidate_film_ids, "min_fans": min_fans,
+         "min_shared": min_shared, "top": top},
+    ).fetchall()
+    result: dict[int, list[int]] = {}
+    for source, candidate in rows:
+        result.setdefault(source, []).append(candidate)
+    return result
+
+
+def neighbour_fans(conn: psycopg.Connection, neighbour_ids: list[int], film_ids: list[int]) -> dict[int, int]:
+    """film id -> how many of the neighbours rated it 4.5+ (the "10 of 13
+    matches loved it" count; rater_predictions has the 13)."""
+    return dict(conn.execute(
+        "SELECT film_id, count(*) FROM rater_ratings "
+        "WHERE rater_id = ANY(%s::int[]) AND film_id = ANY(%s::int[]) AND rating >= 9 GROUP BY film_id",
+        (neighbour_ids, film_ids),
+    ).fetchall())

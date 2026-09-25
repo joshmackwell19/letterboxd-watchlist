@@ -263,6 +263,18 @@ def discover_by_cast_members(
     return sections
 
 
+def with_availability(
+    candidates: list[dict], now_iso: str, config: dict[str, CountryConfig], global_subscriptions: list[str],
+    revisitable: set[str],
+) -> tuple[list[str], dict[str, dict]]:
+    """Candidates that already have their Letterboxd details — the For you
+    tab's new picks, see for_you.py — through the same availability check
+    as every section here: each gets its JustWatch offers, and one with
+    none anywhere tracked is dropped."""
+    return _enrich_resolved_candidates(candidates, now_iso, config, global_subscriptions, revisitable,
+                                        exclude_slugs=set(), limit=len(candidates))
+
+
 def _rewatch_qualifies(info: dict) -> bool:
     if info.get("personal_rating") is not None:
         return info["personal_rating"] >= 4.0 or info.get("liked") is True

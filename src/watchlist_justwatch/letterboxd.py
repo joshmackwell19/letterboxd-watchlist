@@ -170,7 +170,9 @@ def get_film_details_by_slug(
     watchlist page, so no TMDB lookup is needed.
 
     Always returns a dict (possibly all-None/empty) rather than raising or
-    returning None, so callers can merge it in unconditionally.
+    returning None, so callers can merge it in unconditionally. A page that
+    loaded also says what TMDB calls it (tmdb_kind "movie"/"tv", tmdb_id),
+    from the same request — see parse_tmdb_link.
     """
     session = session or curl_requests.Session()
     try:
@@ -180,7 +182,8 @@ def get_film_details_by_slug(
     except LetterboxdFetchError:
         return dict(_EMPTY_FILM_DETAILS)
 
-    return _film_details_from_json_ld(response.text)
+    tmdb_kind, tmdb_id = parse_tmdb_link(response.text)
+    return {**_film_details_from_json_ld(response.text), "tmdb_kind": tmdb_kind, "tmdb_id": tmdb_id}
 
 
 def get_film_details_by_tmdb_id(
@@ -584,18 +587,22 @@ def parse_following_page(html: str) -> tuple[list[tuple[str, int | None]], bool]
 
 
 TMDB_BUTTON_RE = re.compile(r'<a [^>]*data-track-action="TMDB"[^>]*>')
-TMDB_KIND_RE = re.compile(r'themoviedb\.org/(movie|tv)/\d+')
+TMDB_KIND_RE = re.compile(r'themoviedb\.org/(movie|tv)/(\d+)')
+
+
+def parse_tmdb_link(html: str) -> tuple[str | None, int | None]:
+    """("movie" or "tv", TMDB id) from the TMDB button on a /film/<slug>/
+    page — Letterboxd lists TV miniseries and specials alongside films, and
+    the button's link is the one place that says which (the page's own
+    data-tmdb-type attribute says "movie" for both; checked on
+    /film/loki-2021/, September 2026). (None, None) when there's no button."""
+    button = TMDB_BUTTON_RE.search(html)
+    match = TMDB_KIND_RE.search(button.group(0)) if button else None
+    return (match.group(1), int(match.group(2))) if match else (None, None)
 
 
 def parse_tmdb_kind(html: str) -> str | None:
-    """"movie" or "tv", from the TMDB button on a /film/<slug>/ page —
-    Letterboxd lists TV miniseries and specials alongside films, and the
-    button's link is the one place that says which (the page's own
-    data-tmdb-type attribute says "movie" for both; checked on
-    /film/loki-2021/, September 2026). None when there's no button."""
-    button = TMDB_BUTTON_RE.search(html)
-    kind = TMDB_KIND_RE.search(button.group(0)) if button else None
-    return kind.group(1) if kind else None
+    return parse_tmdb_link(html)[0]
 
 
 def fetch_page_strict(

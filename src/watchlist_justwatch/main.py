@@ -24,6 +24,7 @@ from .cinemas import (
     fetch_riverside,
     fetch_vue,
     MATCHER_VERSION,
+    drop_past_showings,
     listing_match_key,
     match_watchlist_film,
     resolve_listing_to_letterboxd,
@@ -40,6 +41,7 @@ from .db import (
     save_state, seed_pending_watch_together, set_watch_together_status, set_watch_together_statuses_batch,
 )
 from .diff import build_report
+from .for_you import build_for_you
 from .html_email import (
     render_country_audit_html,
     render_country_audit_text,
@@ -75,6 +77,7 @@ from .similar import (
     discover_rewatch,
     find_similar,
     render_similar,
+    with_availability,
 )
 from .state import StateDoc, get_cached_entry_id
 from .taste import (
@@ -578,9 +581,36 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
         except Exception as exc:
             _warn(f"cinema showtimes fetch failed for {cinema_name!r}, carrying forward yesterday's ({exc})")
             cinema_showtimes.extend(s for s in previous_state.cinema_showtimes if s["cinema"] == cinema_name)
+    # Showings that have already started are no use to anyone — and without
+    # this, a venue that keeps failing would carry the same stale listing
+    # forward every day indefinitely rather than letting it run out.
+    cinema_showtimes = drop_past_showings(cinema_showtimes)
     current_state.cinema_showtimes = cinema_showtimes
     current_state.cinema_matches = _resolved_cinema_matches(
         cinema_showtimes, current_state.films, previous_state.cinema_matches, warn=_warn)
+
+    # The For you tab (see for_you.py): the taste engine against today's
+    # watchlist and diary. A nice-to-have on top of the core refresh, like a
+    # discovery section — a failure carries yesterday's forward, picks and
+    # all, rather than blanking the tab.
+    try:
+        with connect(database_url) as taste_conn:
+            current_state.for_you, pick_films = build_for_you(
+                taste_conn, diary=current_state_diary, josh_watchlist=josh_watchlist_slugs,
+                known_slugs=set(current_state.films) | set(discovery_films), discovery_films=discovery_films,
+                sarah_username=sarah_username, generated_at=now_iso, fetch_details=get_film_details_by_slug,
+                enrich=lambda candidates: with_availability(candidates, now_iso, config, global_subscriptions,
+                                                            revisitable),
+                dismissed=dismissed, warn=_warn,
+            )
+    except Exception as exc:
+        _warn(f"For you failed, carrying yesterday's forward ({exc})")
+        current_state.for_you = previous_state.for_you
+        pick_films = {slug: previous_state.discovery_films[slug]
+                      for slug in (previous_state.for_you or {}).get("picks", [])
+                      if slug in previous_state.discovery_films and slug not in current_state_diary}
+    # A film some section already recommends keeps that section's record.
+    current_state.discovery_films = {**pick_films, **discovery_films}
 
     # Auto-queue every watchlist film missing a watch-together decision for
     # Sarah's review — covers both the one-time backfill of the existing

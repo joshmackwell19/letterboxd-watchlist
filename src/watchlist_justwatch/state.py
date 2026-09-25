@@ -66,6 +66,10 @@ class StateDoc:
     # film at all — event cinema, mostly — remembered so it isn't retried
     # every day forever.
     cinema_matches: dict[str, dict | None] = field(default_factory=dict)
+    # The For you tab's data (see for_you.py) — estimates, new picks and the
+    # "why" behind each, built once a day from the taste engine's corpus.
+    # None when there isn't enough to go on yet (or it has never run).
+    for_you: dict | None = None
 
 
 def get_cached_entry_id(state: StateDoc, slug: str) -> tuple[str | None, str | None]:

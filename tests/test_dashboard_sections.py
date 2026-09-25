@@ -3,7 +3,6 @@ from datetime import date, datetime, timedelta
 from watchlist_justwatch.dashboard import (
     _build_home_sections,
     _cinema_listings,
-    _cinema_section,
     _leaving_soon_section,
     _quick_watch_section,
     _recently_added_section,
@@ -111,6 +110,20 @@ def test_recently_added_skips_slugs_no_longer_on_the_watchlist():
     assert [f["slug"] for f in section["films"]] == ["a"]
 
 
+def test_recently_added_skips_free_tier_additions():
+    # The log records both "a service you have picked this up" and "a free
+    # ad-supported service did" — only the first is what this section says.
+    state = StateDoc(films={"a": _film("a"), "b": _film("b")})
+    state.recent_additions = [
+        {"slug": "b", "brand": "ITVX", "country": "GB", "classification": "free", "added_at": "2026-09-08"},
+        {"slug": "a", "brand": "Netflix", "country": "AU", "classification": "have", "added_at": "2026-09-07"},
+    ]
+
+    section = _recently_added_section(state, exclude=set())
+
+    assert [f["slug"] for f in section["films"]] == ["a"]
+
+
 # ---------- _watch_together_section ----------
 
 def test_watch_together_only_includes_confirmed():
@@ -183,63 +196,17 @@ def test_quick_watch_respects_exclude_set():
     assert section["films"] == []
 
 
-# ---------- _cinema_section ----------
-
 def _showing(title: str, year: int, showtime: str, cinema: str = "Prince Charles Cinema") -> dict:
     return {"cinema": cinema, "title": title, "year": year, "showtime": showtime,
             "duration_minutes": 100, "director": None, "synopsis": None,
             "poster_url": None, "booking_url": None}
 
 
-def test_cinema_section_only_includes_matched_upcoming_showings():
-    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
-    state.cinema_showtimes = [
-        _showing("Taxi Driver", 1976, "2026-09-09T18:00:00"),
-        _showing("Some Unmatched Film", 2020, "2026-09-09T20:00:00"),
-    ]
-    now = datetime(2026, 9, 8, 12, 0)
-
-    section = _cinema_section(state, exclude=set(), now=now)
-
-    assert [f["slug"] for f in section["films"]] == ["taxi-driver"]
-    assert "Prince Charles Cinema" in section["films"][0]["cinema_note"]
-
-
-def test_cinema_section_excludes_showings_already_in_the_past():
-    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
-    state.cinema_showtimes = [_showing("Taxi Driver", 1976, "2026-09-07T18:00:00")]
-    now = datetime(2026, 9, 8, 12, 0)
-
-    section = _cinema_section(state, exclude=set(), now=now)
-
-    assert section["films"] == []
-
-
-def test_cinema_section_picks_soonest_showing_per_film():
-    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
-    state.cinema_showtimes = [
-        _showing("Taxi Driver", 1976, "2026-09-12T18:00:00"),
-        _showing("Taxi Driver", 1976, "2026-09-09T15:00:00"),
-    ]
-    now = datetime(2026, 9, 8, 12, 0)
-
-    section = _cinema_section(state, exclude=set(), now=now)
-
-    assert len(section["films"]) == 1
-    assert "9 Sep" in section["films"][0]["cinema_note"]
-
-
-def test_cinema_section_respects_exclude_set():
-    state = StateDoc(films={"taxi-driver": _film("taxi-driver", title="Taxi Driver", year=1976)})
-    state.cinema_showtimes = [_showing("Taxi Driver", 1976, "2026-09-09T18:00:00")]
-    now = datetime(2026, 9, 8, 12, 0)
-
-    section = _cinema_section(state, exclude={"taxi-driver"}, now=now)
-
-    assert section["films"] == []
-
-
 # ---------- _cinema_listings ----------
+
+# Before every showtime below, so none of them has passed yet.
+_CINEMA_NOW = datetime(2026, 9, 1)
+
 
 def test_cinema_listings_merges_a_matched_film_across_cinemas_into_one_row():
     # The same watchlist film showing at two different cinemas should be
@@ -254,7 +221,7 @@ def test_cinema_listings_merges_a_matched_film_across_cinemas_into_one_row():
         _showing("TAXI DRIVER!", 1976, "2026-09-10T20:00:00", cinema="Barbican"),
     ]
 
-    rows = _cinema_listings(state)
+    rows = _cinema_listings(state, now=_CINEMA_NOW)
 
     assert len(rows) == 1
     row = rows[0]
@@ -277,7 +244,7 @@ def test_cinema_listings_keeps_unmatched_same_title_films_separate_per_cinema():
         _showing("Mystery Film", None, "2026-09-10T20:00:00", cinema="Riverside Studios"),
     ]
 
-    rows = _cinema_listings(state)
+    rows = _cinema_listings(state, now=_CINEMA_NOW)
 
     assert len(rows) == 2
     assert all(row["matched_slug"] is None for row in rows)
@@ -290,9 +257,25 @@ def test_cinema_listings_sorts_by_soonest_showtime():
         _showing("Sooner Film", None, "2026-09-09T18:00:00"),
     ]
 
-    rows = _cinema_listings(state)
+    rows = _cinema_listings(state, now=_CINEMA_NOW)
 
     assert [r["title"] for r in rows] == ["Sooner Film", "Later Film"]
+
+
+def test_cinema_listings_drops_showings_that_have_already_started():
+    state = StateDoc(films={})
+    state.cinema_showtimes = [
+        _showing("Split Film", None, "2026-09-09T18:00:00"),
+        _showing("Split Film", None, "2026-09-10T20:00:00"),
+        _showing("Finished Film", None, "2026-09-09T12:00:00", cinema="Barbican"),
+    ]
+
+    rows = _cinema_listings(state, now=datetime(2026, 9, 9, 18, 30))
+
+    # A film with a showing still to come keeps just that one; a film
+    # whose every showing has passed leaves no row behind.
+    assert [r["title"] for r in rows] == ["Split Film"]
+    assert [s["showtime"] for s in rows[0]["showtimes"]] == ["2026-09-10T20:00:00"]
 
 
 # ---------- _build_home_sections director/cast section cap ----------
@@ -331,8 +314,8 @@ def test_build_home_sections_caps_person_sections_across_director_and_cast():
 # ---------- _build_home_sections cross-section exclusion ----------
 
 def test_build_home_sections_does_not_repeat_a_film_across_sections():
-    # A film qualifying for both leaving_soon and recently_added should only
-    # appear in the higher-priority section (leaving_soon leads).
+    # A film qualifying for both recently_added and leaving_soon should only
+    # appear in the higher-priority section (recently_added leads Home).
     state = StateDoc(films={"a": _film("a")})
     state.recent_additions = [
         {"slug": "a", "brand": "Netflix", "country": "AU", "classification": "have", "added_at": "2026-09-08"},
@@ -343,8 +326,29 @@ def test_build_home_sections_does_not_repeat_a_film_across_sections():
                                      dismissed_recommendations=set(), watch_together={})
 
     by_key = {s["key"]: [f["slug"] for f in s["films"]] for s in sections}
-    assert by_key.get("leaving_soon") == ["a"]
-    assert "recently_added" not in by_key
+    assert by_key.get("recently_added") == ["a"]
+    assert "leaving_soon" not in by_key
+
+
+def test_build_home_sections_leads_with_new_arrivals_and_ends_with_quick_watch():
+    state = StateDoc(films={"a": _film("a"), "b": _film("b"), "c": _film("c", runtime_minutes=85)})
+    state.recent_additions = [
+        {"slug": "a", "brand": "Netflix", "country": "AU", "classification": "have", "added_at": "2026-09-08"},
+    ]
+    offers = {
+        "a": [_offer("Netflix", "AU", "have", None)],
+        "b": [_offer("Stan", "AU", "have", _in_days(3))],
+        "c": [_offer("Netflix", "AU", "have", None)],
+    }
+
+    keys = [s["key"] for s in _build_home_sections(state, offers, films_by_slug={}, discovery_films={},
+                                                    dismissed_recommendations=set(), watch_together={})]
+
+    assert keys[0] == "recently_added"
+    assert keys[1] == "leaving_soon"
+    assert keys[-1] == "quick_watch"
+    # The cinema section moved out to its own tab entirely.
+    assert "cinema" not in keys
 
 
 def test_build_home_sections_omits_empty_sections_entirely():

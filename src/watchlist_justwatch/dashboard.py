@@ -10,7 +10,7 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import listing_match_key, match_watchlist_film
+from .cinemas import drop_past_showings, listing_match_key, match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
@@ -271,34 +271,29 @@ def _service_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> l
     return rows
 
 
-def _country_rows(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
-    by_country: dict[str, list[dict]] = defaultdict(list)
+def _country_index(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> list[dict]:
+    """Every country any watchlist film is available in, with how many.
 
-    for slug, all_offers in films_all_offers.items():
-        film = state.films[slug]
-        country_services: dict[str, list[dict]] = defaultdict(list)
-        for offer in all_offers:
-            country_services[offer["country"]].append({"brand": offer["brand"], "classification": offer["classification"]})
+    This used to be the By-country tab's whole dataset: a row per (country,
+    film) carrying that film's title, poster, director, cast and genre
+    again. 121 countries x 12,425 rows for 381 distinct films — every
+    film's metadata repeated about thirty times, all of it already in
+    films_by_slug — which came to 6MB of a 13MB payload, and 60% of what
+    the page actually costs to download once gzipped.
 
-        for country, services in country_services.items():
-            services.sort(key=lambda s: (_CLASSIFICATION_PRIORITY[s["classification"]], s["brand"]))
-            by_country[country].append({
-                "title": film.title, "year": film.year, "slug": film.slug, "rating": film.rating,
-                "poster_url": film.poster_url,
-                "director": _truncate_joined(", ".join(film.director) if film.director else None),
-                "starring": ", ".join(film.starring) if film.starring else None,
-                "genre": film.genre,
-                "runtime_minutes": film.runtime_minutes,
-                "services": services,
-                "has_have": any(s["classification"] == "have" for s in services),
-            })
-
-    countries = []
-    for code, films in by_country.items():
-        films.sort(key=lambda f: f["title"].lower())
-        countries.append({"code": code, "name": country_name(code), "films": films})
-    countries.sort(key=lambda c: c["name"])
-    return countries
+    The tab it fed is gone (the Films tab's country filter answers the same
+    question from data it already has), so what's left is the index the
+    rest of the page needs: code to name for every badge on the dashboard,
+    and the counts behind the Films tab's country dropdown.
+    """
+    counts: dict[str, int] = {}
+    for all_offers in films_all_offers.values():
+        for country in {offer["country"] for offer in all_offers}:
+            counts[country] = counts.get(country, 0) + 1
+    return sorted(
+        ({"code": code, "name": country_name(code), "film_count": n} for code, n in counts.items()),
+        key=lambda c: c["name"],
+    )
 
 
 def _films_by_slug(state: StateDoc, films_all_offers: dict[str, list[dict]]) -> dict[str, dict]:
@@ -512,6 +507,12 @@ def _recently_added_section(state: StateDoc, exclude: set[str], limit: int = 12)
     added_service_by_slug: dict[str, str] = {}
     for entry in state.recent_additions:  # already newest-first, retained by age not count (see main.py)
         slug = entry["slug"]
+        # The log carries both rungs that mean "watchable without paying
+        # more" — a service you have, and a free ad-supported one you
+        # don't. Only the first is this section's promise: something you
+        # already subscribe to just picked this up.
+        if entry.get("classification") != "have":
+            continue
         if slug in seen or slug in exclude or slug not in state.films:
             continue
         seen.add(slug)
@@ -545,12 +546,9 @@ def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> di
     cinemas in cinemas.py, mapped to its single soonest showing — shared
     by the Home section below and the Films tab's own per-card note, so
     both agree on which showing counts as "next" for a given film."""
-    now_iso = (now or datetime.now()).isoformat()
     soonest_by_slug: dict[str, dict] = {}
 
-    for showing in state.cinema_showtimes:
-        if showing["showtime"] < now_iso:
-            continue
+    for showing in drop_past_showings(state.cinema_showtimes, now):
         slug = match_watchlist_film(showing["title"], showing["year"], state.films)
         if slug is None or slug not in state.films:
             continue
@@ -563,27 +561,6 @@ def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> di
 
 def _cinema_note(showing: dict) -> str:
     return f"{showing['cinema']} — {_format_cinema_datetime(showing['showtime'])}"
-
-
-def _cinema_section(state: StateDoc, exclude: set[str], now: datetime | None = None,
-                     limit: int = RECOMMENDED_COUNT) -> dict:
-    """Watchlist films with an upcoming screening at one of the four
-    cinemas in cinemas.py — soonest showing first. A specific tonight/
-    tomorrow screening is a harder deadline than a streaming offer merely
-    expiring within 30 days, so this leads Home ahead of leaving_soon."""
-    soonest_by_slug = {
-        slug: showing for slug, showing in _soonest_cinema_showings(state, now).items()
-        if slug not in exclude
-    }
-    chosen = sorted(soonest_by_slug.items(), key=lambda kv: kv[1]["showtime"])[:limit]
-
-    films = []
-    for slug, showing in chosen:
-        card = _mini_card(state.films[slug])
-        card["cinema_note"] = _cinema_note(showing)
-        films.append(card)
-
-    return {"key": "cinema", "header": "At the cinema", "films": films}
 
 
 LEAVING_SOON_WINDOW_DAYS = 30
@@ -633,12 +610,13 @@ def _leaving_soon_section(state: StateDoc, films_all_offers: dict[str, list[dict
 def _custom_list_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
                           custom_lists: list[CustomList], list_sources: dict[str, set[str]],
                           list_totals: dict[str, int] | None = None) -> list[dict]:
-    """One section per config/custom_lists.yaml entry, in config order.
-    Unlike every other Home section these carry the *whole* matching set
-    (the page collapses it to a preview client-side) and ignore/don't feed
-    the cross-section dedupe — a list is only useful if it's complete, and
-    a De Palma film also showing up under "Top rated" is fine. Ordered
-    watchable-now first, then by rating, same as _top_rated_section."""
+    """One section per config/custom_lists.yaml entry with home: true, in
+    config order — the Lists tab. Unlike every Home section these carry
+    the *whole* matching set (the page collapses it to a preview
+    client-side) and neither read nor feed Home's cross-section dedupe —
+    a list is only useful if it's complete, and a De Palma film also
+    showing up under "Top rated" is fine. Ordered watchable-now first,
+    then by rating, same as _top_rated_section."""
     def has_have(slug: str) -> bool:
         return any(o["classification"] == "have" for o in films_all_offers.get(slug, []))
 
@@ -669,7 +647,11 @@ def _custom_list_sections(state: StateDoc, films_all_offers: dict[str, list[dict
 
         sections.append({
             "key": f"list:{cl.key}", "header": cl.name, "subtitle": " · ".join(parts),
-            "custom_list": True, "films": [_mini_card(state.films[s]) for s in members],
+            # The Lists tab groups by this the same way the Films-tab
+            # dropdown does — one chip per group, so the eight Cannes
+            # lists collapse to one jump target rather than eight.
+            "group": cl.group, "custom_list": True,
+            "films": [_mini_card(state.films[s]) for s in members],
         })
     return sections
 
@@ -680,9 +662,7 @@ MAX_PERSON_SECTIONS = 4
 def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]],
                           films_by_slug: dict[str, dict], discovery_films: dict[str, dict],
                           dismissed_recommendations: set[str],
-                          watch_together: dict[str, dict], custom_lists: list[CustomList] = (),
-                          list_sources: dict[str, set[str]] | None = None,
-                          list_totals: dict[str, int] | None = None) -> list[dict]:
+                          watch_together: dict[str, dict]) -> list[dict]:
     # Same merge order and the same already-reclassified discovery films as
     # the payload's own films_by_slug, so a card here and the quick-look it
     # opens can't disagree about what a film costs.
@@ -699,28 +679,22 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
             sections.append(section)
             used.update(f["slug"] for f in section["films"])
 
-    # A specific tonight/tomorrow cinema screening leads everything — the
-    # hardest deadline on the whole page. Leaving soon next — losing
-    # access to something you already know you want is a bigger deal than
-    # a delayed discovery, so it outranks even recently-added. Recent
-    # service additions next — the most immediately actionable ("this is
-    # now watchable") signal after that.
-    add(_cinema_section(state, used))
-    add(_leaving_soon_section(state, films_all_offers, used))
+    # "Just landed on a service you have" leads: it is the only section
+    # that tells you something you could not have known yesterday, and
+    # every film in it is watchable right now at no extra cost. Leaving
+    # soon second — the other deadline-shaped section, but a 30-day window
+    # is a softer one than "this is new today". Cinema screenings used to
+    # lead both; they have their own tab, and a London showtime is not
+    # something Home can act on the way a new service addition is.
     add(_recently_added_section(state, used))
+    add(_leaving_soon_section(state, films_all_offers, used))
     add(_watch_together_section(state, watch_together, used))
-
-    # Your own curated lists next — deliberate interests outrank
-    # algorithmic discovery. Appended directly rather than via add(): see
-    # _custom_list_sections for why they sit outside the dedupe.
-    sections.extend(_custom_list_sections(state, films_all_offers, custom_lists, list_sources or {}, list_totals))
 
     # Recommended-from-recent-watches and top-rated next — general
     # discovery, not tied to a specific person — so they're not buried
     # under however many per-director/per-cast sections exist this run.
     add(_cached_section(state, lookup, "because_you_watched", used))
     add(_top_rated_section(state, films_all_offers, used))
-    add(_quick_watch_section(state, films_all_offers, used))
 
     # One section per unique director/cast member from your last few
     # watches — however many that turns out to be (see main.py, which can
@@ -750,6 +724,13 @@ def _build_home_sections(state: StateDoc, films_all_offers: dict[str, list[dict]
     # picks are lower-confidence than the sections above.
     add(_cached_section(state, lookup, "by_genre", used))
     add(_cached_section(state, lookup, "hidden_gems", used))
+
+    # Deliberately the very last section: it answers "I have a spare
+    # evening and no idea what to put on", which is a question you only
+    # reach after nothing above it caught your eye. Running it here rather
+    # than mid-page also means it picks from what the sections above
+    # did not already show.
+    add(_quick_watch_section(state, films_all_offers, used))
 
     return sections
 
@@ -879,7 +860,7 @@ def _search_taxonomy(
     }
 
 
-def _cinema_listings(state: StateDoc) -> list[dict]:
+def _cinema_listings(state: StateDoc, now: datetime | None = None) -> list[dict]:
     """One row per film for the full Cinemas tab — a matched watchlist
     film showing at several of the four cinemas merges into a single row
     (grouped by slug, the one reliable cross-cinema identity a match
@@ -901,7 +882,9 @@ def _cinema_listings(state: StateDoc) -> list[dict]:
         if match and match.get("slug")
     }
 
-    for showing in state.cinema_showtimes:
+    # Only what's still to come — a film whose last showing has passed drops
+    # off the tab entirely, since no showtimes means no row.
+    for showing in drop_past_showings(state.cinema_showtimes, now):
         slug = match_watchlist_film(showing["title"], showing["year"], state.films)
         # Everything the watchlist can't name — most of the programme — falls
         # back to the Letterboxd film run() resolved for it. That match is
@@ -1033,8 +1016,12 @@ def build_dashboard_data(
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
         "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, discovery_films,
-                                              dismissed_recommendations, watch_together, custom_lists,
-                                              source_slugs, list_totals),
+                                              dismissed_recommendations, watch_together),
+        # The Lists tab. Its own payload key rather than a run of Home
+        # sections: fourteen of them buried Home's time-sensitive rows
+        # under a screen and a half of scrolling, and they are the one
+        # thing on the page you go looking for deliberately.
+        "list_sections": _custom_list_sections(josh_state, josh_offers, custom_lists, source_slugs, list_totals),
         "films": rows,
         # Films-tab dropdown options — config order, lists with no current
         # watchlist members left out (same as their Home sections).
@@ -1044,7 +1031,7 @@ def build_dashboard_data(
             if (n := sum(cl.key in r["custom_lists"] for r in rows))
         ],
         "services": _service_rows(josh_state, josh_offers),
-        "countries": _country_rows(josh_state, josh_offers),
+        "countries": _country_index(josh_state, josh_offers),
         # Watchlist entries win over discovery ones for the same slug: both
         # can hold the film, but only the watchlist copy was built from this
         # run's data. The other order let a stored recommendation shadow it
@@ -1836,12 +1823,11 @@ _TEMPLATE = """<!DOCTYPE html>
         </svg>
         Home<span class="new-badge home-new-badge hidden"></span>
       </button>
-      <button class="tab-btn" id="tab-country">
+      <button class="tab-btn" id="tab-lists">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="9"></circle>
-          <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
+          <path d="M4 6h2M4 12h2M4 18h2M9 6h11M9 12h11M9 18h11"></path>
         </svg>
-        Country
+        Lists
       </button>
       <button class="tab-btn" id="tab-services">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -1975,21 +1961,12 @@ _TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
   <div class="app-bar-controls" id="appBarControls">
-    <div class="controls" data-view="country" id="controls-country">
-      <select id="countrySelect"></select>
-      <select id="countryServiceSelect"></select>
-      <select id="countryGenreSelect"></select>
+    <div class="controls" data-view="lists" id="controls-lists">
       <div class="search-wrap">
-        <input type="text" id="countryFilmSearch" placeholder="Search title, year, director, cast...">
-        <span class="search-clear hidden" id="countryFilmSearchClear">✕</span>
+        <input type="text" id="listSearch" placeholder="Search lists and films...">
+        <span class="search-clear hidden" id="listSearchClear">✕</span>
       </div>
-      <select id="countrySortSelect">
-        <option value="rating">Sort: Rating (highest)</option>
-        <option value="title">Sort: Title (A–Z)</option>
-        <option value="year">Sort: Year (newest)</option>
-      </select>
-      <span id="countryFilterToggles"></span>
-      <span class="sarah-filter" id="countrySarahFilter"></span>
+      <span class="pill-toggle" id="listsHaveOnly">Only on a service I have</span>
     </div>
     <div class="controls" data-view="services" id="controls-services">
       <select id="serviceSelect"></select>
@@ -2056,10 +2033,9 @@ _TEMPLATE = """<!DOCTYPE html>
   </div>
 </section>
 
-<section class="view" id="view-country">
-  <div class="quick-filters" id="countryQuickJump"></div>
-  <div class="active-filters" id="activeCountryFilters"></div>
-  <div id="countryGrid" class="film-cards"></div>
+<section class="view" id="view-lists">
+  <div class="quick-filters" id="listGroupJump"></div>
+  <div id="listSections"></div>
 </section>
 
 <section class="view" id="view-services">
@@ -2148,12 +2124,11 @@ _TEMPLATE = """<!DOCTYPE html>
     </svg>
     Home<span class="new-badge home-new-badge hidden"></span>
   </button>
-  <button class="bottom-nav-btn" id="nav-country">
+  <button class="bottom-nav-btn" id="nav-lists">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="9"></circle>
-      <path d="M3 12h18M12 3c2.5 2.5 4 6 4 9s-1.5 6.5-4 9c-2.5-2.5-4-6-4-9s1.5-6.5 4-9z"></path>
+      <path d="M4 6h2M4 12h2M4 18h2M9 6h11M9 12h11M9 18h11"></path>
     </svg>
-    Country
+    Lists
   </button>
   <button class="bottom-nav-btn" id="nav-services">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -2203,7 +2178,38 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <script>
 const DATA = __DATA__;
-const TABS = ['home', 'country', 'services', 'films', 'cinemas'];
+
+// Cinema showtimes are as of the last build, and the page can be open for
+// hours (or a day) after it — so anything that's started since drops off
+// here, before anything renders, and a film with nothing left to see
+// drops off entirely. Showtimes are London wall-clock strings with no
+// offset, which Date reads as the viewer's own local time — London, here.
+(function dropPastShowtimes() {
+  const now = Date.now();
+  DATA.cinemas = DATA.cinemas
+    .map(row => ({ ...row, showtimes: row.showtimes.filter(s => new Date(s.showtime).getTime() >= now) }))
+    .filter(row => row.showtimes.length);
+
+  // The film cards' "next showing" note was worked out at build time too.
+  // Rows are sorted soonest-first, so the first left is the next one.
+  const nextBySlug = new Map();
+  DATA.cinemas.forEach(row => { if (row.matched_slug) nextBySlug.set(row.matched_slug, row.showtimes[0]); });
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const note = s => {
+    const d = new Date(s.showtime);
+    const h = d.getHours() % 12 || 12;
+    const time = h + ':' + String(d.getMinutes()).padStart(2, '0') + (d.getHours() < 12 ? 'am' : 'pm');
+    return s.cinema + ' — ' + DAYS[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()] + ', ' + time;
+  };
+  DATA.films.forEach(row => {
+    if (!row.cinema_note) return;
+    const next = nextBySlug.get(row.slug);
+    row.cinema_note = next ? note(next) : null;
+  });
+})();
+
+const TABS = ['home', 'lists', 'services', 'films', 'cinemas'];
 
 function esc(text) {
   if (text == null) return '';
@@ -2360,7 +2366,7 @@ function wireSearchClear(inputId, clearId, rerender) {
 }
 
 document.getElementById('tab-home').addEventListener('click', () => showView('home'));
-document.getElementById('tab-country').addEventListener('click', () => showView('country'));
+document.getElementById('tab-lists').addEventListener('click', () => showView('lists'));
 document.getElementById('tab-services').addEventListener('click', () => showView('services'));
 document.getElementById('tab-films').addEventListener('click', () => showView('films'));
 document.getElementById('tab-cinemas').addEventListener('click', () => showView('cinemas'));
@@ -2368,7 +2374,7 @@ document.getElementById('tab-review').addEventListener('click', () => showView('
 document.getElementById('tab-sarah').addEventListener('click', () => showView('sarah'));
 document.getElementById('tab-settings').addEventListener('click', () => { renderSettings(); showView('settings'); });
 document.getElementById('nav-home').addEventListener('click', () => showView('home'));
-document.getElementById('nav-country').addEventListener('click', () => showView('country'));
+document.getElementById('nav-lists').addEventListener('click', () => showView('lists'));
 document.getElementById('nav-services').addEventListener('click', () => showView('services'));
 document.getElementById('nav-films').addEventListener('click', () => showView('films'));
 document.getElementById('nav-cinemas').addEventListener('click', () => showView('cinemas'));
@@ -2770,6 +2776,17 @@ function filmCardShell(row, servicesHtml) {
     '</div>';
   return div;
 }
+
+// Code -> name, built once from the country index the payload ships.
+// Up here rather than with the rest of init because countryLabel() below
+// is called during the first services/films render, which runs earlier.
+DATA.countryNames = {};
+DATA.countries.forEach(c => { DATA.countryNames[c.code] = c.name; });
+
+// Your three home markets — same set as FREE_TIER_COUNTRIES server-side.
+// The country tab they used to head is gone; these still pick the default
+// country for a poster tile and lead the service detail page's pills.
+const HOME_COUNTRY_CODES = ['GB', 'US', 'AU'];
 
 function countryLabel(code) {
   return (DATA.countryNames && DATA.countryNames[code]) || code;
@@ -3186,10 +3203,15 @@ wireSearchClear('sarahSearch', 'sarahSearchClear', renderSarah);
 
 const CUSTOM_LIST_PREVIEW = 6;
 
-function renderHome() {
-  const container = document.getElementById('homeSections');
+// Home and Lists render the same section shape; only what they are fed
+// differs, so the builder is shared rather than copied. `films` is passed
+// separately from `section` because Lists filters a section's films down
+// before rendering and still wants the section's own header/subtitle.
+function renderSections(container, sections, filmsFor) {
   container.innerHTML = '';
-  DATA.home_sections.forEach(section => {
+  sections.forEach(section => {
+    const sectionFilms = filmsFor ? filmsFor(section) : section.films;
+    if (!sectionFilms.length) return;
     const wrap = document.createElement('div');
     wrap.className = 'home-section';
     const header = document.createElement('h2');
@@ -3205,7 +3227,7 @@ function renderHome() {
 
     const grid = document.createElement('div');
     grid.className = 'film-cards';
-    section.films.forEach((film, i) => {
+    sectionFilms.forEach((film, i) => {
       const card = filmCardShell(film, '');
       addDismissButton(card, film.slug);
       // Custom lists carry their whole matching set — show a preview and
@@ -3215,10 +3237,10 @@ function renderHome() {
     });
     wrap.appendChild(grid);
 
-    if (section.custom_list && section.films.length > CUSTOM_LIST_PREVIEW) {
+    if (section.custom_list && sectionFilms.length > CUSTOM_LIST_PREVIEW) {
       const more = document.createElement('button');
       more.className = 'home-section-more';
-      const collapsedLabel = 'Show all ' + section.films.length;
+      const collapsedLabel = 'Show all ' + sectionFilms.length;
       more.textContent = collapsedLabel;
       more.addEventListener('click', () => {
         const expanding = more.textContent === collapsedLabel;
@@ -3235,10 +3257,80 @@ function renderHome() {
   });
 }
 
-document.getElementById('homeSections').addEventListener('click', event => {
+function renderHome() {
+  renderSections(document.getElementById('homeSections'), DATA.home_sections);
+}
+
+function openQuickLookFromCard(event) {
   if (event.target.closest('a.film-link') || event.target.closest('.dismiss-btn')) return;
   const card = event.target.closest('.film-card');
   if (card) openQuickLook(card.dataset.slug);
+}
+
+document.getElementById('homeSections').addEventListener('click', openQuickLookFromCard);
+document.getElementById('listSections').addEventListener('click', openQuickLookFromCard);
+
+// ---------- Lists ----------
+
+// The fourteen curated lists from config/custom_lists.yaml, which used to
+// sit mid-Home and pushed everything time-sensitive below the fold. Here
+// they get the whole tab: a chip per group, a search that matches either a
+// list's name or a film inside it, and a filter down to what you can
+// actually watch tonight.
+let listGroupFilter = null;
+let listsHaveOnly = false;
+
+function haveSlugs() {
+  if (!DATA._haveSlugs) {
+    DATA._haveSlugs = new Set(DATA.films.filter(r => r.have_service).map(r => r.slug));
+  }
+  return DATA._haveSlugs;
+}
+
+function listSectionsInScope() {
+  const sections = DATA.list_sections || [];
+  if (!listGroupFilter) return sections;
+  return sections.filter(s => (s.group || 'Other') === listGroupFilter);
+}
+
+function renderListGroupJump() {
+  const counts = new Map();
+  (DATA.list_sections || []).forEach(s => {
+    const group = s.group || 'Other';
+    counts.set(group, (counts.get(group) || 0) + 1);
+  });
+  const entries = [...counts].map(([group, count]) => ({ value: group, label: group, count }));
+  renderQuickJumpChips('listGroupJump', entries, listGroupFilter || '', value => {
+    listGroupFilter = value || null;
+    renderLists();
+  });
+}
+
+function renderLists() {
+  const search = document.getElementById('listSearch').value.trim().toLowerCase();
+  const have = haveSlugs();
+  document.getElementById('listsHaveOnly').classList.toggle('active', listsHaveOnly);
+  renderListGroupJump();
+
+  renderSections(document.getElementById('listSections'), listSectionsInScope(), section => {
+    // A search matching the list's own name keeps the whole list — you
+    // asked for "Cannes", not for films with Cannes in the title.
+    const wholeList = search && section.header.toLowerCase().includes(search);
+    return section.films.filter(film => {
+      if (listsHaveOnly && !have.has(film.slug)) return false;
+      if (!search || wholeList) return true;
+      return (film.title + ' ' + (film.director || '')).toLowerCase().includes(search);
+    });
+  });
+
+  ensureNotEmpty(document.getElementById('listSections'), 'No lists match that.');
+}
+
+document.getElementById('listSearch').addEventListener('input', renderLists);
+wireSearchClear('listSearch', 'listSearchClear', renderLists);
+document.getElementById('listsHaveOnly').addEventListener('click', () => {
+  listsHaveOnly = !listsHaveOnly;
+  renderLists();
 });
 
 // Decision paralysis, not lack of options, is the actual problem with 354
@@ -4718,14 +4810,19 @@ function customListName(key) {
   return list ? list.name : key;
 }
 
+// The number beside each country has to be the number of rows that
+// selecting it leaves behind, so it counts exactly what the row filter
+// below counts: any offer in that country — main brand or other service —
+// whose classification is currently switched on. It used to count only
+// "have" offers, which made GB read 110 and then show 210.
 function countryCountsFromRows(rows) {
   const counts = {};
   rows.forEach(row => {
-    const withHave = new Set();
-    Object.values(row.main).forEach(entries => {
-      entries.forEach(e => { if (e.classification === 'have') withHave.add(e.country); });
-    });
-    withHave.forEach(c => { counts[c] = (counts[c] || 0) + 1; });
+    const countries = new Set();
+    const note = e => { if (filmsFilterState[e.classification]) countries.add(e.country); };
+    Object.values(row.main).forEach(entries => entries.forEach(note));
+    row.other_services.forEach(note);
+    countries.forEach(c => { counts[c] = (counts[c] || 0) + 1; });
   });
   return counts;
 }
@@ -4739,9 +4836,9 @@ function updateFilmsCountrySelect(counts) {
   select.appendChild(allOpt);
 
   const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  // A badge click can set activeCountry to a country with zero "have" films
-  // (e.g. a free/subscription-only market) — keep it selectable rather than
-  // silently clearing the filter just because it isn't have-ranked.
+  // A badge click can set activeCountry to a country every one of whose
+  // offers is currently filtered out by the classification toggles — keep
+  // it selectable rather than silently dropping it out of the dropdown.
   if (activeCountry && !counts[activeCountry]) {
     ranked.push([activeCountry, 0]);
   }
@@ -5187,9 +5284,13 @@ function renderCinemas() {
   const q = document.getElementById('cinemaSearch').value.trim().toLowerCase();
   renderActiveCinemaFilters();
 
+  // Local dates, not toISOString()'s UTC ones — showtimes are London
+  // wall-clock, and in summer UTC's "today" ends an hour early.
+  const localIso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
   const now = new Date();
-  const todayIso = now.toISOString().slice(0, 10);
-  const tomorrowIso = new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
+  const todayIso = localIso(now);
+  const tomorrowIso = localIso(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
 
   const frag = document.createDocumentFragment();
   DATA.cinemas.forEach(row => {
@@ -5840,253 +5941,7 @@ renderServiceFilterToggles();
 renderServiceSarahFilter();
 renderServicesRows();
 
-// ---------- By VPN country ----------
-
-const countryCols = [
-  { key: 'title', sort: r => r.title.toLowerCase(), dir: 1 },
-  { key: 'year', sort: r => r.year || 0, dir: -1 },
-  { key: 'rating', sort: r => r.rating == null ? -1 : r.rating, dir: -1 },
-];
-
-const countryFilterState = { have: true, could_get_again: true, free: true, subscription: true };
-let countrySarahFilter = 'all';
-
-let countrySortKey = 'rating', countrySortDir = -1;
-
-function populateCountrySelect() {
-  const select = document.getElementById('countrySelect');
-
-  const byFilmCount = DATA.countries.slice().sort((a, b) => b.films.length - a.films.length || a.name.localeCompare(b.name));
-  const top = byFilmCount.slice(0, 10);
-  const topCodes = new Set(top.map(c => c.code));
-  const rest = DATA.countries.filter(c => !topCodes.has(c.code)); // DATA.countries is already name-sorted
-
-  const addOptions = (label, countries) => {
-    if (!countries.length) return;
-    const group = document.createElement('optgroup');
-    group.label = label;
-    countries.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c.code;
-      opt.textContent = c.name + ' (' + c.films.length + ' films)';
-      group.appendChild(opt);
-    });
-    select.appendChild(group);
-  };
-  addOptions('Most films on your watchlist', top);
-  addOptions('All other countries', rest);
-
-  if (top.length) select.value = top[0].code;
-}
-
-function populateCountryServiceSelect() {
-  const country = currentCountry();
-  const select = document.getElementById('countryServiceSelect');
-  const previous = select.value;
-  const services = country ? [...new Set(country.films.flatMap(f => f.services.map(s => s.brand)))].sort((a, b) => a.localeCompare(b)) : [];
-  select.innerHTML = '<option value="">All services</option>' +
-    services.map(s => '<option value="' + esc(s) + '">' + esc(s) + '</option>').join('');
-  if (services.includes(previous)) select.value = previous;
-}
-
-function populateCountryGenreSelect() {
-  const country = currentCountry();
-  const select = document.getElementById('countryGenreSelect');
-  const previous = select.value;
-  const genres = country
-    ? [...new Set(country.films.flatMap(f => f.genre || []))].sort((a, b) => a.localeCompare(b))
-    : [];
-  select.innerHTML = '<option value="">Focus on a genre...</option>' +
-    genres.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join('');
-  if (genres.includes(previous)) select.value = previous;
-}
-
-function renderCountryFilterToggles() {
-  renderClassificationToggles('countryFilterToggles', countryFilterState, renderCountryRows);
-}
-
-function renderCountrySarahFilter() {
-  renderSarahFilterToggle('countrySarahFilter', countrySarahFilter, value => {
-    countrySarahFilter = value;
-    renderCountrySarahFilter();
-    renderCountryRows();
-  });
-}
-
-function currentCountry() {
-  const code = document.getElementById('countrySelect').value;
-  return DATA.countries.find(c => c.code === code);
-}
-
-// Your three home markets — same set as FREE_TIER_COUNTRIES server-side —
-// as one-click chips instead of hunting for them in the countrySelect
-// dropdown's alphabetical "All other countries" group.
-const HOME_COUNTRY_CODES = ['GB', 'US', 'AU'];
-
-function renderCountryQuickJump() {
-  const entries = HOME_COUNTRY_CODES
-    .map(code => DATA.countries.find(c => c.code === code))
-    .filter(Boolean)
-    .map(c => ({ value: c.code, label: c.name, count: c.films.length }));
-  const active = document.getElementById('countrySelect').value;
-  renderQuickJumpChips('countryQuickJump', entries, active, value => {
-    document.getElementById('countrySelect').value = value;
-    populateCountryServiceSelect();
-    populateCountryGenreSelect();
-    renderCountryRows();
-  }, false);
-}
-
-function renderActiveCountryFilters() {
-  const container = document.getElementById('activeCountryFilters');
-  container.innerHTML = '';
-  const q = document.getElementById('countryFilmSearch').value.trim();
-  const serviceQ = document.getElementById('countryServiceSelect').value;
-  const genreQ = document.getElementById('countryGenreSelect').value;
-  const anyToggleOff = CLASSIFICATIONS.some(k => !countryFilterState[k]);
-  if (!q && !serviceQ && !genreQ && countrySarahFilter === 'all' && !anyToggleOff) return;
-
-  if (genreQ) {
-    const chip = document.createElement('span');
-    chip.className = 'filter-chip';
-    chip.textContent = genreQ + ' ✕';
-    chip.addEventListener('click', () => { document.getElementById('countryGenreSelect').value = ''; renderCountryRows(); });
-    container.appendChild(chip);
-  }
-  if (q) {
-    const chip = document.createElement('span');
-    chip.className = 'filter-chip';
-    chip.textContent = '"' + q + '" ✕';
-    chip.addEventListener('click', () => {
-      document.getElementById('countryFilmSearch').value = '';
-      document.getElementById('countryFilmSearchClear').classList.add('hidden');
-      renderCountryRows();
-    });
-    container.appendChild(chip);
-  }
-  if (serviceQ) {
-    const chip = document.createElement('span');
-    chip.className = 'filter-chip';
-    chip.textContent = serviceQ + ' ✕';
-    chip.addEventListener('click', () => { document.getElementById('countryServiceSelect').value = ''; renderCountryRows(); });
-    container.appendChild(chip);
-  }
-  if (countrySarahFilter !== 'all') {
-    const chip = document.createElement('span');
-    chip.className = 'filter-chip';
-    chip.textContent = (countrySarahFilter === 'yes' ? 'Sarah said yes' : 'Sarah said no') + ' ✕';
-    chip.addEventListener('click', () => { countrySarahFilter = 'all'; renderCountrySarahFilter(); renderCountryRows(); });
-    container.appendChild(chip);
-  }
-  if (anyToggleOff) {
-    const chip = document.createElement('span');
-    chip.className = 'filter-chip';
-    chip.textContent = 'Availability filters ✕';
-    chip.addEventListener('click', () => {
-      CLASSIFICATIONS.forEach(k => { countryFilterState[k] = true; });
-      renderCountryFilterToggles();
-      renderCountryRows();
-    });
-    container.appendChild(chip);
-  }
-  const clearAll = document.createElement('span');
-  clearAll.className = 'filter-chip clear-all-chip';
-  clearAll.textContent = 'Clear all ✕';
-  clearAll.addEventListener('click', () => {
-    document.getElementById('countryFilmSearch').value = '';
-    document.getElementById('countryFilmSearchClear').classList.add('hidden');
-    document.getElementById('countryServiceSelect').value = '';
-    document.getElementById('countryGenreSelect').value = '';
-    countrySarahFilter = 'all';
-    renderCountrySarahFilter();
-    CLASSIFICATIONS.forEach(k => { countryFilterState[k] = true; });
-    renderCountryFilterToggles();
-    renderCountryRows();
-  });
-  container.appendChild(clearAll);
-}
-
-function renderCountryRows() {
-  const container = document.getElementById('countryGrid');
-  container.innerHTML = '';
-  const country = currentCountry();
-  renderActiveCountryFilters();
-  renderCountryQuickJump();
-  if (!country) return;
-
-  const q = document.getElementById('countryFilmSearch').value.trim().toLowerCase();
-  const serviceQ = document.getElementById('countryServiceSelect').value;
-  const genreQ = document.getElementById('countryGenreSelect').value;
-
-  let rows = country.films.slice();
-  const col = countryCols.find(c => c.key === countrySortKey);
-  if (col && col.sort) {
-    rows.sort((a, b) => {
-      const av = col.sort(a), bv = col.sort(b);
-      return av < bv ? -countrySortDir : av > bv ? countrySortDir : 0;
-    });
-  }
-
-  const frag = document.createDocumentFragment();
-  rows.forEach(row => {
-    if (q && !searchHaystack(row).includes(q)) return;
-    if (serviceQ && !row.services.some(s => s.brand === serviceQ)) return;
-    if (genreQ && !(row.genre || []).includes(genreQ)) return;
-    if (!sarahFilterMatches(DATA.films_by_slug[row.slug]?.watch_together_status, countrySarahFilter)) return;
-    const visibleServices = row.services.filter(s => countryFilterState[s.classification]);
-    if (!visibleServices.length) return;
-
-    const serviceBadges = visibleServices.map(s =>
-      '<span class="badge badge-' + s.classification + '" data-brand="' + esc(s.brand) + '">' + esc(s.brand) + '</span>'
-    );
-    const servicesHtml = '<div class="service-group">' + capBadges(serviceBadges, BADGE_CAP) + '</div>';
-    frag.appendChild(filmCardShell(row, servicesHtml));
-  });
-  container.appendChild(frag);
-  ensureNotEmpty(container, 'No films match your search and filters.');
-}
-
-function onCountryCardClick(event) {
-  const badge = event.target.closest('[data-brand]');
-  if (badge) {
-    const brand = badge.getAttribute('data-brand');
-    const select = document.getElementById('countryServiceSelect');
-    select.value = (select.value === brand) ? '' : brand;
-    renderCountryRows();
-    return;
-  }
-  if (event.target.closest('a.film-link')) return;
-  const card = event.target.closest('.film-card');
-  if (card) openQuickLook(card.dataset.slug);
-}
-document.getElementById('countryGrid').addEventListener('click', onCountryCardClick);
-
-document.getElementById('countrySelect').addEventListener('change', () => {
-  populateCountryServiceSelect();
-  populateCountryGenreSelect();
-  renderCountryRows();
-});
-document.getElementById('countryServiceSelect').addEventListener('change', renderCountryRows);
-document.getElementById('countryGenreSelect').addEventListener('change', renderCountryRows);
-document.getElementById('countryFilmSearch').addEventListener('input', renderCountryRows);
-wireSearchClear('countryFilmSearch', 'countryFilmSearchClear', renderCountryRows);
-document.getElementById('countrySortSelect').addEventListener('change', e => {
-  countrySortKey = e.target.value;
-  countrySortDir = countryCols.find(c => c.key === countrySortKey).dir;
-  renderCountryRows();
-});
-
-populateCountrySelect();
-populateCountryServiceSelect();
-populateCountryGenreSelect();
-renderCountryFilterToggles();
-renderCountrySarahFilter();
-renderCountryRows();
-
 // ---------- Init ----------
-
-DATA.countryNames = {};
-DATA.countries.forEach(c => { DATA.countryNames[c.code] = c.name; });
 
 // Desktop: the fixed bar needs the page content pushed down by exactly its
 // own height (which varies — each tab's controls row is a different
@@ -6106,6 +5961,7 @@ function updateAppBarOffset() {
 window.addEventListener('resize', updateAppBarOffset);
 
 renderHome();
+renderLists();
 renderFilmFilterToggles();
 renderFilmSarahFilter();
 renderNotHaveOnlyToggle();

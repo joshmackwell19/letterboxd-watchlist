@@ -1,6 +1,11 @@
 from datetime import datetime
 
+import pytest
+
+from watchlist_justwatch import cinemas
 from watchlist_justwatch.cinemas import (
+    CinemaFetchError,
+    _parse_cinemaguide,
     _parse_barbican,
     _parse_barbican_time,
     _parse_hr_min_duration,
@@ -8,6 +13,8 @@ from watchlist_justwatch.cinemas import (
     _parse_prince_charles,
     _parse_riverside,
     _parse_vue,
+    drop_past_showings,
+    fetch_vue,
     match_watchlist_film,
 )
 from watchlist_justwatch.models import FilmState
@@ -195,6 +202,83 @@ def test_parse_vue_extracts_fields_and_resolves_relative_booking_url():
 
 def test_parse_vue_skips_entries_with_no_title():
     assert _parse_vue({"result": [{"filmTitle": "", "showingGroups": []}]}) == []
+
+
+# ---------- Vue via CinemaGuide ----------
+
+_CINEMAGUIDE_DATA = {
+    "all_screenings_on_all_dates": {"tab_date_label": "ALL DATES", "film_data": [
+        {"title": "theodyssey", "screenings_data": [
+            {"screenings_date_label": "THU 24 SEPT", "screenings": [
+                {"time": "2026-09-24T18:05:00.000Z",
+                 "link": "https://www.myvue.com//book-tickets/summary/10046/HO1/1",
+                 "venue_name": "Vue London - Fulham Broadway"},
+            ]},
+            {"screenings_date_label": "SAT 05 DEC", "screenings": [
+                {"time": "2026-12-05T18:30:00.000Z", "link": None,
+                 "venue_name": "Vue London - Fulham Broadway"},
+            ]},
+        ]},
+        {"title": "nometa", "screenings_data": [
+            {"screenings": [{"time": "2026-09-24T18:00:00.000Z"}]},
+        ]},
+    ]},
+    "film_meta_data_map": {
+        "theodyssey": {"display_film_title": "The Odyssey", "length_in_minutes": 173,
+                       "description": "Odysseus heads home.", "image_link": "https://example.com/o.jpg"},
+    },
+}
+
+
+def test_parse_cinemaguide_converts_utc_to_london_wall_clock():
+    showings = _parse_cinemaguide(_CINEMAGUIDE_DATA)
+    # BST in September (UTC+1), GMT in December (UTC+0) — stored the same
+    # way every other venue's showtimes are: naive London time.
+    assert [s["showtime"] for s in showings] == ["2026-09-24T19:05:00", "2026-12-05T18:30:00"]
+
+
+def test_parse_cinemaguide_extracts_fields_and_skips_films_with_no_title():
+    s = _parse_cinemaguide(_CINEMAGUIDE_DATA)[0]
+    assert s["cinema"] == "Vue Fulham Broadway"
+    assert s["title"] == "The Odyssey"
+    assert s["duration_minutes"] == 173
+    assert s["synopsis"] == "Odysseus heads home."
+    assert s["booking_url"] == "https://www.myvue.com/book-tickets/summary/10046/HO1/1"
+    assert all(x["title"] == "The Odyssey" for x in _parse_cinemaguide(_CINEMAGUIDE_DATA))
+
+
+def test_parse_cinemaguide_treats_zero_runtime_as_unknown():
+    data = {**_CINEMAGUIDE_DATA, "film_meta_data_map": {
+        "theodyssey": {**_CINEMAGUIDE_DATA["film_meta_data_map"]["theodyssey"], "length_in_minutes": 0}}}
+    assert _parse_cinemaguide(data)[0]["duration_minutes"] is None
+
+
+def test_fetch_vue_falls_back_to_cinemaguide_when_vue_refuses(monkeypatch):
+    def refused(**_):
+        raise CinemaFetchError("Vue what's-on page request failed (HTTP 403)")
+    monkeypatch.setattr(cinemas, "_fetch_vue_direct", refused)
+    monkeypatch.setattr(cinemas, "_fetch_vue_cinemaguide", lambda: [{"title": "The Odyssey"}])
+    assert fetch_vue() == [{"title": "The Odyssey"}]
+
+
+def test_fetch_vue_raises_with_both_reasons_when_both_routes_fail(monkeypatch):
+    def refused(**_):
+        raise CinemaFetchError("direct 403")
+    def empty():
+        raise CinemaFetchError("CinemaGuide returned no Vue showings")
+    monkeypatch.setattr(cinemas, "_fetch_vue_direct", refused)
+    monkeypatch.setattr(cinemas, "_fetch_vue_cinemaguide", empty)
+    with pytest.raises(CinemaFetchError, match="direct 403.*no Vue showings"):
+        fetch_vue()
+
+
+# ---------- drop_past_showings ----------
+
+def test_drop_past_showings_keeps_only_what_has_not_started():
+    showings = [{"showtime": "2026-09-24T18:00:00"}, {"showtime": "2026-09-24T19:00:00"},
+                {"showtime": "2026-09-25T10:00:00"}]
+    kept = drop_past_showings(showings, now=datetime(2026, 9, 24, 19, 0))
+    assert [s["showtime"] for s in kept] == ["2026-09-24T19:00:00", "2026-09-25T10:00:00"]
 
 
 # ---------- Riverside parsing ----------

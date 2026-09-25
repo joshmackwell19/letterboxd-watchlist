@@ -134,15 +134,18 @@ def test_list_with_no_watchlist_members_is_omitted(tmp_path):
     assert _custom_list_sections(state, {}, [cl], {}) == []
 
 
-def test_custom_list_films_do_not_starve_other_home_sections(tmp_path):
+def test_custom_list_films_do_not_starve_home_sections(tmp_path):
+    # The two are built independently now (Lists is its own tab), so a film
+    # in a list is still free to lead Home.
     [cl] = _load(tmp_path, "lists:\n  - {key: dp, name: De Palma, rules: [{director: Brian De Palma}]}\n")
     state = StateDoc(films={"a": _film("a", director=["Brian De Palma"], rating=4.5)})
     offers = {"a": [{"classification": "have", "available_to": None}]}
 
-    sections = _build_home_sections(state, offers, {}, {}, set(), {}, [cl], {})
+    home = _build_home_sections(state, offers, {}, {}, set(), {})
+    lists = _custom_list_sections(state, offers, [cl], {})
 
-    keys = [s["key"] for s in sections]
-    assert "list:dp" in keys and "top_rated" in keys
+    assert "top_rated" in [s["key"] for s in home]
+    assert [s["key"] for s in lists] == ["list:dp"]
 
 
 # ---------- Films-tab dropdown data ----------
@@ -168,7 +171,7 @@ lists:
     assert data["custom_lists"] == [{"key": "dp", "name": "De Palma", "group": None, "count": 1}]
 
 
-def test_home_false_lists_stay_off_home_but_stay_in_the_dropdown(tmp_path):
+def test_home_false_lists_stay_off_the_lists_tab_but_stay_in_the_dropdown(tmp_path):
     from watchlist_justwatch.dashboard import build_dashboard_data
 
     lists = _load(tmp_path, """
@@ -181,7 +184,8 @@ lists:
     data = build_dashboard_data(state, set(), {}, [], set(), custom_lists=lists,
                                 list_sources={"u/list/ucr": {"a"}})
 
-    assert [s["key"] for s in data["home_sections"] if s.get("custom_list")] == ["list:dp"]
+    assert [s["key"] for s in data["list_sections"]] == ["list:dp"]
+    assert not any(s.get("custom_list") for s in data["home_sections"])
     assert data["custom_lists"] == [
         {"key": "dp", "name": "De Palma", "group": None, "count": 1},
         {"key": "uc", "name": "Un Certain Regard", "group": "Cannes", "count": 1},

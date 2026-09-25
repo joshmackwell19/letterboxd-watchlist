@@ -24,6 +24,7 @@ from .cinemas import (
     fetch_riverside,
     fetch_vue,
     MATCHER_VERSION,
+    drop_past_showings,
     listing_match_key,
     match_watchlist_film,
     resolve_listing_to_letterboxd,
@@ -578,6 +579,10 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
         except Exception as exc:
             _warn(f"cinema showtimes fetch failed for {cinema_name!r}, carrying forward yesterday's ({exc})")
             cinema_showtimes.extend(s for s in previous_state.cinema_showtimes if s["cinema"] == cinema_name)
+    # Showings that have already started are no use to anyone — and without
+    # this, a venue that keeps failing would carry the same stale listing
+    # forward every day indefinitely rather than letting it run out.
+    cinema_showtimes = drop_past_showings(cinema_showtimes)
     current_state.cinema_showtimes = cinema_showtimes
     current_state.cinema_matches = _resolved_cinema_matches(
         cinema_showtimes, current_state.films, previous_state.cinema_matches, warn=_warn)

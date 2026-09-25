@@ -42,6 +42,13 @@ def _get(path: str, *, max_retries: int = 3, backoff_base_seconds: float = 2.0, 
     raise TMDBError(f"TMDB request to {path} failed after {max_retries + 1} attempts ({last_error})")
 
 
+def production_companies(tmdb_id: int) -> list[str]:
+    """The names of a film's production companies (raises TMDBError if
+    TMDB can't be reached) — what for_you.is_marvel reads."""
+    return [company["name"] for company in _get(f"/movie/{tmdb_id}").get("production_companies", [])
+            if company.get("name")]
+
+
 def search_movie(title: str, year: int | None = None) -> dict | None:
     """TMDB's best match for a title (+ year). Callers take two things from
     it: the film's own `id`, and `original_language` — the ISO 639-1 code of

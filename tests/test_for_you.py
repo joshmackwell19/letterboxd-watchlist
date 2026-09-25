@@ -2,7 +2,9 @@ import pytest
 
 from watchlist_justwatch import for_you, taste
 from watchlist_justwatch.dashboard import _for_you_data
-from watchlist_justwatch.for_you import build_for_you, matches_summary, pick_candidates, split_name
+from watchlist_justwatch.for_you import (
+    MARVEL_PENALTY, build_for_you, film_estimate, is_marvel, matches_summary, pick_candidates, split_name,
+)
 from watchlist_justwatch.taste import Neighbour
 
 
@@ -144,7 +146,9 @@ def test_build_for_you_assembles_the_days_payload(monkeypatch):
     assert payload["watchlist"] == ["wl-good", "wl-ok"]
     assert payload["scores"]["wl-good"]["because"] == ["loved-1"]
     assert payload["scores"]["wl-good"]["lovers"] == 5
-    assert payload["scores"]["wl-good"]["predicted"] == pytest.approx(3.5 + payload["your_offset"] + 0.6, abs=0.01)
+    # no Letterboxd averages passed in, so estimates start from the corpus's own
+    corpus_offset = taste.my_offset(taste.my_ratings_from_diary(diary), {}, 3.5)
+    assert payload["scores"]["wl-good"]["predicted"] == pytest.approx(3.5 + corpus_offset + 0.6, abs=0.01)
     assert payload["loved"] == {"loved-1": {"title": "Loved One", "poster_url": "l.jpg"}}
     assert payload["fans_also_loved"] == {"wl-good": ["pick-film", "wl-ok"]}
     assert payload["matches"]["sarah"]["rank"] == 2
@@ -237,3 +241,57 @@ def test_for_you_data_drops_suggestions_already_logged():
     assert data["fans_also_loved"] == {"wl": ["dismissed-pick"]}
     # a film you've seen can still show why the engine rates it as it does
     assert "pick" in data["scores"]
+
+
+def test_film_estimate_starts_from_the_letterboxd_average_and_marks_marvel_down():
+    assert film_estimate(0.3, letterboxd_average=3.8, letterboxd_offset=-0.1, corpus_base=2.0, marvel=False) == 4.0
+    # no Letterboxd average: the corpus's own estimate instead
+    assert film_estimate(0.3, letterboxd_average=None, letterboxd_offset=-0.1, corpus_base=3.2, marvel=False) == 3.5
+    assert film_estimate(0.3, letterboxd_average=3.8, letterboxd_offset=-0.1, corpus_base=2.0, marvel=True) == \
+        pytest.approx(4.0 * (1 - MARVEL_PENALTY))
+    # clamped to Letterboxd's range either way
+    assert film_estimate(1.5, letterboxd_average=4.8, letterboxd_offset=0.2, corpus_base=0, marvel=False) == 5.0
+
+
+def test_is_marvel_reads_the_production_companies():
+    assert is_marvel(["Marvel Studios"])
+    assert is_marvel(["20th Century Fox", "Marvel Entertainment"])
+    assert not is_marvel(["Warner Bros. Pictures", "DC Films"])
+    assert not is_marvel(None) and not is_marvel([])
+
+
+def test_build_for_you_marks_marvel_films_down_and_ranks_by_the_new_estimate(monkeypatch):
+    slugs = ["seen-watchlisted", "wl-good", "wl-ok", "pick-tv", "pick-film", "pick-nowhere", "loved-1"]
+    fake = _FakeDb({s: i for i, s in enumerate(slugs, start=100)})
+    stored = {fake.ids["wl-ok"]: ["Walt Disney Pictures"]}
+    saved = {}
+    fake.rater_film_studios = lambda conn, ids: {i: stored[i] for i in ids if i in stored}
+    fake.set_rater_film_studios = lambda conn, studios: saved.update(studios)
+    for name in ("rater_film_lookup", "rater_similarities", "rater_predictions", "set_rater_film_kinds",
+                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary",
+                 "rater_film_studios", "set_rater_film_studios"):
+        monkeypatch.setattr(for_you.db, name, getattr(fake, name))
+    monkeypatch.setattr(taste, "_ensure_mu", lambda conn: 3.5)
+    diary = {f"rated-{i}": {"personal_rating": 3.5, "rating": 3.5} for i in range(60)}   # offset 0 from Letterboxd
+    asked = []
+
+    def companies(tmdb_id):
+        asked.append(tmdb_id)
+        return {11: ["Marvel Studios"], 7: ["A24"]}[tmdb_id]
+
+    payload, _ = build_for_you(
+        None, diary=diary, josh_watchlist={"wl-good", "wl-ok"}, known_slugs={"wl-good", "wl-ok"},
+        discovery_films={}, sarah_username=None, generated_at="t", fetch_details=lambda slug: _details(),
+        enrich=lambda cands: ([c["slug"] for c in cands], {c["slug"]: {**c, "all_offers": [{}]} for c in cands}),
+        letterboxd_averages={"wl-good": 3.9, "wl-ok": 3.0}, tmdb_ids={"wl-good": 11, "wl-ok": 12},
+        companies_for=companies,
+    )
+    good, ok = payload["scores"]["wl-good"], payload["scores"]["wl-ok"]
+    # wl-good: Letterboxd 3.9 + offset 0 + neighbours 0.6 = 4.5, then Marvel's 40% off
+    assert good["predicted"] == pytest.approx(4.5 * (1 - MARVEL_PENALTY)) and good["marvel"]
+    # wl-ok: 3.0 + 0.1, studios already cached, not Marvel
+    assert ok["predicted"] == pytest.approx(3.1) and "marvel" not in ok
+    assert payload["watchlist"] == ["wl-ok", "wl-good"]
+    # only films never looked up cost a TMDB request, and get cached
+    assert sorted(asked) == [7, 11] and saved[fake.ids["wl-good"]] == ["Marvel Studios"]
+    assert payload["your_offset"] == 0 and payload["marvel_penalty"] == MARVEL_PENALTY

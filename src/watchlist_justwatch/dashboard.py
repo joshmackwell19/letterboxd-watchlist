@@ -347,6 +347,7 @@ def _for_you_data(for_you: dict | None, films_by_slug: dict[str, dict], josh_slu
     scores = {slug: entry for slug, entry in for_you["scores"].items() if offered(slug)}
     return {
         **{key: for_you[key] for key in ("generated_at", "corpus", "your_offset", "matches", "loved")},
+        "marvel_penalty": for_you.get("marvel_penalty", 0),
         "scores": scores,
         "watchlist": [slug for slug in for_you["watchlist"]
                       if slug in josh_slugs and slug in scores and slug not in seen],
@@ -3595,7 +3596,8 @@ function fyScoresHtml(score, film) {
     ? '<div class="fy-score fy-score-lb"><b>' + film.rating.toFixed(2) + '★</b><span>Letterboxd average</span></div>'
     : '';
   return '<div class="fy-scores">' +
-    '<div class="fy-score fy-score-you"><b>' + fyEstimate(score.predicted) + '</b><span>estimate for you</span></div>' +
+    '<div class="fy-score fy-score-you"><b>' + fyEstimate(score.predicted) + '</b><span>estimate for you' +
+      (score.marvel ? ' · Marvel −' + Math.round(100 * (FOR_YOU.marvel_penalty || 0)) + '%' : '') + '</span></div>' +
     letterboxd + '</div>';
 }
 
@@ -3731,7 +3733,7 @@ function forYouMatchesHtml() {
       '<span class="fy-match-bar"><span style="width:' + Math.round(100 * m.weight / maxWeight) + '%"></span></span>' +
     '</div>').join('');
   const offset = (FOR_YOU.your_offset >= 0 ? '+' : '−') + Math.abs(FOR_YOU.your_offset).toFixed(2) + '★';
-  const offsetCaption = 'you rate ' + (FOR_YOU.your_offset >= 0 ? 'above' : 'below') + ' the average member';
+  const offsetCaption = 'you rate ' + (FOR_YOU.your_offset >= 0 ? 'above' : 'below') + ' the Letterboxd average';
   const updated = new Date(FOR_YOU.generated_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   const unscored = DATA.films.filter(row => !FOR_YOU.scores[row.slug]).length;
   return '<div class="fy-section-head"><h2 class="home-section-header">Your taste matches</h2>' +

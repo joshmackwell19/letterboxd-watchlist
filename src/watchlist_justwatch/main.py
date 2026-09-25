@@ -84,6 +84,7 @@ from .taste import (
     PoliteFetcher, community_ratings_from_diary, evaluate, my_ratings_from_diary, recommend, record_screen_hits,
     render_evaluation, render_recommendations, scrape_raters,
 )
+from .tmdb_client import production_companies as tmdb_production_companies
 from .tmdb_client import search_movie as _tmdb_search_movie
 from .weekly_digest import compute_weekly_digest
 
@@ -602,6 +603,14 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
                 enrich=lambda candidates: with_availability(candidates, now_iso, config, global_subscriptions,
                                                             revisitable),
                 dismissed=dismissed, warn=_warn,
+                letterboxd_averages={**{slug: rec.get("rating") for slug, rec in discovery_films.items()
+                                        if rec.get("rating") is not None},
+                                     **{slug: f.rating for slug, f in current_state.films.items()
+                                        if f.rating is not None}},
+                tmdb_ids={**{slug: rec.get("tmdb_id") for slug, rec in discovery_films.items()
+                             if rec.get("tmdb_id") is not None},
+                          **{slug: f.tmdb_id for slug, f in current_state.films.items() if f.tmdb_id is not None}},
+                companies_for=tmdb_production_companies,
             )
     except Exception as exc:
         _warn(f"For you failed, carrying yesterday's forward ({exc})")

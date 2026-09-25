@@ -131,6 +131,9 @@ CREATE TABLE IF NOT EXISTS rater_films (
 -- 404s, NULL until checked — see taste.recommend, which checks lazily and
 -- only for the films it's about to suggest.
 ALTER TABLE rater_films ADD COLUMN IF NOT EXISTS tmdb_kind TEXT;
+-- The film's production companies from TMDB, NULL until For you needs them
+-- (for_you.is_marvel) — cached so each film is looked up once.
+ALTER TABLE rater_films ADD COLUMN IF NOT EXISTS studios JSONB;
 CREATE TABLE IF NOT EXISTS rater_ratings (
     rater_id INTEGER NOT NULL REFERENCES raters(id) ON DELETE CASCADE,
     film_id INTEGER NOT NULL REFERENCES rater_films(id),
@@ -906,6 +909,20 @@ def leave_out_film_bias(conn: psycopg.Connection, film_ids: list[int], leave_out
          "mu": mu, "lam": lambda_film},
     ).fetchall()
     return {film_id: float(bias) for film_id, bias in rows}
+
+
+def rater_film_studios(conn: psycopg.Connection, film_ids: list[int]) -> dict[int, list[str]]:
+    """film id -> production companies, for whichever of `film_ids` have
+    been looked up."""
+    return {film_id: studios for film_id, studios in conn.execute(
+        "SELECT id, studios FROM rater_films WHERE id = ANY(%s) AND studios IS NOT NULL", (film_ids,)
+    ).fetchall()}
+
+
+def set_rater_film_studios(conn: psycopg.Connection, studios: dict[int, list[str]]) -> None:
+    if studios:
+        conn.cursor().executemany("UPDATE rater_films SET studios = %s WHERE id = %s",
+                                  [(Jsonb(names), film_id) for film_id, names in studios.items()])
 
 
 def set_rater_film_kinds(conn: psycopg.Connection, kinds: dict[int, str]) -> None:

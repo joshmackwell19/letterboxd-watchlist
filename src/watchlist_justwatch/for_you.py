@@ -5,7 +5,10 @@ the new picks, and stored whole as meta 'for_you' — so --dashboard stays
 network-free and only reads it.
 
 Four things, all from the same neighbours --taste-recommend uses:
-- an estimate for every watchlist film enough of them have rated;
+- an estimate for every watchlist film enough of them have rated — the
+  film's Letterboxd average plus Josh's offset from it, plus how his
+  neighbours rate it against the corpus (film_estimate), with Marvel films
+  marked down;
 - new picks — films Josh hasn't seen or watchlisted, best estimate first,
   TV left out — which go through the same enrichment as a discovery
   section and ship as discovery films, so quick look, the film page and
@@ -27,6 +30,14 @@ PICKS = 24
 # Best-predicted films examined per pick wanted: some are TV, some have no
 # Letterboxd rating, some aren't streaming anywhere tracked.
 PICK_POOL = 3
+# Candidates gathered per pick wanted before they're ranked by estimate:
+# the pool arrives in the corpus's order, and the estimate needs each
+# film's Letterboxd average, which only its page gives.
+PICK_RANKED = 2
+# Josh doesn't like Marvel films, however well his taste matches rate them:
+# their estimates are cut by this share (≈4.0★ shows as ≈2.4★), which also
+# keeps them out of the picks.
+MARVEL_PENALTY = 0.4
 # Headroom past PICKS for the availability check, which drops films with no
 # tracked offer anywhere (same as a discovery section).
 PICK_HEADROOM = 6
@@ -34,6 +45,51 @@ PICK_HEADROOM = 6
 MIN_OWN_RATINGS = 50
 CLOSEST_SHOWN = 10
 NAME_YEAR_RE = re.compile(r"^(?P<title>.+) \((?P<year>\d{4})\)$")
+
+
+def is_marvel(companies: list[str] | None) -> bool:
+    """Whether any production company is Marvel's — Marvel Studios for the
+    MCU, Marvel Entertainment/Enterprises for Fox's and Sony's (X-Men,
+    Deadpool, Spider-Man)."""
+    return any(name.lower().startswith("marvel") for name in companies or [])
+
+
+def film_estimate(nb_offset: float, *, letterboxd_average: float | None, letterboxd_offset: float,
+                  corpus_base: float, marvel: bool) -> float:
+    """What Josh would probably give a film: its Letterboxd average plus his
+    usual offset from it, plus how his neighbours rate it against the
+    corpus (nb_offset) — the "simple swap", the one variant --taste-eval
+    found ranks his films better than the Letterboxd average alone
+    (Spearman +0.046 [+0.028, +0.065] over 703 films, most distinctive
+    included, 2026-09-25). A film with no Letterboxd average starts from the
+    corpus's own estimate (`corpus_base`) instead. A Marvel film then loses
+    MARVEL_PENALTY of it."""
+    base = letterboxd_average + letterboxd_offset if letterboxd_average is not None else corpus_base
+    value = taste.clamp_rating(base + nb_offset)
+    if marvel:
+        value = taste.clamp_rating(value * (1 - MARVEL_PENALTY))
+    return round(value, 2)
+
+
+def marvel_film_ids(conn, film_tmdb_ids: dict[int, int | None], companies_for, warn=lambda msg: None) -> set[int]:
+    """The Marvel films among `film_tmdb_ids` (rater film id -> TMDB id),
+    from each one's production companies — cached in rater_films.studios,
+    so only a film never looked up costs a TMDB request. One TMDB can't
+    answer for is left unmarked today and asked about again tomorrow."""
+    known = db.rater_film_studios(conn, list(film_tmdb_ids))
+    fresh: dict[int, list[str]] = {}
+    answers: dict[int, list[str]] = {}
+    for film_id, tmdb_id in film_tmdb_ids.items():
+        if film_id in known or tmdb_id is None:
+            continue
+        try:
+            if tmdb_id not in answers:
+                answers[tmdb_id] = companies_for(tmdb_id)
+            fresh[film_id] = answers[tmdb_id]
+        except Exception as exc:
+            warn(f"For you: couldn't get TMDB {tmdb_id}'s production companies ({exc})")
+    db.set_rater_film_studios(conn, fresh)
+    return {film_id for film_id, companies in {**known, **fresh}.items() if is_marvel(companies)}
 
 
 def split_name(name: str | None, slug: str) -> tuple[str, int | None]:
@@ -117,7 +173,8 @@ def matches_summary(neighbours: list[taste.Neighbour], sarah_username: str | Non
 def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], known_slugs: set[str],
                   discovery_films: dict[str, dict], sarah_username: str | None, generated_at: str,
                   fetch_details, enrich, dismissed: set[str] = frozenset(), warn=lambda msg: None,
-                  picks: int = PICKS) -> tuple[dict | None, dict[str, dict]]:
+                  picks: int = PICKS, letterboxd_averages: dict[str, float] | None = None,
+                  tmdb_ids: dict[str, int] | None = None, companies_for=None) -> tuple[dict | None, dict[str, dict]]:
     """(meta 'for_you', {slug: discovery-film record} for picks that weren't
     already discovery films) — or (None, {}) when there's too little to go
     on: too few of Josh's own ratings, an empty corpus, or nobody whose
@@ -125,7 +182,11 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     (both watchlists and the discovery films); `enrich` is similar.py's
     availability check, bound to today's config. A film dismissed from Home
     stays out of the picks and the "see…" lists, as it does out of every
-    discovery section (never a watchlist film, which dismissing can't hide)."""
+    discovery section (never a watchlist film, which dismissing can't hide).
+    `letterboxd_averages` / `tmdb_ids` (by slug) cover the films already
+    known — a pick's come from its page; `companies_for` (TMDB id ->
+    production companies) is what spots a Marvel film, and without it none
+    are marked down."""
     mine = taste.my_ratings_from_diary(diary)
     if len(mine) < MIN_OWN_RATINGS:
         return None, {}
@@ -148,8 +209,15 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     def predictions(**kwargs) -> list[dict]:
         return db.rater_predictions(conn, nb_ids, weights, mu=mu, lambda_pred=params.lambda_pred, **kwargs)
 
+    averages = dict(letterboxd_averages or {})
+    film_tmdb = dict(tmdb_ids or {})
+    lb_offset = taste.letterboxd_offset(mine, taste.community_ratings_from_diary(diary))
+    marvel: set[int] = set()
+
     def estimate(row: dict) -> float:
-        return round(taste.clamp_rating(mu + offset + row["bias"] + row["nb_offset"]), 2)
+        return film_estimate(row["nb_offset"], letterboxd_average=averages.get(row["slug"]),
+                             letterboxd_offset=lb_offset, corpus_base=mu + offset + row["bias"],
+                             marvel=row["film_id"] in marvel)
 
     watch_ids = [film_info[s][0] for s in josh_watchlist if s in film_info]
     watch_rows = predictions(min_support=params.min_support, target_film_ids=watch_ids) if watch_ids else []
@@ -158,12 +226,26 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     pool = predictions(min_support=max(params.min_support, taste.MIN_SUPPORT_PICKS),
                        exclude_film_ids=excluded, limit=picks * PICK_POOL)
     pool = [row for row in pool if row["slug"] not in dismissed]
-    candidates, kinds = pick_candidates(pool, discovery_films, fetch_details, want=picks + PICK_HEADROOM,
+    candidates, kinds = pick_candidates(pool, discovery_films, fetch_details, want=picks * PICK_RANKED,
                                         warn=warn)
     db.set_rater_film_kinds(conn, kinds)
+    pool_by_slug = {row["slug"]: row for row in pool}
+    for c in candidates:
+        if c.get("rating") is not None:
+            averages[c["slug"]] = c["rating"]
+        if c.get("tmdb_id") is not None:
+            film_tmdb[c["slug"]] = c["tmdb_id"]
+    if companies_for is not None:
+        rows = watch_rows + [pool_by_slug[c["slug"]] for c in candidates]
+        marvel |= marvel_film_ids(conn, {row["film_id"]: film_tmdb.get(row["slug"]) for row in rows},
+                                  companies_for, warn)
+    # Only now, with every candidate's Letterboxd average and Marvel check
+    # in hand, can they be put in estimate order; the availability check
+    # then only has to look at the best of them.
+    candidates.sort(key=lambda c: -estimate(pool_by_slug[c["slug"]]))
+    candidates = candidates[:picks + PICK_HEADROOM]
     fresh = [c for c in candidates if c["slug"] not in discovery_films]
     _, new_films = enrich(fresh) if fresh else ([], {})
-    pool_by_slug = {row["slug"]: row for row in pool}
     pick_slugs = [c["slug"] for c in candidates if c["slug"] in discovery_films or c["slug"] in new_films][:picks]
     pick_rows = [pool_by_slug[slug] for slug in pick_slugs]
 
@@ -189,6 +271,7 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
             "predicted": estimate(row), "support": row["support"],
             "lovers": fans_by_id.get(row["film_id"], 0), "neighbour_mean": round(row["neighbour_mean"], 2),
             "because": [slug_by_id[fid] for fid, _ in because_by_id.get(row["film_id"], [])],
+            **({"marvel": True} if row["film_id"] in marvel else {}),
         }
     watchlist_order = [row["slug"] for row in sorted(watch_rows, key=lambda r: -estimate(r))
                        if row["slug"] not in seen]
@@ -197,7 +280,10 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     payload = {
         "generated_at": generated_at,
         "corpus": {"raters": corpus["raters"].get("scraped", 0), "ratings": corpus["ratings"]},
-        "your_offset": round(offset, 2),
+        # How far above the Letterboxd average Josh rates, on average —
+        # what every estimate with a Letterboxd average starts from.
+        "your_offset": round(lb_offset, 2),
+        "marvel_penalty": MARVEL_PENALTY,
         "matches": matches_summary(neighbours, sarah_username),
         "scores": scores,
         "watchlist": watchlist_order,

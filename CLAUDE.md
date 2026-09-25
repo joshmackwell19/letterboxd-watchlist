@@ -78,7 +78,7 @@ stores none of it.
 | Table | Written by | Notes |
 |---|---|---|
 | `films` | `run()`, full replace each run | Josh's watchlist **union** Sarah's — `josh_watchlist`/`sarah_watchlist` say whose list a slug came from, since this table alone can't. `tmdb_id` comes free from the same TMDB search `original_language` already makes, and is what lets the dashboard ask the Worker about a film directly; it fills in via the stale rotation (or `--backfill-language`), and a film without one just gets no live layer |
-| `diary` | `run()`, full replace | Every film ever logged as watched; backfilled once via `--backfill-diary` (must run locally — Letterboxd blocks GH Actions' IPs from `/username/films/`) |
+| `diary` | `run()`, full replace | Every film ever logged as watched; backfilled once via `--backfill-diary` (must run locally — Letterboxd blocks GH Actions' IPs from `/username/films/`). `--check-for-new-log` usually creates a new entry first, with only what the RSS feed carries (personal rating, like, rewatch, date); `run()` fills in the film-page details (Letterboxd average, poster, director) for any recent watch still missing them |
 | `discovery_films` | `run()`, full replace | TMDB-correlated films surfaced by `similar.py` that aren't on the watchlist itself. Their offers are stored with `monetization_types`, so `dashboard.py` re-runs `_classify` on them at build time — a stored verdict would otherwise keep whatever config was current the day the film was discovered. For you's picks live here too (not in `recommendation_sections`, so they never become a Home row) |
 | `recommendation_sections` | `run()`, full replace | Which slugs go in which home-page discovery section |
 | `josh_watchlist` / `sarah_watchlist` | `run()`, full replace | Membership only (slugs) — offer data lives in `films` regardless of which list |
@@ -182,6 +182,17 @@ stored raw package name, so a change here reaches the page on the next
 `/username/films/`, so these run on a Mac): `--backfill-diary`,
 `--backfill-diary-ratings`.
 
+`--backfill-diary-details` fills the film-page details (Letterboxd
+average, poster, director, cast, genre, `original_language`) into every
+diary entry missing its average or poster — entries `--check-for-new-log`
+created that the daily run never enriched (every one it reached first, until
+`run()` learned to fill them in; now only a watch that falls out of the
+last 4 before a daily run sees it). Leaves `personal_rating`/`liked`/`is_rewatch`/`watched_date`
+alone. It only fetches `/film/<slug>/` pages, not `/username/films/`, so
+unlike the other diary backfills it can also run from Actions. It stops
+(saving what it has) at the first film page that comes back empty, rather
+than retrying through what may be a block; a re-run picks up the rest.
+
 `--backfill-language` fills `original_language` *and* `tmdb_id` (both come
 from the same TMDB search) and is grouped with those historically, but it
 never touches Letterboxd — so it also runs from Actions via
@@ -269,7 +280,9 @@ Covers the pure classification/section-building logic (`config.py`,
 `diff.py`, `languages.py`, `cinemas.py`'s title cleaning and listing
 matching, `dashboard.py`'s home-section builders and its
 `_search_taxonomy` — that one checks the table the page classifies searched
-films from still agrees with `_classify` itself) — not an
+films from still agrees with `_classify` itself, and `main.py`'s
+`_with_film_details`, the diary merge that must never overwrite what the
+hourly check recorded) — not an
 integration suite against a real database, which would need a Postgres
 fixture and is a bigger lift for less immediate value than covering the
 logic most likely to silently regress.

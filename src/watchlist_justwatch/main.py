@@ -151,6 +151,43 @@ def _fetch_original_language(title: str, year: int | None) -> str | None:
     return _fetch_tmdb_facts(title, year)[1]
 
 
+def _diary_entry_needs_details(entry: dict | None) -> bool:
+    """Whether a diary entry is still missing its film-page details.
+
+    --check-for-new-log usually reaches a new watch before the daily run
+    does, and records only what the RSS feed carries (personal rating, like,
+    rewatch, date) — the Letterboxd average, poster and director are left
+    empty for the daily run to fill in.
+    """
+    return entry is None or entry.get("rating") is None or entry.get("poster_url") is None
+
+
+def _with_film_details(entry: dict | None, title: str, year: int | None, details: dict,
+                       fetch_language) -> dict:
+    """entry (or a new one) with get_film_details_by_slug's details merged in.
+
+    Only film-page fields are written, so personal_rating/liked/is_rewatch/
+    watched_date — which only the diary itself knows — survive untouched. A
+    field the fetch came back empty for keeps whatever the entry already
+    had, so a failed fetch (which returns all-empty rather than raising)
+    never erases anything. fetch_language is only called when the entry
+    doesn't already have one, since it's a TMDB search of its own.
+    """
+    entry = entry or {"title": title, "year": year}
+    fetched = {
+        "rating": details["rating"],
+        "poster_url": details["poster_url"],
+        "director": ", ".join(details["director"]) if details["director"] else None,
+        "starring": details["starring"], "synopsis": details["synopsis"], "genre": details["genre"],
+        "original_language": entry.get("original_language") or fetch_language(title, year),
+    }
+    merged = dict(entry)
+    for key, value in fetched.items():
+        if key not in merged or value not in (None, "", []):
+            merged[key] = value
+    return merged
+
+
 # A first run has every listing to resolve at two network calls each; after
 # that it's only what's newly announced. Capped so the first one doesn't add
 # ten minutes to the pipeline — the rest resolve the next day, and the day
@@ -321,7 +358,9 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     # just merges the last few watches in each day (already fetched above
     # for recent_watches, so no extra requests), which keeps state.diary
     # reasonably current between full backfills without ever touching the
-    # blocked endpoint from here.
+    # blocked endpoint from here. That includes an entry --check-for-new-log
+    # already created: it usually gets there first, and leaves the film-page
+    # details for this to fill in (see _diary_entry_needs_details).
     current_state_diary = dict(previous_state.diary)
     for w in recent_watch_films:
         details = get_film_details_by_slug(w.slug)
@@ -329,14 +368,10 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
             "slug": w.slug, "title": w.title, "year": w.year,
             "director": details["director"], "starring": details["starring"],
         })
-        if w.slug not in current_state_diary:
-            current_state_diary[w.slug] = {
-                "title": w.title, "year": w.year, "rating": details["rating"],
-                "poster_url": details["poster_url"],
-                "director": ", ".join(details["director"]) if details["director"] else None,
-                "starring": details["starring"], "synopsis": details["synopsis"],
-                "genre": details["genre"], "original_language": _fetch_original_language(w.title, w.year),
-            }
+        existing = current_state_diary.get(w.slug)
+        if _diary_entry_needs_details(existing):
+            current_state_diary[w.slug] = _with_film_details(existing, w.title, w.year, details,
+                                                             _fetch_original_language)
 
     # Sarah's own watchlist — additive (shown in its own dashboard tab),
     # never implies watch_together status. Optional: no-ops entirely if
@@ -762,6 +797,15 @@ def main() -> None:
                               "only covers your last ~50 entries; this covers everything older. Doesn't "
                               "include 'liked' — not reliably scrapable from the static diary page — "
                               "only --check-for-new-log captures that, going forward.")
+    parser.add_argument("--backfill-diary-details", action="store_true",
+                         help="Backfill the film-page details (Letterboxd average, poster, director, cast, "
+                              "genre, original_language) into every diary entry missing its average or "
+                              "poster — i.e. entries --check-for-new-log created that the daily run never "
+                              "filled in. One Letterboxd film-page fetch per entry (not the blocked "
+                              "/username/films/ path, so safe from GitHub Actions too), plus a TMDB search "
+                              "where original_language is missing, then exit. Leaves personal_rating/liked/"
+                              "is_rewatch/watched_date alone. Stops (saving what it has) at the first film "
+                              "page that comes back empty, rather than retrying through a possible block.")
     parser.add_argument("--backfill-language", action="store_true",
                          help="One-time TMDB-only backfill of original_language and tmdb_id for every "
                               "watchlist film missing either (normally fills in gradually via the "
@@ -1038,14 +1082,8 @@ def main() -> None:
         for f in watched_films:
             if f.slug in state.diary:
                 continue
-            details = get_film_details_by_slug(f.slug)
-            state.diary[f.slug] = {
-                "title": f.title, "year": f.year, "rating": details["rating"],
-                "poster_url": details["poster_url"],
-                "director": ", ".join(details["director"]) if details["director"] else None,
-                "starring": details["starring"], "synopsis": details["synopsis"],
-                "genre": details["genre"], "original_language": _fetch_original_language(f.title, f.year),
-            }
+            state.diary[f.slug] = _with_film_details(None, f.title, f.year, get_film_details_by_slug(f.slug),
+                                                     _fetch_original_language)
             added += 1
             if added % 25 == 0:
                 print(f"...enriched {added} new watched films", file=sys.stderr)
@@ -1135,6 +1173,37 @@ def main() -> None:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
+
+    if args.backfill_diary_details:
+        state = load_state(args.database_url)
+        missing = [slug for slug, entry in state.diary.items() if _diary_entry_needs_details(entry)]
+        print(f"Backfilling film details for {len(missing)}/{len(state.diary)} diary entries...")
+        checked = []
+        for i, slug in enumerate(missing, start=1):
+            # No retries, and stop at the first fetch that comes back with
+            # nothing at all: that's a block far more often than a film page
+            # with no director, synopsis or genre, and pressing on through a
+            # block risks making it a lasting one. Whatever was filled in
+            # before it is still saved, and a re-run picks up the rest.
+            details = get_film_details_by_slug(slug, max_retries=0)
+            if not any(details.values()):
+                print(f"STOPPED at {slug!r} ({i}/{len(missing)}): its film page came back empty — "
+                      f"possibly a Letterboxd block. Not retrying.", file=sys.stderr)
+                break
+            entry = state.diary[slug]
+            state.diary[slug] = _with_film_details(entry, entry.get("title"), entry.get("year"), details,
+                                                   _fetch_original_language)
+            checked.append(slug)
+            if i % 25 == 0:
+                print(f"...checked {i}/{len(missing)}", file=sys.stderr)
+            time.sleep(0.2)
+        save_state(args.database_url, state)
+        # Some films genuinely have no average yet (too few ratings), so a
+        # few can stay without one even when every fetch worked.
+        still_missing = [slug for slug in checked if _diary_entry_needs_details(state.diary[slug])]
+        print(f"Filled in {len(checked) - len(still_missing)}/{len(missing)} diary entries, written to the "
+              f"database. Fetched but still without an average or poster: {', '.join(still_missing) or 'none'}.")
+        sys.exit(0 if len(checked) == len(missing) else 1)
 
     if args.recommend_favorites:
         favorites = load_favorites(args.favorites)

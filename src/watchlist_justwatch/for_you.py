@@ -54,8 +54,8 @@ def is_marvel(companies: list[str] | None) -> bool:
     return any(name.lower().startswith("marvel") for name in companies or [])
 
 
-def film_estimate(nb_offset: float, *, letterboxd_average: float | None, letterboxd_offset: float,
-                  corpus_base: float, marvel: bool) -> float:
+def uncapped_estimate(nb_offset: float, *, letterboxd_average: float | None, letterboxd_offset: float,
+                      corpus_base: float, marvel: bool) -> float:
     """What Josh would probably give a film: its Letterboxd average plus his
     usual offset from it, plus how his neighbours rate it against the
     corpus (nb_offset) — the "simple swap", the one variant --taste-eval
@@ -63,12 +63,16 @@ def film_estimate(nb_offset: float, *, letterboxd_average: float | None, letterb
     (Spearman +0.046 [+0.028, +0.065] over 703 films, most distinctive
     included, 2026-09-25). A film with no Letterboxd average starts from the
     corpus's own estimate (`corpus_base`) instead. A Marvel film then loses
-    MARVEL_PENALTY of it."""
+    MARVEL_PENALTY of it. Not clamped to Letterboxd's 0.5–5★: films are
+    ranked on this, since the best of them all clamp to 5★ and would tie."""
     base = letterboxd_average + letterboxd_offset if letterboxd_average is not None else corpus_base
-    value = taste.clamp_rating(base + nb_offset)
-    if marvel:
-        value = taste.clamp_rating(value * (1 - MARVEL_PENALTY))
-    return round(value, 2)
+    value = base + nb_offset
+    return value * (1 - MARVEL_PENALTY) if marvel else value
+
+
+def film_estimate(nb_offset: float, **estimate) -> float:
+    """uncapped_estimate as the page shows it: clamped to 0.5–5★, rounded."""
+    return round(taste.clamp_rating(uncapped_estimate(nb_offset, **estimate)), 2)
 
 
 def marvel_film_ids(conn, film_tmdb_ids: dict[int, int | None], companies_for, warn=lambda msg: None) -> set[int]:
@@ -214,10 +218,13 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     lb_offset = taste.letterboxd_offset(mine, taste.community_ratings_from_diary(diary))
     marvel: set[int] = set()
 
+    def uncapped(row: dict) -> float:
+        return uncapped_estimate(row["nb_offset"], letterboxd_average=averages.get(row["slug"]),
+                                 letterboxd_offset=lb_offset, corpus_base=mu + offset + row["bias"],
+                                 marvel=row["film_id"] in marvel)
+
     def estimate(row: dict) -> float:
-        return film_estimate(row["nb_offset"], letterboxd_average=averages.get(row["slug"]),
-                             letterboxd_offset=lb_offset, corpus_base=mu + offset + row["bias"],
-                             marvel=row["film_id"] in marvel)
+        return round(taste.clamp_rating(uncapped(row)), 2)
 
     watch_ids = [film_info[s][0] for s in josh_watchlist if s in film_info]
     watch_rows = predictions(min_support=params.min_support, target_film_ids=watch_ids) if watch_ids else []
@@ -242,7 +249,7 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     # Only now, with every candidate's Letterboxd average and Marvel check
     # in hand, can they be put in estimate order; the availability check
     # then only has to look at the best of them.
-    candidates.sort(key=lambda c: -estimate(pool_by_slug[c["slug"]]))
+    candidates.sort(key=lambda c: -uncapped(pool_by_slug[c["slug"]]))
     candidates = candidates[:picks + PICK_HEADROOM]
     fresh = [c for c in candidates if c["slug"] not in discovery_films]
     _, new_films = enrich(fresh) if fresh else ([], {})
@@ -273,7 +280,9 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
             "because": [slug_by_id[fid] for fid, _ in because_by_id.get(row["film_id"], [])],
             **({"marvel": True} if row["film_id"] in marvel else {}),
         }
-    watchlist_order = [row["slug"] for row in sorted(watch_rows, key=lambda r: -estimate(r))
+    # Ranked on the uncapped estimate: the best films all show as ≈5★, but
+    # they aren't tied.
+    watchlist_order = [row["slug"] for row in sorted(watch_rows, key=lambda r: -uncapped(r))
                        if row["slug"] not in seen]
     loved_used = {slug for entry in scores.values() for slug in entry["because"]}
     corpus = db.rater_corpus_summary(conn)

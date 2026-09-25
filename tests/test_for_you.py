@@ -4,6 +4,7 @@ from watchlist_justwatch import for_you, taste
 from watchlist_justwatch.dashboard import _for_you_data
 from watchlist_justwatch.for_you import (
     MARVEL_PENALTY, build_for_you, film_estimate, is_marvel, matches_summary, pick_candidates, split_name,
+    uncapped_estimate,
 )
 from watchlist_justwatch.taste import Neighbour
 
@@ -249,8 +250,10 @@ def test_film_estimate_starts_from_the_letterboxd_average_and_marks_marvel_down(
     assert film_estimate(0.3, letterboxd_average=None, letterboxd_offset=-0.1, corpus_base=3.2, marvel=False) == 3.5
     assert film_estimate(0.3, letterboxd_average=3.8, letterboxd_offset=-0.1, corpus_base=2.0, marvel=True) == \
         pytest.approx(4.0 * (1 - MARVEL_PENALTY))
-    # clamped to Letterboxd's range either way
+    # shown clamped to Letterboxd's range, ranked on the uncapped value
     assert film_estimate(1.5, letterboxd_average=4.8, letterboxd_offset=0.2, corpus_base=0, marvel=False) == 5.0
+    assert uncapped_estimate(1.5, letterboxd_average=4.8, letterboxd_offset=0.2, corpus_base=0,
+                             marvel=False) == pytest.approx(6.5)
 
 
 def test_is_marvel_reads_the_production_companies():
@@ -295,3 +298,22 @@ def test_build_for_you_marks_marvel_films_down_and_ranks_by_the_new_estimate(mon
     # only films never looked up cost a TMDB request, and get cached
     assert sorted(asked) == [7, 11] and saved[fake.ids["wl-good"]] == ["Marvel Studios"]
     assert payload["your_offset"] == 0 and payload["marvel_penalty"] == MARVEL_PENALTY
+
+
+def test_build_for_you_ranks_films_that_both_show_5_stars_by_the_uncapped_estimate(monkeypatch):
+    slugs = ["seen-watchlisted", "wl-good", "wl-ok", "pick-tv", "pick-film", "pick-nowhere", "loved-1"]
+    fake = _FakeDb({s: i for i, s in enumerate(slugs, start=100)})
+    for name in ("rater_film_lookup", "rater_similarities", "rater_predictions", "set_rater_film_kinds",
+                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary"):
+        monkeypatch.setattr(for_you.db, name, getattr(fake, name))
+    monkeypatch.setattr(taste, "_ensure_mu", lambda conn: 3.5)
+    diary = {f"rated-{i}": {"personal_rating": 3.5, "rating": 3.5} for i in range(60)}   # offset 0 from Letterboxd
+    payload, _ = build_for_you(
+        None, diary=diary, josh_watchlist={"wl-good", "wl-ok"}, known_slugs={"wl-good", "wl-ok"},
+        discovery_films={}, sarah_username=None, generated_at="t", fetch_details=lambda slug: _details(),
+        enrich=lambda cands: ([c["slug"] for c in cands], {c["slug"]: {**c, "all_offers": [{}]} for c in cands}),
+        # wl-good: 4.45 + 0.6 = 5.05; wl-ok: 4.99 + 0.1 = 5.09 — both show as 5.0
+        letterboxd_averages={"wl-good": 4.45, "wl-ok": 4.99},
+    )
+    assert payload["scores"]["wl-good"]["predicted"] == payload["scores"]["wl-ok"]["predicted"] == 5.0
+    assert payload["watchlist"] == ["wl-ok", "wl-good"]

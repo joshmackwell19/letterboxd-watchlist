@@ -30,6 +30,13 @@ class LetterboxdFetchError(Exception):
     pass
 
 
+class LetterboxdBlockedError(LetterboxdFetchError):
+    """Letterboxd (or Cloudflare in front of it) refused the request outright
+    — a 403/429/503 or a "Just a moment..." challenge page. Unlike a network
+    hiccup this is never worth retrying: carrying on is how a temporary
+    challenge becomes a longer block."""
+
+
 def _unescape(text: str) -> str:
     return text.replace("&#039;", "'").replace("&quot;", '"').replace("&amp;", "&")
 
@@ -163,7 +170,9 @@ def get_film_details_by_slug(
     watchlist page, so no TMDB lookup is needed.
 
     Always returns a dict (possibly all-None/empty) rather than raising or
-    returning None, so callers can merge it in unconditionally.
+    returning None, so callers can merge it in unconditionally. A page that
+    loaded also says what TMDB calls it (tmdb_kind "movie"/"tv", tmdb_id),
+    from the same request — see parse_tmdb_link.
     """
     session = session or curl_requests.Session()
     try:
@@ -173,7 +182,8 @@ def get_film_details_by_slug(
     except LetterboxdFetchError:
         return dict(_EMPTY_FILM_DETAILS)
 
-    return _film_details_from_json_ld(response.text)
+    tmdb_kind, tmdb_id = parse_tmdb_link(response.text)
+    return {**_film_details_from_json_ld(response.text), "tmdb_kind": tmdb_kind, "tmdb_id": tmdb_id}
 
 
 def get_film_details_by_tmdb_id(
@@ -503,3 +513,159 @@ def fetch_diary_ratings(
         time.sleep(page_delay_seconds)
 
     return result
+
+
+# --- Other members' public ratings (the taste engine, see taste.py) --------
+#
+# Three page types, all verified against live markup: a member's /films/ grid
+# (72 films a page, each poster carrying its `rated-N` half-star class in the
+# static HTML), a film's /members/rated/<stars>/ table (25 members a page who
+# gave that film exactly that rating), and a member's /following/ table. All
+# three sit under the paths Letterboxd blocks from datacenter IP ranges, so
+# like the diary backfills they only work from a home connection.
+
+GRID_ITEM_SPLIT_RE = re.compile(r'<li class="griditem[^"]*"')
+GRID_RATING_RE = re.compile(r'<span class="rating[^"]*\brated-(\d+)"')
+ITEM_NAME_ATTR_RE = re.compile(r'data-item-name="([^"]*)"')
+PERSON_ROW_SPLIT_RE = re.compile(r'<td class="col-member table-person">')
+PERSON_LINK_RE = re.compile(r'<a href="/([^/"]+)/" class="name"')
+MEMBER_RATING_RE = re.compile(r'<td class="col-rating[^"]*">\s*<span class="rating[^"]*\brated-(\d+)"')
+WATCHED_COUNT_RE = re.compile(r'class="has-icon icon-16 icon-watched" href="/[^/"]+/films/">([\d,]+)</a>')
+NEXT_PAGE_RE = re.compile(r'<a class="next" href="')
+BLOCKED_STATUSES = {403, 429, 503}
+
+
+def _has_next_page(html: str) -> bool:
+    return NEXT_PAGE_RE.search(html) is not None
+
+
+def _is_challenge_page(html: str) -> bool:
+    return "<title>Just a moment...</title>" in html[:4000]
+
+
+def parse_rated_films_page(html: str) -> tuple[list[tuple[str, str | None, int]], bool]:
+    """(slug, display name, half-stars 1-10) for every *rated* film on one
+    page of a member's /films/ grid — watched-but-unrated posters are skipped
+    — plus whether there's a next page."""
+    rated: list[tuple[str, str | None, int]] = []
+    for item in GRID_ITEM_SPLIT_RE.split(html)[1:]:
+        slug_match = ITEM_SLUG_RE.search(item)
+        rating_match = GRID_RATING_RE.search(item)
+        if not slug_match or not rating_match:
+            continue
+        half_stars = int(rating_match.group(1))
+        if not 1 <= half_stars <= 10:
+            continue
+        name_match = ITEM_NAME_ATTR_RE.search(item)
+        rated.append((slug_match.group(1), _unescape(name_match.group(1)) if name_match else None, half_stars))
+    return rated, _has_next_page(html)
+
+
+def parse_member_ratings_page(html: str) -> tuple[list[tuple[str, int]], bool]:
+    """(username, half-stars) per row of a film's /members/rated/<stars>/
+    table, plus whether there's a next page."""
+    members: list[tuple[str, int]] = []
+    for row in PERSON_ROW_SPLIT_RE.split(html)[1:]:
+        user_match = PERSON_LINK_RE.search(row)
+        rating_match = MEMBER_RATING_RE.search(row)
+        if user_match and rating_match:
+            members.append((user_match.group(1), int(rating_match.group(1))))
+    return members, _has_next_page(html)
+
+
+def parse_following_page(html: str) -> tuple[list[tuple[str, int | None]], bool]:
+    """(username, films watched) per row of a member's /following/ table,
+    plus whether there's a next page."""
+    people: list[tuple[str, int | None]] = []
+    for row in PERSON_ROW_SPLIT_RE.split(html)[1:]:
+        user_match = PERSON_LINK_RE.search(row)
+        if not user_match:
+            continue
+        watched_match = WATCHED_COUNT_RE.search(row)
+        people.append((user_match.group(1), int(watched_match.group(1).replace(",", "")) if watched_match else None))
+    return people, _has_next_page(html)
+
+
+TMDB_BUTTON_RE = re.compile(r'<a [^>]*data-track-action="TMDB"[^>]*>')
+TMDB_KIND_RE = re.compile(r'themoviedb\.org/(movie|tv)/(\d+)')
+
+
+def parse_tmdb_link(html: str) -> tuple[str | None, int | None]:
+    """("movie" or "tv", TMDB id) from the TMDB button on a /film/<slug>/
+    page — Letterboxd lists TV miniseries and specials alongside films, and
+    the button's link is the one place that says which (the page's own
+    data-tmdb-type attribute says "movie" for both; checked on
+    /film/loki-2021/, September 2026). (None, None) when there's no button."""
+    button = TMDB_BUTTON_RE.search(html)
+    match = TMDB_KIND_RE.search(button.group(0)) if button else None
+    return (match.group(1), int(match.group(2))) if match else (None, None)
+
+
+def parse_tmdb_kind(html: str) -> str | None:
+    return parse_tmdb_link(html)[0]
+
+
+def fetch_page_strict(
+    session,
+    url: str,
+    *,
+    impersonate: str = "chrome124",
+    request_timeout_seconds: float = 20.0,
+    network_retries: int = 2,
+    network_backoff_seconds: float = 30.0,
+    sleep=time.sleep,
+) -> str | None:
+    """One page, for long-running scrapes where getting blocked is the thing
+    to avoid above all. A block (see LetterboxdBlockedError) raises
+    immediately with no retry — _fetch_url's retry-with-backoff is the right
+    call for a daily run's handful of requests, and exactly the wrong one
+    for thousands of them. A 404 (renamed/deleted member) returns None.
+    Only connection failures and other 5xx get a couple of slow retries,
+    and still raise if they persist (the Mac went to sleep, the Wi-Fi
+    dropped), so an unattended run stops rather than spinning."""
+    last_error = ""
+    for attempt in range(network_retries + 1):
+        try:
+            response = session.get(url, impersonate=impersonate, timeout=request_timeout_seconds)
+        except Exception as exc:  # curl_cffi raises its own exception types
+            last_error = str(exc)
+        else:
+            if response.status_code in BLOCKED_STATUSES or _is_challenge_page(response.text):
+                raise LetterboxdBlockedError(f"HTTP {response.status_code} from {url}")
+            if response.status_code == 404:
+                return None
+            if response.status_code == 200:
+                return response.text
+            last_error = f"HTTP {response.status_code}"
+        if attempt < network_retries:
+            sleep(network_backoff_seconds * (attempt + 1))
+    raise LetterboxdFetchError(f"{url} failed after {network_retries + 1} attempts ({last_error})")
+
+
+def fetch_rated_films(
+    username: str,
+    *,
+    max_pages: int = 60,
+    page_delay_seconds: float = 1.0,
+    impersonate: str = "chrome124",
+) -> dict[str, float]:
+    """slug -> rating (0.5-5) for every film the user has rated, from their
+    /films/ grid. Unlike the diary pages (fetch_diary_ratings), the grid
+    covers films rated without ever being logged, and shows each film's
+    current rating rather than one viewing's. Local only, same IP block as
+    the other /username/films/ backfills; raises LetterboxdBlockedError on
+    the first sign of a block rather than retrying through it."""
+    session = curl_requests.Session()
+    ratings: dict[str, float] = {}
+    for page_num in range(1, max_pages + 1):
+        html = fetch_page_strict(session, f"https://letterboxd.com/{username}/films/page/{page_num}/",
+                                 impersonate=impersonate)
+        if html is None:
+            break
+        rated, has_next = parse_rated_films_page(html)
+        for slug, _, half_stars in rated:
+            ratings[slug] = half_stars / 2
+        if not has_next:
+            break
+        time.sleep(page_delay_seconds)
+    return ratings

@@ -9,6 +9,7 @@ from watchlist_justwatch.letterboxd import (
     parse_member_ratings_page,
     parse_rated_films_page,
     parse_tmdb_kind,
+    parse_tmdb_link,
 )
 
 
@@ -77,6 +78,11 @@ def test_strict_fetch_treats_a_challenge_page_as_a_block_even_on_200():
 @pytest.mark.parametrize("kind", ["movie", "tv"])
 def test_tmdb_kind_comes_from_the_tmdb_button_not_the_body_attribute(kind):
     assert parse_tmdb_kind(film_page(kind)) == kind
+
+
+def test_tmdb_link_carries_the_id_too():
+    assert parse_tmdb_link(film_page("tv")) == ("tv", 84958)
+    assert parse_tmdb_link(film_page(None)) == (None, None)
 
 
 def test_tmdb_kind_without_a_tmdb_button():

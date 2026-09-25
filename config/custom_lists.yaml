@@ -16,8 +16,11 @@
 #                     nominations, festival lineups (Cannes/Venice/TIFF/
 #                     San Sebastián etc. — one list per edition works too).
 #   include/exclude:  manual per-film overrides, by Letterboxd slug.
-#   home:             false to keep a list off Home (Films-tab dropdown only).
-#   group:            heading it sits under in the Films-tab dropdown.
+#   home:             false to keep a list off the Lists tab (Films-tab
+#                     dropdown only). Named for where these sections used
+#                     to live before Lists got a tab of its own.
+#   group:            heading in the Films-tab dropdown, and the chip it
+#                     sits under on the Lists tab.
 #
 # Festival sources are mostly mundof's (full competition histories,
 # 1930s/40s–2026) and neperfectionist's (winners and competitions for the

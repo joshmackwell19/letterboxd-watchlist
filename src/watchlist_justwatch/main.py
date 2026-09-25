@@ -78,7 +78,7 @@ from .similar import (
 )
 from .state import StateDoc, get_cached_entry_id
 from .taste import (
-    PoliteFetcher, community_ratings_from_diary, evaluate, my_ratings_from_diary, recommend,
+    PoliteFetcher, community_ratings_from_diary, evaluate, my_ratings_from_diary, recommend, record_screen_hits,
     render_evaluation, render_recommendations, scrape_raters,
 )
 from .tmdb_client import search_movie as _tmdb_search_movie
@@ -761,6 +761,12 @@ def main() -> None:
                               "datacenter IPs): find members who rate like you and scrape their public "
                               "ratings into the database, then exit. Resumable; stops at the first sign "
                               "of a block and then refuses to run again for 24h. See taste.py.")
+    parser.add_argument("--record-screen-hits", action="store_true",
+                         help="Taste engine (locally only, like --scrape-raters): record which members each "
+                              "screening page recruited, for pages screened before that was recorded — what "
+                              "--taste-eval needs to test your most distinctive ratings fairly. Network-free "
+                              "where stored data says, one request a page for the rest; resumable; stops at "
+                              "the first block. See taste.record_screen_hits.")
     parser.add_argument("--screen-films", type=int, default=200,
                          help="--scrape-raters: how many of your most distinctive ratings to look up "
                               "same-rating members for (one request each, skipping any already done)")
@@ -1058,7 +1064,16 @@ def main() -> None:
             screen_films=args.screen_films, max_raters=args.max_raters,
             fetcher=PoliteFetcher(delay_seconds=args.request_delay, max_requests=args.max_requests),
         )
-        sys.exit({"blocked": 2, "network": 1, "cooldown": 1}.get(outcome, 0))
+        sys.exit({"blocked": 2, "network": 1, "cooldown": 1, "busy": 1}.get(outcome, 0))
+
+    if args.record_screen_hits:
+        if not args.username:
+            parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
+        outcome = record_screen_hits(
+            args.database_url, args.username,
+            fetcher=PoliteFetcher(delay_seconds=args.request_delay, max_requests=args.max_requests),
+        )
+        sys.exit({"blocked": 2, "network": 1, "cooldown": 1, "busy": 1, "failed": 1}.get(outcome, 0))
 
     if args.taste_eval or args.taste_recommend:
         diary, watchlist = load_taste_inputs(args.database_url)
@@ -1067,7 +1082,9 @@ def main() -> None:
             with connect(args.database_url) as conn:
                 if args.taste_eval:
                     report = evaluate(conn, my_ratings, community_ratings_from_diary(diary),
-                                      {slug: entry["watched_date"] for slug, entry in diary.items()})
+                                      {slug: entry["watched_date"] for slug, entry in diary.items()},
+                                      clusters={slug: entry["director"] for slug, entry in diary.items()
+                                                if entry.get("director")})
                     print(render_evaluation(report))
                 if args.taste_recommend:
                     # Checks each pick's film page for TV the first time it's suggested

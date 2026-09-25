@@ -147,6 +147,31 @@ CREATE TABLE IF NOT EXISTS rater_screened (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (slug, stars, page)
 );
+-- When the page's members were recorded in rater_screen_hits: as it was
+-- screened, or for pages screened before recording existed, by
+-- --record-screen-hits (which also sets refetched_at). member_count is
+-- how many rows the page had then (under 25 means that's every member
+-- who gave that score). fetched_at is left alone: it's the evidence the
+-- rebuild works from.
+ALTER TABLE rater_screened ADD COLUMN IF NOT EXISTS hits_recorded_at TEXT;
+ALTER TABLE rater_screened ADD COLUMN IF NOT EXISTS refetched_at TEXT;
+ALTER TABLE rater_screened ADD COLUMN IF NOT EXISTS member_count INTEGER;
+-- Which members each screening page turned up — so --taste-eval can test a
+-- screened film without the raters it recruited. source: "screening"
+-- (recorded as the page was screened), "first-found" (the page that first
+-- found them, rebuilt exactly from discovery timestamps), "refetch" (on
+-- the page again when --record-screen-hits fetched it later), "inferred"
+-- (not seen, but their screening count says they were on a page they
+-- rated at its score — assumed, so the eval errs toward leaving them out).
+CREATE TABLE IF NOT EXISTS rater_screen_hits (
+    slug TEXT NOT NULL,
+    stars REAL NOT NULL,
+    page INTEGER NOT NULL DEFAULT 1,
+    rater_id INTEGER NOT NULL REFERENCES raters(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    PRIMARY KEY (slug, stars, page, rater_id),
+    FOREIGN KEY (slug, stars, page) REFERENCES rater_screened ON DELETE CASCADE
+);
 -- Small taste-engine values (global mean rating, when Letterboxd last
 -- blocked a scrape) — its own table because save_state replaces `meta`
 -- wholesale on every daily run.
@@ -498,22 +523,26 @@ def save_custom_list_source(database_url: str, source: str, slugs: list[str], fe
 
 
 def connect(database_url: str) -> psycopg.Connection:
-    conn = psycopg.connect(database_url, autocommit=True)
+    """The taste engine's connection: autocommit, and TCP keepalives, so a
+    connection that dies under a long local run is noticed within about a
+    minute rather than whenever the OS gives up on it (tens of minutes)."""
+    conn = psycopg.connect(database_url, autocommit=True, keepalives=1, keepalives_idle=30,
+                           keepalives_interval=10, keepalives_count=3)
     _ensure_schema(conn)
     return conn
 
 
 def load_taste_inputs(database_url: str) -> tuple[dict[str, dict], set[str]]:
-    """(slug -> {personal_rating, rating, watched_date} for every diary
-    film, Josh's watchlist slugs) — just the fields the taste engine reads,
-    rather than load_state's every offer of every film."""
+    """(slug -> {personal_rating, rating, watched_date, director} for every
+    diary film, Josh's watchlist slugs) — just the fields the taste engine
+    reads, rather than load_state's every offer of every film."""
     with psycopg.connect(database_url) as conn:
         _ensure_schema(conn)
         diary = {
-            slug: {"personal_rating": personal, "rating": community, "watched_date": watched}
-            for slug, personal, community, watched in conn.execute(
+            slug: {"personal_rating": personal, "rating": community, "watched_date": watched, "director": director}
+            for slug, personal, community, watched, director in conn.execute(
                 "SELECT slug, (data->>'personal_rating')::real, (data->>'rating')::real, "
-                "data->>'watched_date' FROM diary"
+                "data->>'watched_date', data->>'director' FROM diary"
             ).fetchall()
         }
         watchlist = {row[0] for row in conn.execute("SELECT slug FROM josh_watchlist").fetchall()}
@@ -551,11 +580,84 @@ def screened_pages(conn: psycopg.Connection) -> set[tuple[str, float, int]]:
             conn.execute("SELECT slug, stars, page FROM rater_screened").fetchall()}
 
 
-def mark_screened(conn: psycopg.Connection, slug: str, stars: float, page: int, now_iso: str) -> None:
+def mark_screened(conn: psycopg.Connection, slug: str, stars: float, page: int, now_iso: str,
+                  member_count: int | None = None) -> None:
+    """Marks a page screened, with its members recorded as of now — call
+    record_screen_hits for them in the same transaction."""
     conn.execute(
-        "INSERT INTO rater_screened (slug, stars, page, fetched_at) VALUES (%s, %s, %s, %s) "
-        "ON CONFLICT DO NOTHING",
-        (slug, stars, page, now_iso),
+        "INSERT INTO rater_screened (slug, stars, page, fetched_at, hits_recorded_at, member_count) "
+        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+        (slug, stars, page, now_iso, now_iso, member_count),
+    )
+
+
+def record_screen_hits(conn: psycopg.Connection, slug: str, stars: float, page: int, rater_ids: list[int],
+                       source: str) -> None:
+    if rater_ids:
+        conn.execute(
+            "INSERT INTO rater_screen_hits (slug, stars, page, rater_id, source) "
+            "SELECT %s, %s, %s, id, %s FROM unnest(%s::int[]) AS x(id) ON CONFLICT DO NOTHING",
+            (slug, stars, page, source, rater_ids),
+        )
+
+
+def record_screen_hits_many(conn: psycopg.Connection, rows: list[tuple[str, float, int, int]], source: str) -> None:
+    """record_screen_hits for many (slug, stars, page, rater id) rows in one statement."""
+    if rows:
+        slugs, stars, pages, rater_ids = (list(column) for column in zip(*rows))
+        conn.execute(
+            "INSERT INTO rater_screen_hits (slug, stars, page, rater_id, source) "
+            "SELECT x.slug, x.stars, x.page, x.rater_id, %s "
+            "FROM unnest(%s::text[], %s::real[], %s::int[], %s::int[]) AS x(slug, stars, page, rater_id) "
+            "ON CONFLICT DO NOTHING",
+            (source, slugs, stars, pages, rater_ids),
+        )
+
+
+def rater_ids_by_username(conn: psycopg.Connection, usernames: list[str]) -> dict[str, int]:
+    return {username.lower(): rater_id for rater_id, username in conn.execute(
+        "SELECT id, username FROM raters WHERE lower(username) = ANY(%s)", ([u.lower() for u in usernames],)
+    ).fetchall()}
+
+
+def screening_timeline(conn: psycopg.Connection) -> list[tuple[str, float, int, str, str | None]]:
+    """(slug, stars, page, fetched_at, hits_recorded_at) for every screened
+    page, oldest first — 200-odd rows."""
+    return conn.execute(
+        "SELECT slug, stars, page, fetched_at, hits_recorded_at FROM rater_screened "
+        "ORDER BY fetched_at::timestamptz"
+    ).fetchall()
+
+
+def rater_recruitment(conn: psycopg.Connection) -> list[tuple[int, str, int, str, str | None]]:
+    """(id, status, screen_hits, discovered_at, scraped_at) for every rater
+    — a few thousand narrow rows, what working out who was recruited where
+    needs."""
+    return conn.execute("SELECT id, status, screen_hits, discovered_at, scraped_at FROM raters").fetchall()
+
+
+def recorded_screen_hits(conn: psycopg.Connection) -> list[tuple[str, float, int, int, str]]:
+    return conn.execute("SELECT slug, stars, page, rater_id, source FROM rater_screen_hits").fetchall()
+
+
+def same_score_ratings(conn: psycopg.Connection) -> list[tuple[str, float, int, int]]:
+    """(slug, stars, page, rater_id) wherever a scraped rater's stored
+    rating of a screened film equals the score its page was screened at —
+    everyone who could have been on that page. Aggregated server-side from
+    the film index; a few thousand rows."""
+    return conn.execute(
+        "SELECT s.slug, s.stars, s.page, r.rater_id FROM rater_screened s "
+        "JOIN rater_films f ON f.slug = s.slug "
+        "JOIN rater_ratings r ON r.film_id = f.id AND r.rating = round(s.stars * 2)::int"
+    ).fetchall()
+
+
+def set_screen_page_refetched(conn: psycopg.Connection, slug: str, stars: float, page: int, now_iso: str,
+                              member_count: int) -> None:
+    conn.execute(
+        "UPDATE rater_screened SET hits_recorded_at = %s, refetched_at = %s, member_count = %s "
+        "WHERE slug = %s AND stars = %s AND page = %s",
+        (now_iso, now_iso, member_count, slug, stars, page),
     )
 
 
@@ -638,11 +740,13 @@ def refresh_rater_baselines(conn: psycopg.Connection, *, lambda_film: float, lam
 
 
 def latest_scrape_activity(conn: psycopg.Connection) -> str | None:
-    """When --scrape-raters last finished anything (a member, whatever
-    their status, or a screening page) — a heartbeat, so another command
-    about to request Letterboxd pages can tell a scrape is running."""
+    """When --scrape-raters or --record-screen-hits last finished anything
+    (a member, whatever their status, or a screening page, fetched or
+    re-fetched) — a heartbeat, so another command about to request
+    Letterboxd pages can tell one is running."""
     return conn.execute(
-        "SELECT greatest((SELECT max(scraped_at) FROM raters), (SELECT max(fetched_at) FROM rater_screened))"
+        "SELECT greatest((SELECT max(scraped_at) FROM raters), (SELECT max(fetched_at) FROM rater_screened), "
+        "(SELECT max(refetched_at) FROM rater_screened))"
     ).fetchone()[0]
 
 
@@ -704,7 +808,9 @@ def rater_predictions(conn: psycopg.Connection, neighbour_ids: list[int], weight
                       mu: float, lambda_pred: float, min_support: int,
                       target_film_ids: list[int] | None = None, exclude_film_ids: list[int] | None = None,
                       limit: int | None = None, film_means: dict[int, float] | None = None,
-                      lambda_rater: float = 0.0) -> list[dict]:
+                      lambda_rater: float = 0.0, offset_means: dict[int, float] | None = None,
+                      leave_out: list[tuple[int, int]] | None = None,
+                      bias_override: dict[int, float] | None = None) -> list[dict]:
     """Per film the neighbours rated: the film's offset, and the
     weight-averaged residual of the neighbours who rated it — shrunk toward
     zero by `lambda_pred` in the denominator, so a film two neighbours
@@ -717,42 +823,87 @@ def rater_predictions(conn: psycopg.Connection, neighbour_ids: list[int], weight
     `lambda_rater`, like refresh_rater_baselines) — so that the result can
     go on top of the Letterboxd average. Left on the corpus's own
     estimate, a residual would still carry whatever of the film's quality
-    its heavily shrunk corpus offset missed, and count it twice."""
+    its heavily shrunk corpus offset missed, and count it twice.
+    `offset_means` narrows which films those neighbour offsets are measured
+    over (all of `film_means` by default).
+
+    For --taste-eval's screened films: `leave_out` (film id, rater id)
+    pairs drop those ratings before anything is counted (support, the
+    min_support cut, neighbour_mean), and `bias_override` replaces a film's
+    stored offset — both for the residual and the returned `bias` — with
+    one computed without them (leave_out_film_bias). `weight_sum` is the
+    neighbour weight behind each film, for checking all of this by hand."""
     means = film_means or {}
+    offsets = means if offset_means is None else offset_means
+    pairs = sorted(set(leave_out or []))
+    override = bias_override or {}
     rows = conn.execute(
         "WITH lb AS (SELECT * FROM unnest(%(lb_ids)s::int[], %(lb_means)s::real[]) AS lb(film_id, m)),"
+        "     lbo AS (SELECT * FROM unnest(%(lbo_ids)s::int[], %(lbo_means)s::real[]) AS lbo(film_id, m)),"
+        "     ex AS (SELECT * FROM unnest(%(ex_f)s::int[], %(ex_r)s::int[]) AS ex(film_id, rater_id)),"
+        "     fb AS (SELECT * FROM unnest(%(fb_ids)s::int[], %(fb_b)s::real[]) AS fb(film_id, b)),"
         "     nb AS (SELECT * FROM unnest(%(ids)s::int[], %(w)s::real[]) AS nb(rater_id, w)),"
         "     nb_lb AS ("
-        "       SELECT r.rater_id, sum(r.rating / 2.0 - lb.m) / (count(*) + %(lam_rater)s) AS b"
-        "       FROM nb JOIN rater_ratings r ON r.rater_id = nb.rater_id JOIN lb ON lb.film_id = r.film_id"
+        "       SELECT r.rater_id, sum(r.rating / 2.0 - lbo.m) / (count(*) + %(lam_rater)s) AS b"
+        "       FROM nb JOIN rater_ratings r ON r.rater_id = nb.rater_id JOIN lbo ON lbo.film_id = r.film_id"
         "       GROUP BY r.rater_id"
         "     )"
         "SELECT * FROM ("
-        "  SELECT f.id, f.slug, f.name, f.bias, f.tmdb_kind, count(*) AS support,"
-        "         sum(nb.w * (r.rating / 2.0 - CASE WHEN lb.m IS NULL THEN %(mu)s + u.bias + f.bias"
+        "  SELECT f.id, f.slug, f.name, coalesce(max(fb.b), f.bias) AS bias, f.tmdb_kind, count(*) AS support,"
+        "         sum(nb.w * (r.rating / 2.0 - CASE WHEN lb.m IS NULL THEN %(mu)s + u.bias + coalesce(fb.b, f.bias)"
         "                                          ELSE lb.m + coalesce(nb_lb.b, 0) END))"
         "           / (sum(nb.w) + %(lam)s) AS nb_offset,"
-        "         avg(r.rating) / 2.0 AS neighbour_mean"
+        "         avg(r.rating) / 2.0 AS neighbour_mean,"
+        "         sum(nb.w) AS weight_sum"
         "  FROM nb"
         "  JOIN rater_ratings r ON r.rater_id = nb.rater_id"
         "  JOIN raters u ON u.id = nb.rater_id"
         "  JOIN rater_films f ON f.id = r.film_id"
         "  LEFT JOIN lb ON lb.film_id = f.id"
         "  LEFT JOIN nb_lb ON nb_lb.rater_id = nb.rater_id"
+        "  LEFT JOIN fb ON fb.film_id = f.id"
         "  WHERE (%(targets)s::int[] IS NULL OR f.id = ANY(%(targets)s::int[]))"
         "    AND NOT (f.id = ANY(%(exclude)s::int[]))"
+        "    AND NOT EXISTS (SELECT 1 FROM ex WHERE ex.film_id = r.film_id AND ex.rater_id = r.rater_id)"
         "  GROUP BY f.id"
         "  HAVING count(*) >= %(min_support)s"
-        ") s ORDER BY bias + nb_offset DESC LIMIT %(limit)s",
+        ") s ORDER BY bias + nb_offset DESC, id LIMIT %(limit)s",
         {"ids": neighbour_ids, "w": weights, "mu": mu, "lam": lambda_pred, "min_support": min_support,
          "targets": target_film_ids, "exclude": exclude_film_ids or [], "limit": limit,
-         "lb_ids": list(means), "lb_means": list(means.values()), "lam_rater": lambda_rater},
+         "lb_ids": list(means), "lb_means": list(means.values()), "lam_rater": lambda_rater,
+         "lbo_ids": list(offsets), "lbo_means": list(offsets.values()),
+         "ex_f": [f for f, _ in pairs], "ex_r": [r for _, r in pairs],
+         "fb_ids": list(override), "fb_b": list(override.values())},
     ).fetchall()
     return [
         {"film_id": film_id, "slug": slug, "name": name, "bias": float(bias), "tmdb_kind": tmdb_kind,
-         "support": support, "nb_offset": float(nb_offset), "neighbour_mean": float(neighbour_mean)}
-        for film_id, slug, name, bias, tmdb_kind, support, nb_offset, neighbour_mean in rows
+         "support": support, "nb_offset": float(nb_offset), "neighbour_mean": float(neighbour_mean),
+         "weight_sum": float(weight_sum)}
+        for film_id, slug, name, bias, tmdb_kind, support, nb_offset, neighbour_mean, weight_sum in rows
     ]
+
+
+def leave_out_film_bias(conn: psycopg.Connection, film_ids: list[int], leave_out: list[tuple[int, int]], *,
+                        mu: float, lambda_film: float) -> dict[int, float]:
+    """Each film's corpus offset recomputed without the (film id, rater id)
+    ratings in `leave_out` — refresh_rater_baselines' formula, so with
+    nothing left out it matches the stored bias. A film whose every rating
+    is left out gets 0 (no evidence either way) rather than falling back
+    to the stored, contaminated value. One aggregate on the film index."""
+    if not film_ids:
+        return {}
+    pairs = sorted(set(leave_out))
+    rows = conn.execute(
+        "WITH ex AS (SELECT * FROM unnest(%(ex_f)s::int[], %(ex_r)s::int[]) AS ex(film_id, rater_id)) "
+        "SELECT t.film_id, coalesce(sum(r.rating / 2.0 - %(mu)s), 0) / (count(r.rating) + %(lam)s) "
+        "FROM unnest(%(films)s::int[]) AS t(film_id) "
+        "LEFT JOIN rater_ratings r ON r.film_id = t.film_id "
+        "  AND NOT EXISTS (SELECT 1 FROM ex WHERE ex.film_id = r.film_id AND ex.rater_id = r.rater_id) "
+        "GROUP BY t.film_id",
+        {"ex_f": [f for f, _ in pairs], "ex_r": [r for _, r in pairs], "films": sorted(set(film_ids)),
+         "mu": mu, "lam": lambda_film},
+    ).fetchall()
+    return {film_id: float(bias) for film_id, bias in rows}
 
 
 def set_rater_film_kinds(conn: psycopg.Connection, kinds: dict[int, str]) -> None:

@@ -33,7 +33,7 @@ NOW = datetime(2026, 9, 24, 22, 0, tzinfo=timezone.utc)
 @pytest.fixture
 def conn():
     connection = db.connect(URL)
-    connection.execute("TRUNCATE raters, rater_films, rater_ratings, rater_screened, taste_meta "
+    connection.execute("TRUNCATE raters, rater_films, rater_ratings, rater_screened, rater_screen_hits, taste_meta "
                        "RESTART IDENTITY CASCADE")
     yield connection
     connection.close()

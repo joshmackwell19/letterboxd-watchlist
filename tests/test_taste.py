@@ -6,23 +6,31 @@ from tests.letterboxd_pages import film_page, grid_page
 from watchlist_justwatch.letterboxd import LetterboxdBlockedError
 from watchlist_justwatch.taste import (
     FilmKindLookup,
+    Recruitment,
+    build_recruitment,
     PoliteFetcher,
     RequestBudgetExhausted,
     TasteParams,
     choose_screening_films,
     films_only,
+    first_found_pages,
+    followed_rater_ids,
     kfold,
     letterboxd_offset,
     letterboxd_residuals,
     my_offset,
     my_residuals,
+    paired_bootstrap,
     recent_holdout,
+    regressed_toward_mean,
+    reconcile_recruits,
     scrape_looks_active,
     scrape_profile,
     screen_hits,
     select_neighbours,
     spearman,
     stars_path,
+    stratified_folds,
     top_share_mean,
 )
 
@@ -266,3 +274,202 @@ def test_film_kind_lookup_without_a_fetcher_checks_nothing():
     lookup = FilmKindLookup(None, lambda msg: None)
     assert lookup(_pick(1, "a")) is None
     assert lookup(_pick(2, "b", "tv")) == "tv"
+
+
+def _at(minute: int, second: float = 0.0) -> str:
+    return (datetime(2026, 9, 24, 11, 0, tzinfo=timezone.utc) + timedelta(minutes=minute, seconds=second)).isoformat()
+
+
+# Josh's follows are seeded at 11:00; page a is screened at 11:01 (finding
+# raters 2 and 3, inserted a moment before it's marked), page b at 11:02
+# (finding 4). Rater 5 turned up after the last page and belongs to none.
+TIMELINE = [("a", 1.0, 1, _at(1, 0.01), None), ("b", 4.5, 1, _at(2, 0.01), None)]
+RATERS = [(1, "scraped", 3, _at(0), _at(3)), (2, "scraped", 2, _at(1), _at(3)),
+          (3, "candidate", 1, _at(1), None), (4, "scraped", 1, _at(2), _at(3)),
+          (5, "candidate", 1, _at(9), None)]
+
+
+def test_followed_raters_are_the_ones_seeded_with_the_follows():
+    # page a's own recruits (2, 3) were inserted before page a was marked,
+    # but after following_seeded_at
+    assert followed_rater_ids(RATERS, _at(0, 0.02)) == {1}
+    assert followed_rater_ids(RATERS, None) == set()
+
+
+def test_first_found_page_is_the_first_marked_at_or_after_discovery():
+    assert first_found_pages(RATERS, TIMELINE, {1}) == {2: ("a", 1.0, 1), 3: ("a", 1.0, 1), 4: ("b", 4.5, 1)}
+
+
+def test_reconcile_recruits_infers_the_pages_a_short_rater_could_have_been_on():
+    pages = {("a", 1.0, 1): datetime.fromisoformat(TIMELINE[0][3]),
+             ("b", 4.5, 1): datetime.fromisoformat(TIMELINE[1][3])}
+    selected = [(1, 3, _at(0)), (2, 2, _at(1)), (4, 1, _at(2))]
+    recorded = {1: {("a", 1.0, 1)}, 2: {("a", 1.0, 1)}, 4: {("b", 4.5, 1), ("a", 1.0, 1)}}
+    # rater 2 gave page b's score to its film, but a was fetched before they
+    # were discovered, so only b can be the page they're missing
+    same_score = {2: {("a", 1.0, 1), ("b", 4.5, 1)}}
+    status, inferred = reconcile_recruits(selected, {1}, recorded, same_score, pages)
+    # 1: followed (2) + page a = 3 hits, exact. 2: two hits, one recorded.
+    # 4: one hit, two recorded (a re-fetch saw them on a).
+    assert status == {1: "exact", 2: "missing", 4: "extra"}
+    assert inferred == [(("b", 4.5, 1), 2)]
+
+
+def test_reconnecting_database_retries_on_a_fresh_connection_then_gives_up(monkeypatch):
+    import psycopg
+    from watchlist_justwatch import taste as taste_module
+
+    opened = []
+
+    class _Conn:
+        def __init__(self):
+            opened.append(self)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(taste_module.db, "connect", lambda url: _Conn())
+    logged = []
+    database = taste_module._ReconnectingDatabase("postgres://x", logged.append, attempts=3,
+                                                 sleep=lambda seconds: None)
+    calls = []
+
+    def flaky(conn):
+        calls.append(conn)
+        if len(calls) == 1:
+            raise psycopg.OperationalError("consuming input failed: could not receive data from server")
+        return "ok"
+
+    assert database(flaky) == "ok"
+    assert calls == opened[:2] and len(opened) == 2
+    assert "reconnecting" in logged[0]
+
+    def dead(conn):
+        raise psycopg.OperationalError("gone")
+
+    with pytest.raises(psycopg.OperationalError):
+        database(dead)
+    assert len(opened) == 4
+
+
+
+def _recruitment(**overrides) -> Recruitment:
+    fields = dict(
+        screened={"a", "b"}, unrecorded=set(),
+        recruits={"a": {10, 11, 12}, "b": {12}},
+        pages_of_slug={"a": {("a", 1.0, 1)}, "b": {("b", 4.5, 1)}},
+        counted={10: {("a", 1.0, 1)}, 11: {("a", 1.0, 1), ("b", 4.5, 1), ("c", 2.0, 1), ("d", 5.0, 1)},
+                 12: {("a", 1.0, 1), ("b", 4.5, 1)}},
+        unsure=set(),
+        # run 0 took raters down to 2 hits, id 20: 10 had 2 (1 page + nothing), 11 had 4, 12 had 2
+        selection={10: (2, 0), 11: (4, 0), 12: (2, 0)},
+        cutoffs={0: (2, 20)},
+    )
+    fields.update(overrides)
+    return Recruitment(**fields)
+
+
+def test_counterfactual_keeps_recruits_who_would_have_been_scraped_anyway():
+    r = _recruitment()
+    # without a's page: 10 falls to 1 hit (below the cut), 11 to 3 (still in),
+    # 12 to 1 (out)
+    assert r.exclusions("a", "counterfactual") == {10, 12}
+    assert r.exclusions("a", "all") == {10, 11, 12}
+    assert r.exclusions("a", "none") == set()
+    # at the cut itself, the id tie-break decides: 2 hits and an id below 20 is in
+    assert r.kept_without(11, {("a", 1.0, 1), ("b", 4.5, 1)})
+    assert not r.kept_without(11, {("a", 1.0, 1), ("b", 4.5, 1), ("c", 2.0, 1)})
+
+
+def test_counterfactual_never_keeps_a_rater_whose_count_when_queued_is_unknown():
+    r = _recruitment(unsure={11}, selection={10: (2, 0), 11: (None, 0), 12: (2, 0)})
+    assert r.exclusions("a", "counterfactual") == {10, 11, 12}
+
+
+def test_counterfactual_treats_every_page_an_unsure_rater_may_have_been_on_as_lost():
+    # 11's pages don't reconcile, but their count when queued is known (4):
+    # losing a's page alone still leaves 3, above the cut; losing the three
+    # pages they may have been on leaves 1, below it
+    r = _recruitment(unsure={11})
+    assert r.kept_without(11, {("a", 1.0, 1)})
+    assert not r.kept_without(11, {("a", 1.0, 1), ("b", 4.5, 1), ("c", 2.0, 1)})
+
+
+def test_time_split_drops_recruits_of_later_films_from_the_corpus():
+    r = _recruitment()
+    assert r.dropped_without({"a", "b"}, "counterfactual") == {10, 12}
+    assert r.dropped_without({"a", "b"}, "all") == {10, 11, 12}
+    assert r.dropped_without(set(), "counterfactual") == set()
+
+
+def test_build_recruitment_replays_each_run_and_its_cutoff():
+    timeline = [("a", 1.0, 1, _at(1), _at(9)), ("b", 4.5, 1, _at(5), _at(9))]
+    hits = [("a", 1.0, 1, 2, "first-found"), ("a", 1.0, 1, 3, "first-found"), ("b", 4.5, 1, 3, "refetch"),
+            ("b", 4.5, 1, 4, "first-found"), ("b", 4.5, 1, 2, "inferred")]
+    raters = [(1, "scraped", 2, _at(0), _at(2)),          # followed, taken in run 1 (after page a)
+              (2, "scraped", 1, _at(1, -0.1), _at(2)),    # page a, run 1
+              (3, "scraped", 2, _at(1, -0.1), _at(6)),    # page a for certain, b only from a re-fetch; run 2
+              (4, "candidate", 1, _at(5, -0.1), None)]
+    r = build_recruitment(timeline, hits, raters, {1}, same_score=[])
+    # 2's one hit is its certain page, so the inferred b is ignored; 3's
+    # certain page covers one of two hits, so the re-fetched b counts too
+    assert r.recruits == {"a": {2, 3}, "b": {3}}
+    assert r.unsure == {3}
+    # 3 is queued after every page, so its screen_hits is its count then
+    assert r.selection == {1: (2, 1), 2: (1, 1), 3: (2, 2)}
+    assert r.cutoffs == {1: (1, 2), 2: (2, 3)}
+    assert r.counted[3] == {("a", 1.0, 1), ("b", 4.5, 1)}
+    assert r.unrecorded == set()
+
+
+def test_build_recruitment_counts_same_score_films_for_a_rater_short_of_certain_pages():
+    timeline = [("a", 1.0, 1, _at(1), _at(9)), ("b", 4.5, 1, _at(5), _at(9)), ("c", 2.0, 1, _at(7), _at(9))]
+    hits = [("a", 1.0, 1, 3, "first-found")]
+    raters = [(3, "scraped", 2, _at(1, -0.1), _at(8))]
+    # besides their certain page a, they rated b's film at b's score after
+    # being found — so b is the page they may have been recruited through
+    same_score = [("b", 4.5, 1, 3), ("a", 1.0, 1, 3)]
+    r = build_recruitment(timeline, hits, raters, set(), same_score)
+    assert r.recruits == {"a": {3}, "b": {3}}
+    assert r.counted[3] == {("a", 1.0, 1), ("b", 4.5, 1)}
+
+
+def test_build_recruitment_uses_screen_hits_for_an_unsure_rater_queued_after_every_page():
+    timeline = [("a", 1.0, 1, _at(1), _at(9)), ("b", 4.5, 1, _at(5), _at(9))]
+    # rater 3 has 2 hits but only page a was seen again (b turned over);
+    # b is inferred from their rating
+    hits = [("a", 1.0, 1, 3, "first-found"), ("b", 4.5, 1, 3, "inferred"),
+            ("a", 1.0, 1, 5, "first-found"), ("b", 4.5, 1, 5, "inferred")]
+    raters = [(3, "scraped", 2, _at(1, -0.1), _at(6)),   # queued after both pages: count known
+              (5, "scraped", 2, _at(1, -0.1), _at(3))]   # queued between them: count unknown
+    r = build_recruitment(timeline, hits, raters, set(), same_score=[])
+    assert r.unsure == {3, 5}
+    assert r.selection[3] == (2, 2) and r.counted[3] == {("a", 1.0, 1), ("b", 4.5, 1)}
+    assert r.selection[5] == (None, 1)
+
+
+def test_stratified_folds_share_out_the_screened_films():
+    testable = [f"s{i}" for i in range(10)] + [f"r{i}" for i in range(20)]
+    folds = stratified_folds(testable, {f"s{i}" for i in range(10)}, 5, seed=0)
+    assert set().union(*folds) == set(testable)
+    assert all(sum(1 for s in fold if s.startswith("s")) == 2 for fold in folds)
+
+
+def test_regressed_toward_mean_fits_the_slope_through_josh_mean():
+    train = {"a": 4.0, "b": 2.0, "c": 3.0, "no-average": 5.0}
+    base = {"a": 5.0, "b": 1.0, "c": 3.5}
+    mean, slope = regressed_toward_mean(train, base)
+    assert mean == pytest.approx(3.5)
+    # x = base - 3.5 = (1.5, -2.5, 0), y = rating - 3.5 = (0.5, -1.5, -0.5)
+    assert slope == pytest.approx((0.75 + 3.75) / (2.25 + 6.25))
+
+
+def test_paired_bootstrap_of_a_method_against_itself_is_zero():
+    actual = {f"f{i}": 1.0 + (i % 9) * 0.5 for i in range(40)}
+    preds = {s: a + 0.3 for s, a in actual.items()}
+    result = paired_bootstrap(preds, preds, actual, {s: s[:2] for s in actual}, iterations=50)
+    assert result["films"] == 40
+    assert result["d_rmse"] == 0 and result["rmse_ci"] == (0, 0)
+    better = paired_bootstrap(actual, preds, actual, {}, iterations=50)
+    assert better["d_rmse"] == pytest.approx(-0.3)
+    assert better["rmse_ci"][1] < 0

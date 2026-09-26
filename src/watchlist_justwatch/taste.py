@@ -48,6 +48,7 @@ from .letterboxd import (
     LetterboxdFetchError,
     fetch_page_strict,
     parse_following_page,
+    parse_member_list_page,
     parse_member_ratings_page,
     parse_rated_films_page,
     parse_tmdb_kind,
@@ -64,6 +65,38 @@ FALLBACK_CONSENSUS = 3.3
 # How many screening lists a followed account counts as, so the people
 # Josh chose to follow are scraped ahead of one-list strangers.
 FOLLOWING_HITS = 2
+# Screening a favourite's /fans/ page (members with it among their own four
+# favourites): stored under this score, which no rating can have, and each
+# appearance counts as this many hits — sharing a favourite says more than
+# sharing a rating.
+FANS_STARS = 0.0
+FAVOURITE_HITS = 3
+FAVOURITE_FAN_PAGES = 3
+
+
+def page_hits(page: tuple) -> int:
+    """Screening hits one appearance on this (slug, stars, page) counts for."""
+    return FAVOURITE_HITS if page[1] == FANS_STARS else 1
+
+
+def screening_url(slug: str, stars: float, page: int) -> str:
+    path = "fans" if stars == FANS_STARS else f"members/rated/{stars_path(stars)}"
+    return f"https://letterboxd.com/film/{slug}/{path}/" + (f"page/{page}/" if page > 1 else "")
+
+
+def screening_plan(my_ratings: dict[str, float], community: dict[str, float], *, favourites: list[str],
+                   five_star_pages: int, screen_films: int) -> list[tuple[str, float, int]]:
+    """Every (slug, stars, page) to screen, in order: the fans of Josh's four
+    favourites, then who else gave his 5★ films 5★ (most above the
+    Letterboxd average first, `five_star_pages` deep), then page 1 of his
+    most distinctive ratings (choose_screening_films). Screening walks each
+    film's pages in order and stops at its last."""
+    plan = [(slug, FANS_STARS, page) for slug in favourites for page in range(1, FAVOURITE_FAN_PAGES + 1)]
+    fives = sorted((s for s, r in my_ratings.items() if r == 5.0),
+                   key=lambda s: (-(5.0 - community.get(s, FALLBACK_CONSENSUS)), s))
+    plan += [(slug, 5.0, page) for slug in fives for page in range(1, five_star_pages + 1)]
+    plan += [(slug, stars, 1) for slug, stars in choose_screening_films(my_ratings, community, screen_films)]
+    return list(dict.fromkeys(plan))
 # A rater's most recent 30 pages (2,160 films) is plenty to correlate on,
 # and stops a 10,000-film account eating an hour of an overnight run.
 MAX_PROFILE_PAGES = 30
@@ -108,6 +141,32 @@ LETTERBOXD_GRID = [replace(DEFAULT_PARAMS, baseline="letterboxd", neighbours=n, 
 # The corpus-centred taste layer added straight onto the Letterboxd
 # average, kept in the evaluation to show what re-centring is worth.
 SIMPLE_SWAP_LABEL = "Letterboxd + corpus twins (simple swap)"
+# How many times over Josh's four favourites (config/taste.yaml) count when
+# correlating a member's ratings with his. --taste-eval scores the simple
+# swap at each; the first is the one chosen before looking.
+FAVOURITE_WEIGHTS = (5.0, 2.0, 10.0)
+
+
+def favourites_label(weight: float) -> str:
+    return f"Simple swap, favourites ×{weight:g}"
+
+
+def load_favourites(path: str = "config/taste.yaml") -> list[str]:
+    """Josh's four favourites, by slug ([] if the file isn't there)."""
+    import os
+    import yaml
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return list((yaml.safe_load(f) or {}).get("four_favourites") or [])
+
+
+def favourite_weights(film_ids: list[int], film_info: dict[str, tuple], favourites: set[str],
+                      weight: float) -> list[float]:
+    """A weight per film id (aligned with `film_ids`): `weight` for one of
+    Josh's favourites, 1 for everything else."""
+    favourite_ids = {film_info[s][0] for s in favourites if s in film_info}
+    return [weight if film_id in favourite_ids else 1.0 for film_id in film_ids]
 
 
 @dataclass(frozen=True)
@@ -352,10 +411,12 @@ def _cooldown_remaining(blocked_at: str | None, now: datetime) -> timedelta | No
 
 def scrape_raters(database_url: str, username: str, my_ratings: dict[str, float], community: dict[str, float], *,
                   screen_films: int, max_raters: int, fetcher: PoliteFetcher, log=print,
-                  now=lambda: datetime.now(timezone.utc)) -> str:
+                  now=lambda: datetime.now(timezone.utc), favourites: list[str] = (),
+                  five_star_pages: int = 0) -> str:
     """One collection session: seed from who Josh follows (once ever),
-    screen up to `screen_films` films not already screened, then scrape up
-    to `max_raters` of the best candidates. Stops at the first block and
+    screen whatever of screening_plan isn't done yet (his favourites' fans,
+    his 5★ films, his most distinctive ratings), then scrape up to
+    `max_raters` of the best candidates. Stops at the first block and
     records it, so the next run waits out BLOCK_COOLDOWN. Every screened
     page and every rater is committed as it finishes, so stopping at any
     point — block, budget, Ctrl-C, a sleeping Mac — loses at most the one
@@ -390,24 +451,49 @@ def scrape_raters(database_url: str, username: str, my_ratings: dict[str, float]
             db.taste_meta_set(conn, "following_seeded_at", now().isoformat())
             log(f"Seeded {len(followed)} candidates from the accounts you follow.")
 
-        done = db.screened_pages(conn)
-        todo = [(slug, stars) for slug, stars in choose_screening_films(my_ratings, community, screen_films)
-                if (slug, stars, 1) not in done]
-        for i, (slug, stars) in enumerate(todo, start=1):
-            html = fetcher.get(f"https://letterboxd.com/film/{slug}/members/rated/{stars_path(stars)}/")
-            members, _ = parse_member_ratings_page(html) if html else ([], False)
-            hits = screen_hits(members, round(stars * 2), {username})
+        done = {(slug, stars, page): count for slug, stars, page, count in db.screened_page_counts(conn)}
+        plan = screening_plan(my_ratings, community, favourites=list(favourites),
+                              five_star_pages=five_star_pages, screen_films=screen_films)
+        todo = [page for page in plan if page not in done]
+        last_page: set[tuple[str, float]] = set()   # (slug, stars) whose final page has been seen
+        screened = 0
+        for slug, stars, page in plan:
+            if (slug, stars, page) in done:
+                # a page that wasn't full was the film's last
+                if done[(slug, stars, page)] is not None and done[(slug, stars, page)] < 25:
+                    last_page.add((slug, stars))
+                continue
+            if (slug, stars) in last_page:
+                continue
+            html = fetcher.get(screening_url(slug, stars, page))
+            if stars == FANS_STARS:
+                users, has_next = parse_member_list_page(html) if html else ([], False)
+                if html is not None and not users:
+                    log(f"STOPPED at {screening_url(slug, stars, page)}: no members the parser recognises "
+                        f"(has Letterboxd's markup changed?). Nothing recorded for it.")
+                    return "failed"
+                hits = {u: FAVOURITE_HITS for u in users if u.lower() != username.lower()}
+                count = len(users)
+            else:
+                members, has_next = parse_member_ratings_page(html) if html else ([], False)
+                hits = screen_hits(members, round(stars * 2), {username})
+                count = len(members)
+            if not has_next:
+                last_page.add((slug, stars))
             screened_at = now().isoformat()
             # One transaction, so an interruption can't leave hits counted
             # for a page that isn't marked (and so gets screened, and
             # counted, again) or marked without its members recorded.
             with conn.transaction():
                 db.add_rater_candidates(conn, hits, screened_at)
-                db.mark_screened(conn, slug, stars, 1, screened_at, member_count=len(members))
-                db.record_screen_hits(conn, slug, stars, 1,
+                db.mark_screened(conn, slug, stars, page, screened_at, member_count=count)
+                db.record_screen_hits(conn, slug, stars, page,
                                       list(db.rater_ids_by_username(conn, list(hits)).values()), "screening")
-            if i % 20 == 0 or i == len(todo):
-                log(f"Screened {i}/{len(todo)} films ({fetcher.requests} requests so far).")
+            screened += 1
+            if screened % 20 == 0:
+                log(f"Screened {screened} of up to {len(todo)} pages ({fetcher.requests} requests so far).")
+        if todo:
+            log(f"Screened {screened} pages ({fetcher.requests} requests so far).")
 
         queue = db.next_raters_to_scrape(conn, max_raters, {username})
         for i, (rater_id, rater) in enumerate(queue, start=1):
@@ -514,9 +600,10 @@ def reconcile_recruits(selected: list[tuple[int, int, str]], followed: set[int],
     for rater_id, hits, discovered_at in selected:
         expected = hits - (FOLLOWING_HITS if rater_id in followed else 0)
         have = recorded.get(rater_id, set())
-        if len(have) == expected:
+        weight = sum(map(page_hits, have))
+        if weight == expected:
             status[rater_id] = "exact"
-        elif len(have) > expected:
+        elif weight > expected:
             status[rater_id] = "extra"
         else:
             status[rater_id] = "missing"
@@ -740,7 +827,7 @@ class Recruitment:
         hits, run = self.selection.get(rater_id, (None, None))
         if hits is None:
             return False
-        lost = len(self.counted.get(rater_id, set()) & removed)
+        lost = sum(page_hits(page) for page in self.counted.get(rater_id, set()) & removed)
         if not lost:
             return True
         cut_hits, cut_id = self.cutoffs[run]
@@ -813,7 +900,9 @@ def build_recruitment(timeline: list[tuple], hits: list[tuple], raters: list[tup
         possible[rater_id].add((slug, stars, page))
 
     times = sorted(page_times.values())
-    last_page = times[-1] if times else None
+    # Pages whose members were recorded as they were screened — exact, so a
+    # rater's hits from them can be taken off their count wherever they fell.
+    recorded_live = {tuple(row[:3]) for row in timeline if row[4] is not None and row[4] == row[3]}
     recruits: dict[str, set[int]] = defaultdict(set)
     counted: dict[int, set[tuple]] = {}
     selection: dict[int, tuple[int | None, int]] = {}
@@ -821,7 +910,7 @@ def build_recruitment(timeline: list[tuple], hits: list[tuple], raters: list[tup
     unsure: set[int] = set()
     for rater_id, status, count, discovered_at, scraped_at in raters:
         pages = set(certain.get(rater_id, set()))
-        exact = len(pages) == count - (FOLLOWING_HITS if rater_id in followed else 0)
+        exact = sum(map(page_hits, pages)) == count - (FOLLOWING_HITS if rater_id in followed else 0)
         if not exact:
             found = _ts(discovered_at)
             pages |= {page for page in possible.get(rater_id, set())
@@ -835,10 +924,15 @@ def build_recruitment(timeline: list[tuple], hits: list[tuple], raters: list[tup
         counted[rater_id] = {page for page in pages if page_times[page] < queued}
         run = bisect_left(times, queued)
         if exact:
-            hits_then = len(counted[rater_id]) + (FOLLOWING_HITS if rater_id in followed else 0)
+            hits_then = sum(map(page_hits, counted[rater_id])) + (FOLLOWING_HITS if rater_id in followed else 0)
         else:
             unsure.add(rater_id)
-            hits_then = count if last_page is not None and last_page < queued else None
+            # Their count today, less whatever pages screened after they were
+            # queued added — knowable only if every such page was recorded
+            # as it was screened.
+            later = [page for page, at in page_times.items() if at >= queued]
+            hits_then = (count - sum(page_hits(page) for page in later if page in certain.get(rater_id, set()))
+                         if all(page in recorded_live for page in later) else None)
         selection[rater_id] = (hits_then, run)
         if hits_then is not None:
             cutoffs[run] = min(cutoffs.get(run, (hits_then, -rater_id)), (hits_then, -rater_id))
@@ -938,14 +1032,17 @@ LETTERBOXD_DEFAULT = replace(DEFAULT_PARAMS, baseline="letterboxd")
 # else in the grid is exploratory — picking its best cell would be picking
 # on the test set.
 KEY_METHODS = [LETTERBOXD_DEFAULT.label, PLACEBO_TWINS_LABEL, DEFAULT_PARAMS.label, SIMPLE_SWAP_LABEL,
-               REGRESSED_LABEL, "Corpus consensus + your offset", "Your average"]
-ENGINE_METHODS = [LETTERBOXD_DEFAULT.label, PLACEBO_TWINS_LABEL, DEFAULT_PARAMS.label, SIMPLE_SWAP_LABEL]
+               favourites_label(FAVOURITE_WEIGHTS[0]), REGRESSED_LABEL, "Corpus consensus + your offset",
+               "Your average"]
+ENGINE_METHODS = [LETTERBOXD_DEFAULT.label, PLACEBO_TWINS_LABEL, DEFAULT_PARAMS.label, SIMPLE_SWAP_LABEL,
+                  favourites_label(FAVOURITE_WEIGHTS[0])]
 
 
 def _evaluate_split(conn, train: dict[str, float], test: list[str], actual: dict[str, float],
                     film_info: dict[str, tuple], community: dict[str, float], mu: float,
                     configs: list[TasteParams], screened: set[str], exclusions: dict[str, set[int]],
-                    dropped: set[int]) -> tuple[dict[str, dict[str, float]], dict[str, set[str]], dict[str, int]]:
+                    dropped: set[int], favourites: set[str] = frozenset(),
+                    ) -> tuple[dict[str, dict[str, float]], dict[str, set[str]], dict[str, int]]:
     """(method -> {slug: prediction}, method -> slugs its taste layer
     covered, baseline -> raters who qualified as similar) for one
     train/test split. `exclusions`: per test film, raters whose ratings of
@@ -1006,6 +1103,17 @@ def _evaluate_split(conn, train: dict[str, float], test: list[str], actual: dict
         if default_rows is not None:
             preds[SIMPLE_SWAP_LABEL] = {s: on_letterboxd(s, default_rows) for s in test}
             covered[SIMPLE_SWAP_LABEL] = {s for s in test if s in community and film_info[s][0] in default_rows}
+            # The same, with neighbours found by a correlation that counts
+            # Josh's favourites several times over (only those in training).
+            if favourites & set(train):
+                for weight in FAVOURITE_WEIGHTS:
+                    weighted = [row for row in db.rater_similarities(
+                        conn, ids, residuals, mu=mu, min_overlap=DEFAULT_PARAMS.min_overlap,
+                        film_weights=favourite_weights(ids, film_info, favourites & set(train), weight))
+                        if row[0] not in dropped]
+                    rows = _neighbour_offsets(conn, weighted, DEFAULT_PARAMS, mu, target_ids, **exclusion)
+                    preds[favourites_label(weight)] = {s: on_letterboxd(s, rows) for s in test}
+                    covered[favourites_label(weight)] = {s for s in test if s in community and film_info[s][0] in rows}
 
     letterboxd_configs = [c for c in configs if c.baseline == "letterboxd"]
     if letterboxd_configs:
@@ -1045,7 +1153,7 @@ def _metrics(pairs: list[tuple[float, float]]) -> dict:
 
 def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], watched_dates: dict[str, str | None],
              *, clusters: dict[str, str] | None = None, folds: int = 5, seed: int = 0,
-             configs: list[TasteParams] | None = None) -> dict:
+             configs: list[TasteParams] | None = None, favourites: list[str] | None = None) -> dict:
     """Hold out part of Josh's ratings, predict them from the rest, and
     score every method on the same films.
 
@@ -1097,7 +1205,7 @@ def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], wa
                 dropped = set()
                 exclusions = {s: recruitment.exclusions(s, mode) for s in test if s in screened}
             p, c, sim = _evaluate_split(conn, train, test, my_ratings, film_info, community, mu, cfgs, screened,
-                                        exclusions, dropped)
+                                        exclusions, dropped, set(favourites or []) if cfgs is configs else set())
             for method, values in p.items():
                 preds[method].update(values)
             for method, values in c.items():
@@ -1119,6 +1227,10 @@ def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], wa
                        for m in KEY_METHODS if m in preds and m != BASELINE_LABEL]
         vs_placebo = [{"method": m, **paired_bootstrap(preds[m], preds[REGRESSED_LABEL], my_ratings, clusters)}
                       for m in ENGINE_METHODS if m in preds]
+        vs_simple_swap = [{"method": favourites_label(w),
+                           **paired_bootstrap(preds[favourites_label(w)], preds[SIMPLE_SWAP_LABEL], my_ratings,
+                                              clusters)}
+                          for w in FAVOURITE_WEIGHTS if favourites_label(w) in preds and SIMPLE_SWAP_LABEL in preds]
         screened_films = [s for s in films if s in screened]
         rest = [s for s in films if s not in screened]
         on_screened = []
@@ -1165,7 +1277,7 @@ def evaluate(conn, my_ratings: dict[str, float], community: dict[str, float], wa
             "split": name, "films": len(films), "screened": len(screened_films), "by_time": by_time,
             "similar_raters": {b: min(c) for b, c in similar.items()},
             "slopes": (min(slopes), max(slopes)) if slopes else None,
-            "vs_placebo": vs_placebo, "on_screened": on_screened,
+            "vs_placebo": vs_placebo, "on_screened": on_screened, "vs_simple_swap": vs_simple_swap,
             "actual_mean": sum(my_ratings[s] for s in films) / len(films),
             "methods": methods, "comparisons": comparisons, "subsets": subsets, "robustness": robustness,
             "predictions": {m: dict(v) for m, v in preds.items() if m in KEY_METHODS or m == BASELINE_LABEL},
@@ -1232,6 +1344,11 @@ def render_evaluation(report: dict) -> str:
         for c in split["vs_placebo"]:
             lines.append(f"    {c['method']:48} {_interval(c, 'd_rmse', 'rmse_ci'):>24} "
                          f"{_interval(c, 'd_spearman', 'spearman_ci'):>24}")
+        if split.get("vs_simple_swap"):
+            lines += ["", "  Your four favourites counted several times over, against the simple swap as it is:"]
+            for c in split["vs_simple_swap"]:
+                lines.append(f"    {c['method']:48} {_interval(c, 'd_rmse', 'rmse_ci'):>24} "
+                             f"{_interval(c, 'd_spearman', 'spearman_ci'):>24}")
         if split["on_screened"]:
             lines += ["", f"  The screened films only ({split['screened']}; your most distinctive ratings, where a taste "
                       "engine should matter most). Against the baseline, then the placebo:"]

@@ -81,7 +81,8 @@ from .similar import (
 )
 from .state import StateDoc, get_cached_entry_id
 from .taste import (
-    PoliteFetcher, community_ratings_from_diary, evaluate, my_ratings_from_diary, recommend, record_screen_hits,
+    PoliteFetcher, community_ratings_from_diary, evaluate, load_favourites, my_ratings_from_diary, recommend,
+    record_screen_hits,
     render_evaluation, render_recommendations, scrape_raters,
 )
 from .tmdb_client import production_companies as tmdb_production_companies
@@ -850,6 +851,10 @@ def main() -> None:
                               "--taste-eval needs to test your most distinctive ratings fairly. Network-free "
                               "where stored data says, one request a page for the rest; resumable; stops at "
                               "the first block. See taste.record_screen_hits.")
+    parser.add_argument("--five-star-pages", type=int, default=3,
+                         help="--scrape-raters: how many pages deep to screen who else gave your 5★ films 5★ "
+                              "(25 members a page; your four favourites' fans, from config/taste.yaml, are "
+                              "always screened first)")
     parser.add_argument("--screen-films", type=int, default=200,
                          help="--scrape-raters: how many of your most distinctive ratings to look up "
                               "same-rating members for (one request each, skipping any already done)")
@@ -1139,6 +1144,7 @@ def main() -> None:
         outcome = scrape_raters(
             args.database_url, args.username, my_ratings, community_ratings_from_diary(diary),
             screen_films=args.screen_films, max_raters=args.max_raters,
+            favourites=load_favourites(), five_star_pages=args.five_star_pages,
             fetcher=PoliteFetcher(delay_seconds=args.request_delay, max_requests=args.max_requests),
         )
         sys.exit({"blocked": 2, "network": 1, "cooldown": 1, "busy": 1}.get(outcome, 0))
@@ -1161,7 +1167,8 @@ def main() -> None:
                     report = evaluate(conn, my_ratings, community_ratings_from_diary(diary),
                                       {slug: entry["watched_date"] for slug, entry in diary.items()},
                                       clusters={slug: entry["director"] for slug, entry in diary.items()
-                                                if entry.get("director")})
+                                                if entry.get("director")},
+                                      favourites=load_favourites())
                     print(render_evaluation(report))
                 if args.taste_recommend:
                     # Checks each pick's film page for TV the first time it's suggested

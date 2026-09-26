@@ -580,6 +580,12 @@ def add_rater_candidates(conn: psycopg.Connection, hits: dict[str, int], now_iso
     )
 
 
+def screened_page_counts(conn: psycopg.Connection) -> list[tuple[str, float, int, int | None]]:
+    """(slug, stars, page, rows on the page when recorded) for every
+    screened page — the count says whether it was a film's last page."""
+    return conn.execute("SELECT slug, stars, page, member_count FROM rater_screened").fetchall()
+
+
 def screened_pages(conn: psycopg.Connection) -> set[tuple[str, float, int]]:
     return {(slug, stars, page) for slug, stars, page in
             conn.execute("SELECT slug, stars, page FROM rater_screened").fetchall()}
@@ -779,8 +785,8 @@ def rater_film_lookup(conn: psycopg.Connection, slugs: list[str]) -> dict[str, t
 
 
 def rater_similarities(conn: psycopg.Connection, film_ids: list[int], residuals: list[float], *,
-                       mu: float, min_overlap: int,
-                       film_means: list[float] | None = None) -> list[tuple[int, str, int, float]]:
+                       mu: float, min_overlap: int, film_means: list[float] | None = None,
+                       film_weights: list[float] | None = None) -> list[tuple[int, str, int, float]]:
     """(rater id, username, films shared, Pearson correlation) for every
     rater who shares at least `min_overlap` rated films with the given
     residuals and correlates positively with them. The correlation is of
@@ -790,8 +796,12 @@ def rater_similarities(conn: psycopg.Connection, film_ids: list[int], residuals:
     it's overrated counts for a lot. `film_means` (aligned with `film_ids`)
     centres the rater's side on each film's Letterboxd average instead of
     the corpus's own estimate of it, to match residuals measured the same
-    way. One aggregate over the corpus; only the per-rater result comes
-    back."""
+    way. `film_weights` (aligned too) makes it a weighted correlation, so
+    some films — Josh's four favourites — count for more. One aggregate over
+    the corpus; only the per-rater result comes back."""
+    if film_weights is not None:
+        return _weighted_rater_similarities(conn, film_ids, residuals, mu=mu, min_overlap=min_overlap,
+                                            film_means=film_means, film_weights=film_weights)
     rows = conn.execute(
         "SELECT * FROM ("
         "  SELECT r.rater_id, u.username, count(*) AS overlap,"
@@ -807,6 +817,34 @@ def rater_similarities(conn: psycopg.Connection, film_ids: list[int], residuals:
          "mu": mu, "min_overlap": min_overlap},
     ).fetchall()
     return [(rater_id, username, overlap, float(pearson)) for rater_id, username, overlap, pearson in rows]
+
+
+def _weighted_rater_similarities(conn: psycopg.Connection, film_ids: list[int], residuals: list[float], *,
+                                 mu: float, min_overlap: int, film_means: list[float] | None,
+                                 film_weights: list[float]) -> list[tuple[int, str, int, float]]:
+    """rater_similarities with a weight per film: the weighted Pearson
+    correlation, from weighted sums — cov = Σwxy − Σwx·Σwy/Σw, and likewise
+    each variance. Overlap still counts films, not weight."""
+    rows = conn.execute(
+        "SELECT rater_id, username, overlap,"
+        "       (sxy - sx * sy / sw) / sqrt(nullif((sxx - sx * sx / sw) * (syy - sy * sy / sw), 0)) AS pearson "
+        "FROM ("
+        "  SELECT r.rater_id, u.username, count(*) AS overlap, sum(me.w) AS sw,"
+        "         sum(me.w * me.z) AS sx, sum(me.w * d.y) AS sy, sum(me.w * me.z * d.y) AS sxy,"
+        "         sum(me.w * me.z * me.z) AS sxx, sum(me.w * d.y * d.y) AS syy"
+        "  FROM unnest(%(ids)s::int[], %(z)s::float8[], %(m)s::float8[], %(w)s::float8[]) AS me(film_id, z, m, w)"
+        "  JOIN rater_ratings r ON r.film_id = me.film_id"
+        "  JOIN raters u ON u.id = r.rater_id"
+        "  JOIN rater_films f ON f.id = r.film_id"
+        "  CROSS JOIN LATERAL (SELECT r.rating / 2.0 - coalesce(me.m, %(mu)s + f.bias) - u.bias AS y) d"
+        "  GROUP BY r.rater_id, u.username"
+        "  HAVING count(*) >= %(min_overlap)s"
+        ") s WHERE (sxy - sx * sy / sw) > 0",
+        {"ids": film_ids, "z": residuals, "m": film_means if film_means is not None else [None] * len(film_ids),
+         "w": film_weights, "mu": mu, "min_overlap": min_overlap},
+    ).fetchall()
+    return [(rater_id, username, overlap, float(pearson)) for rater_id, username, overlap, pearson in rows
+            if pearson is not None]
 
 
 def rater_predictions(conn: psycopg.Connection, neighbour_ids: list[int], weights: list[float], *,

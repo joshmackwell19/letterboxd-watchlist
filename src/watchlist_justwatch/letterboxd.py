@@ -561,6 +561,17 @@ def parse_rated_films_page(html: str) -> tuple[list[tuple[str, str | None, int]]
     return rated, _has_next_page(html)
 
 
+def parse_member_list_page(html: str) -> tuple[list[str], bool]:
+    """Usernames per row of a film's /fans/ table (members with it among
+    their four favourites), plus whether there's a next page. Assumed to be
+    the same person table as /members/rated/ — written while Letterboxd was
+    refusing requests, so unchecked against the live page; screening treats
+    a loaded page with nobody on it as the parser failing and stops."""
+    users = [match.group(1) for row in PERSON_ROW_SPLIT_RE.split(html)[1:]
+             if (match := PERSON_LINK_RE.search(row))]
+    return users, _has_next_page(html)
+
+
 def parse_member_ratings_page(html: str) -> tuple[list[tuple[str, int]], bool]:
     """(username, half-stars) per row of a film's /members/rated/<stars>/
     table, plus whether there's a next page."""

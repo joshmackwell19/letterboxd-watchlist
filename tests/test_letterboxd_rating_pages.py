@@ -6,6 +6,7 @@ from watchlist_justwatch.letterboxd import (
     LetterboxdFetchError,
     fetch_page_strict,
     parse_following_page,
+    parse_member_list_page,
     parse_member_ratings_page,
     parse_rated_films_page,
     parse_tmdb_kind,
@@ -106,3 +107,10 @@ def test_strict_fetch_gives_up_on_persistent_network_errors():
     with pytest.raises(LetterboxdFetchError) as info:
         fetch_page_strict(session, "u", sleep=lambda s: None)
     assert not isinstance(info.value, LetterboxdBlockedError)
+
+
+
+def test_member_list_page_reads_usernames():
+    users, has_next = parse_member_list_page(members_page([("alice", 10), ("bob", 9)], next_href="/film/x/fans/page/2/"))
+    assert users == ["alice", "bob"] and has_next
+    assert parse_member_list_page("<html>nothing here</html>") == ([], False)

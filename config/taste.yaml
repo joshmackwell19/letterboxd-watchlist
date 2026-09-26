@@ -1,0 +1,8 @@
+# Josh's four favourite films on Letterboxd, by slug. They count more than
+# his other ratings when finding members whose taste tracks his (see
+# taste.FAVOURITE_WEIGHTS), and --scrape-raters screens their fans.
+four_favourites:
+  - tar-2022
+  - whiplash-2014
+  - its-a-wonderful-life
+  - manchester-by-the-sea

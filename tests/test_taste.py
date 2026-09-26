@@ -5,6 +5,8 @@ import pytest
 from tests.letterboxd_pages import film_page, grid_page
 from watchlist_justwatch.letterboxd import LetterboxdBlockedError
 from watchlist_justwatch.taste import (
+    FANS_STARS,
+    FAVOURITE_HITS,
     FilmKindLookup,
     Recruitment,
     build_recruitment,
@@ -12,6 +14,7 @@ from watchlist_justwatch.taste import (
     RequestBudgetExhausted,
     TasteParams,
     choose_screening_films,
+    favourite_weights,
     films_only,
     first_found_pages,
     followed_rater_ids,
@@ -25,6 +28,8 @@ from watchlist_justwatch.taste import (
     regressed_toward_mean,
     reconcile_recruits,
     scrape_looks_active,
+    screening_plan,
+    screening_url,
     scrape_profile,
     screen_hits,
     select_neighbours,
@@ -473,3 +478,40 @@ def test_paired_bootstrap_of_a_method_against_itself_is_zero():
     better = paired_bootstrap(actual, preds, actual, {}, iterations=50)
     assert better["d_rmse"] == pytest.approx(-0.3)
     assert better["rmse_ci"][1] < 0
+
+
+
+def test_screening_plan_orders_favourites_then_five_stars_then_distinctive_without_repeats():
+    mine = {"fav": 5.0, "loved-classic": 5.0, "loved-oddity": 5.0, "hated": 1.0, "fine": 3.5}
+    community = {"fav": 4.0, "loved-classic": 4.6, "loved-oddity": 3.2, "hated": 4.1, "fine": 3.5}
+    plan = screening_plan(mine, community, favourites=["fav"], five_star_pages=2, screen_films=2)
+    assert plan[:3] == [("fav", FANS_STARS, 1), ("fav", FANS_STARS, 2), ("fav", FANS_STARS, 3)]
+    # 5★ films furthest above their average first, two pages each
+    assert plan[3:9] == [("loved-oddity", 5.0, 1), ("loved-oddity", 5.0, 2), ("fav", 5.0, 1), ("fav", 5.0, 2),
+                         ("loved-classic", 5.0, 1), ("loved-classic", 5.0, 2)]
+    # the two most distinctive: hated (3.1 off) and loved-oddity (already planned, not repeated)
+    assert plan[9:] == [("hated", 1.0, 1)]
+
+
+def test_screening_urls():
+    assert screening_url("tar-2022", FANS_STARS, 1) == "https://letterboxd.com/film/tar-2022/fans/"
+    assert screening_url("tar-2022", FANS_STARS, 2) == "https://letterboxd.com/film/tar-2022/fans/page/2/"
+    assert screening_url("heat", 4.5, 3) == "https://letterboxd.com/film/heat/members/rated/4.5/page/3/"
+
+
+def test_favourite_weights_line_up_with_the_film_ids():
+    info = {"tar-2022": (7, 0.0, 5, "Tár"), "heat": (8, 0.0, 5, "Heat")}
+    assert favourite_weights([8, 7, 9], info, {"tar-2022", "not-in-corpus"}, 5.0) == [1.0, 5.0, 1.0]
+
+
+def test_a_fans_page_counts_as_several_hits_when_reconciling_and_replaying():
+    timeline = [("fav", FANS_STARS, 1, _at(1), _at(1)), ("b", 4.5, 1, _at(5), _at(5))]
+    hits = [("fav", FANS_STARS, 1, 3, "screening"), ("b", 4.5, 1, 3, "screening"), ("b", 4.5, 1, 5, "screening")]
+    raters = [(3, "scraped", FAVOURITE_HITS + 1, _at(1, -0.1), _at(6)),   # a fan of "fav", and on b
+              (5, "scraped", 1, _at(5, -0.1), _at(6))]                     # only on b: the run's last taken
+    r = build_recruitment(timeline, hits, raters, set(), same_score=[])
+    assert r.unsure == set() and r.selection[3] == (FAVOURITE_HITS + 1, 2) and r.cutoffs[2] == (1, 5)
+    # without the fans page: 4 - 3 = 1 hit, still level with the cut (and an earlier id)
+    assert r.kept_without(3, {("fav", FANS_STARS, 1)})
+    # without both pages: 0 — at one hit per page it would still have had 2
+    assert not r.kept_without(3, {("fav", FANS_STARS, 1), ("b", 4.5, 1)})

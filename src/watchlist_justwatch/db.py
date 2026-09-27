@@ -226,6 +226,41 @@ def get_meta_value(database_url: str, key: str):
         return row[0] if row else None
 
 
+# The per-film fields every showing of a film at a venue repeats. A busy
+# multiplex lists one film dozens of times a fortnight, and a CinemaGuide
+# poster link alone is ~600 characters — so they're stored on the first
+# showing of each (cinema, title) only and copied back to the rest on load.
+# Every run (and every dashboard regen) reads this table whole, so what it
+# weighs is Neon transfer quota.
+_SHOWING_FILM_FIELDS = ("synopsis", "poster_url")
+
+
+def _compact_showtimes(showtimes: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    compacted = []
+    for showing in showtimes:
+        key = (showing["cinema"], showing["title"])
+        if key in seen:
+            showing = {**showing, **dict.fromkeys(_SHOWING_FILM_FIELDS)}
+        seen.add(key)
+        compacted.append(showing)
+    return compacted
+
+
+def _expand_showtimes(showtimes: list[dict]) -> list[dict]:
+    film_fields: dict[tuple[str, str], dict] = {}
+    for showing in showtimes:
+        fields = film_fields.setdefault((showing["cinema"], showing["title"]), {})
+        for name in _SHOWING_FILM_FIELDS:
+            if fields.get(name) is None:
+                fields[name] = showing[name]
+    expanded = []
+    for showing in showtimes:
+        fields = film_fields[(showing["cinema"], showing["title"])]
+        expanded.append({**showing, **{name: showing[name] or fields[name] for name in _SHOWING_FILM_FIELDS}})
+    return expanded
+
+
 def load_state(database_url: str) -> StateDoc:
     with psycopg.connect(database_url) as conn:
         _ensure_schema(conn)
@@ -265,7 +300,7 @@ def load_state(database_url: str) -> StateDoc:
                 "SELECT listing_key, data FROM cinema_film_matches"
             ).fetchall()
         }
-        cinema_showtimes = [
+        cinema_showtimes = _expand_showtimes([
             {"cinema": cinema, "title": title, "year": year, "showtime": showtime,
              "duration_minutes": duration_minutes, "director": director, "synopsis": synopsis,
              "poster_url": poster_url, "booking_url": booking_url}
@@ -274,7 +309,7 @@ def load_state(database_url: str) -> StateDoc:
                 "SELECT cinema, title, year, showtime, duration_minutes, director, synopsis, "
                 "poster_url, booking_url FROM cinema_showtimes"
             ).fetchall()
-        ]
+        ])
 
     return StateDoc(
         schema_version=meta.get("schema_version", SCHEMA_VERSION),
@@ -369,7 +404,7 @@ def save_state(database_url: str, state: StateDoc) -> None:
                 [
                     (s["cinema"], s["title"], s["year"], s["showtime"], s["duration_minutes"],
                      s["director"], s["synopsis"], s["poster_url"], s["booking_url"])
-                    for s in state.cinema_showtimes
+                    for s in _compact_showtimes(state.cinema_showtimes)
                 ],
             )
 

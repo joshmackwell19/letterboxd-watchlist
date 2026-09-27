@@ -5,6 +5,7 @@ import sys
 import time
 import traceback
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,10 +20,14 @@ from .analysis import (
     render_ranking,
 )
 from .cinemas import (
+    CINEMA_BARBICAN,
+    CINEMA_PRINCE_CHARLES,
+    CINEMA_RIVERSIDE,
+    VUE_SITES,
+    VueProgramme,
     fetch_barbican,
     fetch_prince_charles,
     fetch_riverside,
-    fetch_vue,
     MATCHER_VERSION,
     drop_past_showings,
     listing_match_key,
@@ -601,14 +606,16 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
 
     # Cinema showtimes: independent of the watchlist refresh above, and
     # each venue's own site is a separate point of failure — one venue's
-    # markup changing shouldn't cost the other three, so each gets its own
+    # markup changing shouldn't cost the others, so each gets its own
     # try/except and falls back to yesterday's listing for just that venue
-    # rather than the whole feature going blank for a day.
+    # rather than the whole feature going blank for a day. The Vue sites
+    # share one fetch (see VueProgramme) but still fail one site at a time.
+    vue = VueProgramme()
     cinema_fetchers = [
-        ("Prince Charles Cinema", fetch_prince_charles),
-        ("Barbican", fetch_barbican),
-        ("Vue Fulham Broadway", fetch_vue),
-        ("Riverside Studios", fetch_riverside),
+        (CINEMA_PRINCE_CHARLES, fetch_prince_charles),
+        (CINEMA_BARBICAN, fetch_barbican),
+        *((site.name, partial(vue.fetch, site)) for site in VUE_SITES),
+        (CINEMA_RIVERSIDE, fetch_riverside),
     ]
     cinema_showtimes: list[dict] = []
     for cinema_name, fetcher in cinema_fetchers:

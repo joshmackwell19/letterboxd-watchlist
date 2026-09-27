@@ -13,8 +13,9 @@ from watchlist_justwatch.cinemas import (
     _parse_prince_charles,
     _parse_riverside,
     _parse_vue,
+    VUE_SITES,
+    VueProgramme,
     drop_past_showings,
-    fetch_vue,
     match_watchlist_film,
 )
 from watchlist_justwatch.models import FilmState
@@ -189,9 +190,10 @@ _VUE_DATA = {
 
 
 def test_parse_vue_extracts_fields_and_resolves_relative_booking_url():
-    showings = _parse_vue(_VUE_DATA)
+    showings = _parse_vue(_VUE_DATA, "Vue Fulham Broadway")
     assert len(showings) == 1
     s = showings[0]
+    assert s["cinema"] == "Vue Fulham Broadway"
     assert s["title"] == "Spider-Man: Brand New Day"
     assert s["year"] == 2026
     assert s["duration_minutes"] == 145
@@ -201,7 +203,7 @@ def test_parse_vue_extracts_fields_and_resolves_relative_booking_url():
 
 
 def test_parse_vue_skips_entries_with_no_title():
-    assert _parse_vue({"result": [{"filmTitle": "", "showingGroups": []}]}) == []
+    assert _parse_vue({"result": [{"filmTitle": "", "showingGroups": []}]}, "Vue Fulham Broadway") == []
 
 
 # ---------- Vue via CinemaGuide ----------
@@ -253,23 +255,68 @@ def test_parse_cinemaguide_treats_zero_runtime_as_unknown():
     assert _parse_cinemaguide(data)[0]["duration_minutes"] is None
 
 
-def test_fetch_vue_falls_back_to_cinemaguide_when_vue_refuses(monkeypatch):
-    def refused(**_):
+def test_parse_cinemaguide_files_each_screening_under_its_own_site():
+    data = {"all_screenings_on_all_dates": {"film_data": [{"title": "theodyssey", "screenings_data": [
+        {"screenings": [
+            {"time": "2026-10-02T18:00:00.000Z", "venue_name": "Vue London - Westfield (Shepherd's Bush)"},
+            {"time": "2026-10-02T19:00:00.000Z", "venue_name": "Vue London - West End (Leicester Square)"},
+            {"time": "2026-10-02T20:00:00.000Z", "venue_name": "Vue London - Piccadilly Circus"},
+            # A venue nobody asked about is dropped, not filed under another.
+            {"time": "2026-10-02T21:00:00.000Z", "venue_name": "Vue London - Westfield Stratford"},
+        ]},
+    ]}]}, "film_meta_data_map": _CINEMAGUIDE_DATA["film_meta_data_map"]}
+    assert [s["cinema"] for s in _parse_cinemaguide(data)] == [
+        "Vue Shepherd's Bush", "Vue West End", "Vue Piccadilly"]
+
+
+def test_vue_programme_falls_back_to_one_cinemaguide_request_for_every_site(monkeypatch):
+    opened, requested = [], []
+
+    def refused():
+        opened.append(1)
         raise CinemaFetchError("Vue what's-on page request failed (HTTP 403)")
-    monkeypatch.setattr(cinemas, "_fetch_vue_direct", refused)
-    monkeypatch.setattr(cinemas, "_fetch_vue_cinemaguide", lambda: [{"title": "The Odyssey"}])
-    assert fetch_vue() == [{"title": "The Odyssey"}]
+
+    def cinemaguide(sites):
+        requested.append(sites)
+        return {"Vue Fulham Broadway": [{"title": "A"}], "Vue West End": [{"title": "B"}]}
+
+    monkeypatch.setattr(cinemas, "_open_vue_session", refused)
+    monkeypatch.setattr(cinemas, "_fetch_vue_cinemaguide", cinemaguide)
+    programme = VueProgramme()
+    fulham, shepherds_bush, west_end, _ = VUE_SITES
+    assert programme.fetch(fulham) == [{"title": "A"}]
+    assert programme.fetch(west_end) == [{"title": "B"}]
+    # A site missing from the response fails alone, so run() carries
+    # forward yesterday's listing for that site only.
+    with pytest.raises(CinemaFetchError, match="HTTP 403.*no showings for Vue Shepherd's Bush"):
+        programme.fetch(shepherds_bush)
+    # Vue's challenge answers every site alike: asked once, not per site.
+    assert len(opened) == 1
+    assert len(requested) == 1
 
 
-def test_fetch_vue_raises_with_both_reasons_when_both_routes_fail(monkeypatch):
-    def refused(**_):
+def test_vue_programme_uses_the_direct_api_while_vue_answers(monkeypatch):
+    monkeypatch.setattr(cinemas, "_open_vue_session", lambda: "session")
+    monkeypatch.setattr(cinemas, "_fetch_vue_direct",
+                        lambda session, site, now=None: [{"cinema": site.name, "session": session}])
+    monkeypatch.setattr(cinemas, "_fetch_vue_cinemaguide", lambda sites: pytest.fail("fell back"))
+    programme = VueProgramme()
+    assert [programme.fetch(site)[0]["cinema"] for site in VUE_SITES] == [site.name for site in VUE_SITES]
+
+
+def test_vue_programme_raises_with_both_reasons_when_both_routes_fail(monkeypatch):
+    def refused():
         raise CinemaFetchError("direct 403")
-    def empty():
+
+    def empty(sites):
         raise CinemaFetchError("CinemaGuide returned no Vue showings")
-    monkeypatch.setattr(cinemas, "_fetch_vue_direct", refused)
+
+    monkeypatch.setattr(cinemas, "_open_vue_session", refused)
     monkeypatch.setattr(cinemas, "_fetch_vue_cinemaguide", empty)
-    with pytest.raises(CinemaFetchError, match="direct 403.*no Vue showings"):
-        fetch_vue()
+    programme = VueProgramme()
+    for site in VUE_SITES:
+        with pytest.raises(CinemaFetchError, match="direct 403.*no Vue showings"):
+            programme.fetch(site)
 
 
 # ---------- drop_past_showings ----------

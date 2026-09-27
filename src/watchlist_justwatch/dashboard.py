@@ -10,7 +10,7 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import drop_past_showings, listing_match_key, match_watchlist_film
+from .cinemas import CINEMA_VENUES, drop_past_showings, listing_match_key, match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
@@ -577,7 +577,7 @@ def _format_cinema_datetime(iso: str) -> str:
 
 
 def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> dict[str, dict]:
-    """Every watchlist film with an upcoming screening at one of the four
+    """Every watchlist film with an upcoming screening at one of the
     cinemas in cinemas.py, mapped to its single soonest showing — shared
     by the Home section below and the Films tab's own per-card note, so
     both agree on which showing counts as "next" for a given film."""
@@ -897,7 +897,7 @@ def _search_taxonomy(
 
 def _cinema_listings(state: StateDoc, now: datetime | None = None) -> list[dict]:
     """One row per film for the full Cinemas tab — a matched watchlist
-    film showing at several of the four cinemas merges into a single row
+    film showing at several of the cinemas merges into a single row
     (grouped by slug, the one reliable cross-cinema identity a match
     gives us) with every cinema's showtimes attached, rather than one
     card per (cinema, title) like an unmatched film still gets (title
@@ -1076,6 +1076,7 @@ def build_dashboard_data(
         "for_you": _for_you_data(state.for_you, {**discovery_films, **films_by_slug}, {r["slug"] for r in rows},
                                  dismissed_recommendations, set(state.diary)),
         "cinemas": _cinema_listings(state),
+        "cinema_venues": list(CINEMA_VENUES),
         "settings": _settings_data(config, global_subscriptions),
         "search_taxonomy": _search_taxonomy(state, config, global_subscriptions, revisitable),
     }
@@ -1317,6 +1318,11 @@ _TEMPLATE = """<!DOCTYPE html>
   #cinemaVenueToggles, #cinemaDateFilter {
     display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center;
   }
+  .cinema-day-heading {
+    grid-column: 1 / -1; margin: 10px 0 0; font-size: 13px; font-weight: 600;
+    color: var(--text-muted); letter-spacing: 0.01em;
+  }
+  .cinema-day-heading:first-child { margin-top: 0; }
   .sarah-filter { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
   .poster-thumb {
     width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
@@ -5749,12 +5755,15 @@ document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateCl
 
 // ---------- Cinemas ----------
 
-const CINEMA_VENUES = ['Prince Charles Cinema', 'Barbican', 'Vue Fulham Broadway', 'Riverside Studios'];
+const CINEMA_VENUES = DATA.cinema_venues;
 // Single-select, same as Services/Country's quick-jump chips — one click
 // on a venue shows only that venue (not "toggle this one off"), '' means
 // no filter.
 let cinemaVenueFilter = '';
+// 'all', one of CINEMA_DATE_OPTIONS' ranges, or 'day' for the one date
+// picked from the day menu (cinemaDay).
 let cinemaDateMode = 'all';
+let cinemaDay = '';
 
 function renderCinemaVenueFilter() {
   const entries = CINEMA_VENUES.map(venue => ({
@@ -5768,11 +5777,50 @@ function renderCinemaVenueFilter() {
   });
 }
 
+// Showtimes are London wall-clock strings, compared by their date part —
+// so days here are local dates as the same YYYY-MM-DD, never
+// toISOString()'s UTC ones (in summer UTC's "today" ends an hour early).
+function cinemaIsoDay(offsetDays) {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function cinemaDayLabel(isoDay) {
+  const [y, m, d] = isoDay.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+// Weeks are the next seven days and the seven after, not calendar weeks:
+// on a Sunday a Monday-to-Sunday "this week" would be today alone.
 const CINEMA_DATE_OPTIONS = [
   { value: 'all', label: 'All' },
-  { value: 'today', label: 'Today' },
-  { value: 'tomorrow', label: 'Tomorrow' },
+  { value: 'today', label: 'Today', from: 0, to: 0 },
+  { value: 'tomorrow', label: 'Tomorrow', from: 1, to: 1 },
+  { value: 'thisweek', label: 'This week', from: 0, to: 6 },
+  { value: 'nextweek', label: 'Next week', from: 7, to: 13 },
 ];
+
+// [first, last] ISO day of the current date filter, inclusive, or null.
+function cinemaDateRange() {
+  if (cinemaDateMode === 'day') return [cinemaDay, cinemaDay];
+  const opt = CINEMA_DATE_OPTIONS.find(o => o.value === cinemaDateMode);
+  return opt && opt.from != null ? [cinemaIsoDay(opt.from), cinemaIsoDay(opt.to)] : null;
+}
+
+function cinemaDateFilterLabel() {
+  if (cinemaDateMode === 'day') return cinemaDayLabel(cinemaDay);
+  const opt = CINEMA_DATE_OPTIONS.find(o => o.value === cinemaDateMode);
+  if (opt.from === opt.to) return opt.label;
+  return opt.label + ' (' + cinemaDayLabel(cinemaIsoDay(opt.from)) + ' – ' + cinemaDayLabel(cinemaIsoDay(opt.to)) + ')';
+}
+
+function setCinemaDateMode(mode, day = '') {
+  cinemaDateMode = mode;
+  cinemaDay = day;
+  renderCinemaDateFilter();
+  renderCinemas();
+}
 
 function renderCinemaDateFilter() {
   const container = document.getElementById('cinemaDateFilter');
@@ -5781,13 +5829,22 @@ function renderCinemaDateFilter() {
     const pill = document.createElement('span');
     pill.className = 'pill-toggle' + (cinemaDateMode === opt.value ? ' active' : '');
     pill.textContent = opt.label;
-    pill.addEventListener('click', () => {
-      cinemaDateMode = opt.value;
-      renderCinemaDateFilter();
-      renderCinemas();
-    });
+    pill.addEventListener('click', () => setCinemaDateMode(opt.value));
     container.appendChild(pill);
   });
+
+  // Any single day with something on, for the day a pill doesn't reach.
+  const days = [...new Set(DATA.cinemas.flatMap(r => r.showtimes.map(s => s.showtime.slice(0, 10))))].sort();
+  const select = document.createElement('select');
+  select.id = 'cinemaDaySelect';
+  select.innerHTML = '<option value="">Pick a day…</option>' +
+    days.map(day => '<option value="' + day + '">' + esc(cinemaDayLabel(day)) + '</option>').join('');
+  select.value = cinemaDateMode === 'day' ? cinemaDay : '';
+  select.addEventListener('change', () => {
+    if (select.value) setCinemaDateMode('day', select.value);
+    else setCinemaDateMode('all');
+  });
+  container.appendChild(select);
 }
 
 function formatShowtimeChip(showtime, bookingUrl) {
@@ -5799,7 +5856,7 @@ function formatShowtimeChip(showtime, bookingUrl) {
     esc(label) + ' ↗</a>';
 }
 
-// A merged (matched) row can span several of the four cinemas — grouped
+// A merged (matched) row can span several cinemas — grouped
 // here so both the Cinemas-tab card and quick-look's showtimes section
 // render "one sub-list per cinema" instead of one flat, unlabeled list.
 // Groups are ordered by their own soonest showing, same "soonest first"
@@ -5888,8 +5945,8 @@ function renderActiveCinemaFilters() {
   if (cinemaDateMode !== 'all') {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = (cinemaDateMode === 'today' ? 'Today' : 'Tomorrow') + ' ✕';
-    chip.addEventListener('click', () => { cinemaDateMode = 'all'; renderCinemaDateFilter(); renderCinemas(); });
+    chip.textContent = cinemaDateFilterLabel() + ' ✕';
+    chip.addEventListener('click', () => setCinemaDateMode('all'));
     container.appendChild(chip);
   }
   if (cinemaVenueFilter) {
@@ -5905,38 +5962,56 @@ function renderActiveCinemaFilters() {
   clearAll.addEventListener('click', () => {
     document.getElementById('cinemaSearch').value = '';
     document.getElementById('cinemaSearchClear').classList.add('hidden');
-    cinemaDateMode = 'all';
-    renderCinemaDateFilter();
     cinemaVenueFilter = '';
     renderCinemaVenueFilter();
-    renderCinemas();
+    setCinemaDateMode('all');
   });
   container.appendChild(clearAll);
 }
 
+function cinemaDayHeading(isoDay) {
+  const label = cinemaDayLabel(isoDay);
+  if (isoDay === cinemaIsoDay(0)) return 'Today · ' + label;
+  if (isoDay === cinemaIsoDay(1)) return 'Tomorrow · ' + label;
+  return label;
+}
+
+// Ordered by date of showing: each film sits under the day of its first
+// showing that the filters leave, soonest first, with the rest of its
+// showings on the same card.
 function renderCinemas() {
   const container = document.getElementById('cinemasGrid');
   container.innerHTML = '';
   const q = document.getElementById('cinemaSearch').value.trim().toLowerCase();
   renderActiveCinemaFilters();
+  const range = cinemaDateRange();
 
-  // Local dates, not toISOString()'s UTC ones — showtimes are London
-  // wall-clock, and in summer UTC's "today" ends an hour early.
-  const localIso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
-    String(d.getDate()).padStart(2, '0');
-  const now = new Date();
-  const todayIso = localIso(now);
-  const tomorrowIso = localIso(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
-
-  const frag = document.createDocumentFragment();
+  const visible = [];
   DATA.cinemas.forEach(row => {
     if (q && !cinemaSearchHaystack(row).includes(q)) return;
     let showtimes = row.showtimes;
     if (cinemaVenueFilter) showtimes = showtimes.filter(s => s.cinema === cinemaVenueFilter);
-    if (cinemaDateMode === 'today') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === todayIso);
-    else if (cinemaDateMode === 'tomorrow') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === tomorrowIso);
-    if (!showtimes.length) return;
-    frag.appendChild(cinemaCardHtml({ ...row, showtimes }));
+    if (range) showtimes = showtimes.filter(s => {
+      const day = s.showtime.slice(0, 10);
+      return day >= range[0] && day <= range[1];
+    });
+    if (showtimes.length) visible.push({ ...row, showtimes });
+  });
+  visible.sort((a, b) => a.showtimes[0].showtime < b.showtimes[0].showtime ? -1
+    : a.showtimes[0].showtime > b.showtimes[0].showtime ? 1 : 0);
+
+  const frag = document.createDocumentFragment();
+  let currentDay = null;
+  visible.forEach(row => {
+    const day = row.showtimes[0].showtime.slice(0, 10);
+    if (day !== currentDay) {
+      currentDay = day;
+      const heading = document.createElement('h3');
+      heading.className = 'cinema-day-heading';
+      heading.textContent = cinemaDayHeading(day);
+      frag.appendChild(heading);
+    }
+    frag.appendChild(cinemaCardHtml(row));
   });
   container.appendChild(frag);
   ensureNotEmpty(container, 'No showtimes match your search and filters.');

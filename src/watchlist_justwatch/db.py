@@ -589,6 +589,16 @@ def load_taste_inputs(database_url: str) -> tuple[dict[str, dict], set[str]]:
     return diary, watchlist
 
 
+def load_rated_diary_titles(database_url: str) -> dict[str, dict]:
+    """slug -> {title, year} for every diary film Josh has rated — what
+    movielens.match_tmdb_ids searches TMDB with."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        return {slug: {"title": title, "year": year} for slug, title, year in conn.execute(
+            "SELECT slug, data->>'title', data->>'year' FROM diary WHERE data->>'personal_rating' IS NOT NULL"
+        ).fetchall()}
+
+
 def taste_meta_get(conn: psycopg.Connection, key: str):
     row = conn.execute("SELECT value FROM taste_meta WHERE key = %s", (key,)).fetchone()
     return row[0] if row else None

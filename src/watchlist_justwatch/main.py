@@ -42,7 +42,7 @@ from .custom_lists import all_source_paths, load_custom_lists, total_groups
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import (
     connect, custom_list_source_fetch_times, custom_list_source_totals, get_meta_value,
-    load_custom_list_memberships, load_state, load_taste_inputs, load_watch_together, save_custom_list_source,
+    load_custom_list_memberships, load_rated_diary_titles, load_state, load_taste_inputs, load_watch_together, save_custom_list_source,
     save_state, seed_pending_watch_together, set_watch_together_status, set_watch_together_statuses_batch,
 )
 from .diff import build_report
@@ -69,6 +69,7 @@ from .letterboxd import (
     get_film_details_by_slug,
     get_film_details_by_tmdb_id,
 )
+from . import movielens
 from .models import FilmState, OfferRecord, WatchlistFilm
 from .notify import send_if_configured
 from .report import render_report
@@ -875,6 +876,16 @@ def main() -> None:
                          help="Taste engine: print your closest taste matches, the best-predicted films "
                               "you haven't seen (leaving out TV — a pick's film page is checked the first "
                               "time it's suggested), and your watchlist ranked by predicted rating, then exit")
+    parser.add_argument("--corpus-database-url", default=os.getenv("CORPUS_DATABASE_URL"),
+                         help="--taste-eval: read the rater corpus from this database instead of "
+                              "--database-url (your own ratings still come from there) — a local Postgres "
+                              "holding the MovieLens corpus. See movielens.py.")
+    parser.add_argument("--import-movielens", type=Path, metavar="DIR",
+                         help="Load the MovieLens members who rated enough of your films (DIR: the unzipped "
+                              "ml-32m folder) into the local --corpus-database-url, matching your rated films "
+                              "by TMDB id (TMDB only, never Letterboxd), then exit. See movielens.py.")
+    parser.add_argument("--movielens-min-overlap", type=int, default=20,
+                         help="--import-movielens: fewest of your films a member must have rated")
     args = parser.parse_args()
 
     if not args.database_url:
@@ -1159,11 +1170,37 @@ def main() -> None:
         )
         sys.exit({"blocked": 2, "network": 1, "cooldown": 1, "busy": 1, "failed": 1}.get(outcome, 0))
 
+    if args.import_movielens:
+        if not args.corpus_database_url:
+            parser.error("--import-movielens needs --corpus-database-url (a local Postgres)")
+        titles = load_rated_diary_titles(args.database_url)
+        cache_path = str(args.import_movielens.parent / "tmdb_ids.json")
+        cache = movielens.load_cache(cache_path)
+        try:
+            matched = movielens.match_tmdb_ids(titles, _tmdb_search_movie, cache)
+        finally:
+            movielens.save_cache(cache_path, cache)
+        slug_by_tmdb = movielens.unambiguous(matched)
+        print(f"Matched {len(slug_by_tmdb)}/{len(titles)} of your rated films to TMDB "
+              f"(unmatched: {', '.join(sorted(s for s, t in matched.items() if not t)) or 'none'})")
+        try:
+            summary = movielens.import_corpus(args.corpus_database_url, str(args.import_movielens), slug_by_tmdb,
+                                              min_overlap=args.movielens_min_overlap)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(summary, indent=2))
+        sys.exit(0)
+
     if args.taste_eval or args.taste_recommend:
+        if args.corpus_database_url and args.taste_recommend:
+            # recommend checks each pick's Letterboxd film page, and a
+            # MovieLens film has no slug to check.
+            parser.error("--corpus-database-url only works with --taste-eval so far")
         diary, watchlist = load_taste_inputs(args.database_url)
         my_ratings = my_ratings_from_diary(diary)
         try:
-            with connect(args.database_url) as conn:
+            with connect(args.corpus_database_url or args.database_url) as conn:
                 if args.taste_eval:
                     report = evaluate(conn, my_ratings, community_ratings_from_diary(diary),
                                       {slug: entry["watched_date"] for slug, entry in diary.items()},

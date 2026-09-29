@@ -496,7 +496,10 @@ def test_screening_plan_orders_favourites_then_five_stars_then_distinctive_witho
 
 
 def test_fans_pages_spread_through_the_list():
-    assert spread_pages(7017) == [1, 94, 188]   # 281 pages
+    assert spread_pages(3000) == [1, 41, 80]    # 120 pages
+    # Letterboxd stops listing long before Whiplash's 10,931 pages
+    assert spread_pages(273272) == [1, 51, 100]
+    assert spread_pages(7017) == [1, 51, 100]
     assert spread_pages(250) == [1, 4, 7]       # 10 pages
     assert spread_pages(60) == [1, 2, 3]        # every page, when there are only 3
     assert spread_pages(30) == [1, 2]

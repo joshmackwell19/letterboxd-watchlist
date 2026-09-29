@@ -75,14 +75,20 @@ FAVOURITE_HITS = 3
 FAVOURITE_FAN_PAGES = 3
 # Rows on one /fans/ page.
 FANS_PER_PAGE = 25
+# Letterboxd stops paginating a long fans list somewhere: page 188 of
+# Tár's loaded, page 3,644 of Whiplash's came back an empty table
+# (2026-09-29). Rather than spend requests finding exactly where, stay
+# under what's been seen to work.
+MAX_FANS_PAGE = 150
 
 
 def spread_pages(fans: int, pages: int = FAVOURITE_FAN_PAGES) -> list[int]:
     """Which /fans/ pages to screen: page 1 and the rest evenly spaced
     through the list. Logged out, fans are listed by username, so the
     first few pages would only ever be members whose names start with a
-    digit or an "a" — an arbitrary slice of thousands."""
-    total = max(1, -(-fans // FANS_PER_PAGE))
+    digit or an "a" — an arbitrary slice of thousands. Never past
+    MAX_FANS_PAGE."""
+    total = min(max(1, -(-fans // FANS_PER_PAGE)), MAX_FANS_PAGE)
     return sorted({1 + round(k * (total - 1) / pages) for k in range(pages)} if total > pages
                   else set(range(1, total + 1)))
 

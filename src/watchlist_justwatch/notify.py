@@ -74,8 +74,9 @@ def send_if_configured(subject: str, text_body: str, *, html_body: str | None = 
 # the page — and the Worker stores the subscription in Postgres; the private
 # half is VAPID_PRIVATE_KEY, in .env and GitHub secrets, and signs each send.
 VAPID_PUBLIC_KEY = "BI_zLeNdZvuR-EN51VoVCx-H_SwKQVZsfi-ofwNGzBP1npMBZ9_3Z8Ct6yPnZizKXSHehl_QAUY3rrqN-4y0KY0"
-# Apple rejects a send whose VAPID "sub" claim isn't a mailto: or https: URL.
-VAPID_SUBJECT = "https://joshmackwell19.github.io/letterboxd-watchlist/"
+# Apple rejects a send whose VAPID "sub" claim isn't a mailto: or https: URL,
+# and py_vapid only takes an https one that's a bare origin — no path.
+VAPID_SUBJECT = "https://joshmackwell19.github.io"
 # The push services a subscription may point at. The Worker checks the same
 # list before storing one; checked again here so a row that got in some
 # other way can't make the daily run POST somewhere arbitrary.

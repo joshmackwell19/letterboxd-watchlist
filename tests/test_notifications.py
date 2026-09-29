@@ -66,3 +66,12 @@ def test_email_when_every_push_failed(monkeypatch):
     main._notify_newly_streaming("db", FILMS, [], warnings.append)
     assert emails == ["Now streaming: Close-Up (1990)"]
     assert warnings == ["push notification failed (500: boom)"]
+
+
+def test_vapid_subject_is_one_py_vapid_signs_with():
+    from py_vapid import Vapid, _check_sub
+    from watchlist_justwatch.notify import VAPID_SUBJECT
+
+    assert _check_sub(VAPID_SUBJECT)
+    Vapid.from_raw(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE").sign(
+        {"sub": VAPID_SUBJECT, "aud": "https://web.push.apple.com"})

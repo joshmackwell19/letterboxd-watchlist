@@ -82,6 +82,7 @@ jobs:
           mkdir -p _site
           cp dashboard.html _site/index.html
           cp manifest.json _site/manifest.json
+          cp sw.js _site/sw.js
           cp -r icons _site/icons
 
       - name: Upload Pages artifact

@@ -13,9 +13,8 @@ def test_prepend_warnings_prefixes_report_text():
 
 
 def test_prepend_warnings_works_with_no_report_text():
-    # A day with warnings but no offer changes still needs to send *something*
-    # — a run that "succeeded" but quietly degraded shouldn't go unreported
-    # just because there was nothing else to say.
+    # The notification email is built from its own text, but the helper
+    # shouldn't leave a dangling separator when there's none.
     result = _prepend_warnings("", ["thing one broke"])
     assert "thing one broke" in result
     assert not result.endswith("\n\n")

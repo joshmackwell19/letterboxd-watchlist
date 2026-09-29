@@ -508,6 +508,50 @@ async function findPersonId(env, name) {
   return results[0].id;
 }
 
+// ---------- Push subscriptions (Postgres over Neon's HTTP endpoint) ----------
+//
+// The one place this Worker writes the database itself, rather than
+// dispatching a workflow to: a push subscription passed as a workflow input
+// would be printed in the run's log, and this repo's logs are public. Neon
+// answers a single parameterised statement over plain HTTPS, authenticated
+// by the connection string, so this needs no driver — just DATABASE_URL,
+// pushed here by deploy-worker.yml. The table itself is db.py's.
+
+// Where a subscription may point — the same list as notify.py's
+// PUSH_SERVICE_HOSTS, since the daily run POSTs to whatever is stored.
+const PUSH_SERVICE_HOSTS = ["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com",
+  ".notify.windows.com"];
+const MAX_PUSH_SUBSCRIPTIONS = 20;
+const BASE64URL_RE = /^[A-Za-z0-9_-]+={0,2}$/;
+
+function isPushServiceEndpoint(endpoint) {
+  if (typeof endpoint !== "string" || endpoint.length > 1000) return false;
+  let parsed;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" && PUSH_SERVICE_HOSTS.some((allowed) =>
+    allowed.startsWith(".") ? parsed.hostname.endsWith(allowed) : parsed.hostname === allowed);
+}
+
+function validPushKey(value, maxLength) {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength && BASE64URL_RE.test(value);
+}
+
+async function neonQuery(env, query, params) {
+  const host = new URL(env.DATABASE_URL).hostname;
+  const response = await fetch(`https://${host}/sql`, {
+    method: "POST",
+    headers: { "Neon-Connection-String": env.DATABASE_URL, "Content-Type": "application/json" },
+    body: JSON.stringify({ query, params }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.message || `database answered ${response.status}`);
+  return body;
+}
+
 export default {
   async fetch(request, env) {
     const cors = {
@@ -1052,6 +1096,44 @@ export default {
         status: 200,
         headers: { ...cors, "Content-Type": "application/json" },
       });
+    }
+
+    if (url.pathname === "/push-subscribe") {
+      // Takes PushSubscription.toJSON(): {endpoint, keys: {p256dh, auth}}.
+      const payload = await request.json().catch(() => null);
+      const keys = payload && payload.keys;
+      if (!payload || !isPushServiceEndpoint(payload.endpoint) || !keys
+          || !validPushKey(keys.p256dh, 200) || !validPushKey(keys.auth, 100)) {
+        return jsonResponse({ ok: false, error: "not a push subscription" }, 400, cors);
+      }
+      try {
+        // Capped, since anyone who reads the page source can call this: a
+        // flood of rows would otherwise become a flood of sends every run.
+        const result = await neonQuery(env,
+          "INSERT INTO push_subscriptions (endpoint, p256dh, auth) SELECT $1, $2, $3 " +
+          "WHERE (SELECT count(*) FROM push_subscriptions) < $4 " +
+          "ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth",
+          [payload.endpoint, keys.p256dh, keys.auth, MAX_PUSH_SUBSCRIPTIONS]);
+        if (!result.rowCount) {
+          return jsonResponse({ ok: false, error: "too many devices subscribed already" }, 409, cors);
+        }
+      } catch (err) {
+        return jsonResponse({ ok: false, error: `couldn't save: ${err.message}` }, 502, cors);
+      }
+      return jsonResponse({ ok: true }, 200, cors);
+    }
+
+    if (url.pathname === "/push-unsubscribe") {
+      const payload = await request.json().catch(() => null);
+      if (!payload || !isPushServiceEndpoint(payload.endpoint)) {
+        return jsonResponse({ ok: false, error: "missing endpoint" }, 400, cors);
+      }
+      try {
+        await neonQuery(env, "DELETE FROM push_subscriptions WHERE endpoint = $1", [payload.endpoint]);
+      } catch (err) {
+        return jsonResponse({ ok: false, error: `couldn't remove: ${err.message}` }, 502, cors);
+      }
+      return jsonResponse({ ok: true }, 200, cors);
     }
 
     // Anything else is a mistake, and must not fall through to the daily

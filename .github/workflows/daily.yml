@@ -44,6 +44,9 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Signs the push notification for a film that's started streaming
+          # (see notify.py); without it the run falls back to email.
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
         run: python -m watchlist_justwatch.main
 
       # dashboard.html is no longer committed to git — Pages deploys straight
@@ -66,6 +69,7 @@ jobs:
           mkdir -p _site
           cp dashboard.html _site/index.html
           cp manifest.json _site/manifest.json
+          cp sw.js _site/sw.js
           cp -r icons _site/icons
 
       - name: Upload Pages artifact

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from .availability import bucket_offers
 from .config import CountryConfig
 from .countries import country_name
-from .diff import Report, ReportEntry
 
 _BUCKET_LABELS = [
     ("have", "Available on a service you have"),
@@ -159,91 +158,96 @@ def _bucket_chips(entries: list[tuple[str, str]]) -> list[str]:
     return sorted({brand for brand, _country in entries})
 
 
-def render_report_html(report: Report, config: dict[str, CountryConfig], global_subscriptions: list[str],
-                        revisitable: set[str]) -> str | None:
-    if report.is_empty():
-        return None
+# Order a newly-streaming film's services are listed in, and the badge its
+# card gets from the best of them.
+_NEWLY_STREAMING_ORDER = {"have": 0, "free": 1, "could_get_again": 2, "subscription": 3}
+_NEWLY_STREAMING_BADGES = {"have": "On a service you have", "free": "Free to watch",
+                           "could_get_again": "On a service you could get again"}
 
-    changed_count = len(report.new_have) + len(report.new_free_tier) + len(report.new_possible)
-    body = _header("Daily update")
-    body += f'<div style="font:700 19px {_SANS}; color:{_INK}; margin-bottom:6px;">Here&rsquo;s what changed today</div>'
+
+def _newly_streaming_services(offers: dict[tuple[str, str], str]) -> list[tuple[str, str, list[str]]]:
+    """(brand, classification, countries) per brand, best first."""
+    by_brand: dict[str, dict] = {}
+    for (brand, country), classification in offers.items():
+        entry = by_brand.setdefault(brand, {"classification": classification, "countries": []})
+        entry["countries"].append(country)
+        if _NEWLY_STREAMING_ORDER.get(classification, 9) < _NEWLY_STREAMING_ORDER.get(entry["classification"], 9):
+            entry["classification"] = classification
+    return sorted(((brand, e["classification"], e["countries"]) for brand, e in by_brand.items()),
+                  key=lambda s: (_NEWLY_STREAMING_ORDER.get(s[1], 9), s[0]))
+
+
+def newly_streaming_subject(films: list[tuple]) -> str:
+    if len(films) == 1:
+        film, _offers = films[0]
+        return f"Now streaming: {_film_title_year(film)}"
+    return f"{len(films)} watchlist films now streaming"
+
+
+def render_newly_streaming_text(films: list[tuple]) -> str:
+    lines = ["Newly streaming — these watchlist films weren't streaming anywhere you track until today.", ""]
+    for film, offers in films:
+        rating = f" — {_film_rating(film)}" if film.rating is not None else ""
+        lines.append(f"  {_film_title_year(film)}{rating}")
+        for brand, classification, countries in _newly_streaming_services(offers):
+            note = f" ({_NEWLY_STREAMING_BADGES[classification].lower()})" if classification in _NEWLY_STREAMING_BADGES else ""
+            lines.append(f"    {brand}: {_country_list(countries, limit=4)}{note}")
+        lines.append(f"    https://letterboxd.com/film/{film.slug}/")
+        lines.append("")
+    lines.append(DASHBOARD_URL)
+    return "\n".join(lines)
+
+
+# One notification per film up to this many; past it, one summary — a
+# day that big is a JustWatch data change more often than real news.
+MAX_FILM_NOTIFICATIONS = 4
+_PUSH_NOTES = {"have": " (yours)", "free": " (free)", "could_get_again": " (could get again)"}
+
+
+def newly_streaming_notifications(films: list[tuple]) -> list[dict]:
+    """Web Push payloads ({title, body, url, tag}) for diff.newly_streaming's
+    films. Each film's opens its own page on the dashboard (?film=<slug>)."""
+    if len(films) > MAX_FILM_NOTIFICATIONS:
+        names = ", ".join(film.title for film, _offers in films[:5])
+        more = f" and {len(films) - 5} more" if len(films) > 5 else ""
+        return [{"title": f"{len(films)} watchlist films now streaming", "body": names + more,
+                 "url": DASHBOARD_URL, "tag": "newly-streaming"}]
+    return [film_notification(film, offers) for film, offers in films]
+
+
+def film_notification(film, offers: dict[tuple[str, str], str]) -> dict:
+    """One film's notification — also what the notification log records
+    for it, even on a day it went out folded into a summary."""
+    services = [brand + _PUSH_NOTES.get(classification, "")
+                for brand, classification, _countries in _newly_streaming_services(offers)]
+    more = f" +{len(services) - 3} more" if len(services) > 3 else ""
+    return {
+        "title": f"Now streaming: {_film_title_year(film)}",
+        "body": "On " + ", ".join(services[:3]) + more,
+        "url": f"{DASHBOARD_URL}?film={film.slug}",
+        "tag": f"streaming-{film.slug}",
+    }
+
+
+def render_newly_streaming_html(films: list[tuple]) -> str:
+    """films: (FilmState, {(brand, country): classification}) pairs, from
+    diff.newly_streaming."""
+    body = _header("Now streaming")
+    heading = "Now streaming" if len(films) == 1 else f"{len(films)} films now streaming"
+    body += f'<div style="font:700 19px {_SANS}; color:{_INK}; margin-bottom:6px;">{_esc(heading)}</div>'
     body += (f'<div style="font:400 13px {_SANS}; color:{_MUTED}; margin-bottom:20px;">'
-              f'A summary of your watchlist and streaming availability, tracked automatically.</div>')
-    body += _kpi_row([
-        (len(report.new_films), "New to watchlist"),
-        (len(_group_by_film(report.new_have)), "Now on your services"),
-        (len(_group_by_film(report.new_free_tier)) + len(_group_by_film(report.new_possible)), "Newly streaming elsewhere"),
-    ])
-
-    if report.new_films:
-        body += _section("New to your watchlist")
-        cells = []
-        for film in report.new_films:
-            caption = f"Directed by {', '.join(film.director)}" if film.director else None
-            cells.append(_grid_item(film, caption=caption))
-        body += _grid(cells)
-
-    if report.new_have:
-        body += _section("Available on a service you have")
-        cells = [_grid_item(film, chips=sorted({o.package_clear_name for o in offers}))
-                 for film, offers in _group_by_film(_dedupe_by_film_country(report.new_have))]
-        body += _grid(cells)
-
-    if report.new_free_tier:
-        body += _section("Free or ad-supported")
-        cells = [_grid_item(film, chips=sorted({o.package_clear_name for o in offers}))
-                 for film, offers in _group_by_film(_dedupe_by_film_country(report.new_free_tier))]
-        body += _grid(cells)
-
-    if report.new_possible:
-        body += _section("On a service you don't have")
-        cells = [_grid_item(film, chips=sorted({o.package_clear_name for o in offers}))
-                 for film, offers in _group_by_film(_dedupe_by_film_country(report.new_possible))]
-        body += _grid(cells)
-
-    if report.unmatched:
-        body += _section("Could not confidently match on JustWatch")
-        for film in report.unmatched:
-            year = f" ({film.year})" if film.year else ""
-            reason = "no search results" if film.confidence == "unmatched" else "low-confidence match"
-            body += _empty_note(f"{film.title}{year} — {reason}")
-
+             f"From your watchlist, and not streaming anywhere you track until today.</div>")
+    cells = []
+    for film, offers in films:
+        services = _newly_streaming_services(offers)
+        best = services[0][1]
+        countries = sorted({c for _brand, _cls, cs in services for c in cs})
+        cells.append(_grid_item(film, chips=[brand for brand, _cls, _cs in services],
+                                badge=_NEWLY_STREAMING_BADGES.get(best), caption=_country_list(countries, limit=3)))
+    body += _grid(cells)
     body += _cta()
     body += _footer()
     return _wrap(body)
-
-
-_MONETIZATION_PRIORITY = {"FLATRATE": 0, "FREE": 1, "ADS": 2}
-
-
-def _dedupe_by_film_country(entries: list[ReportEntry]) -> list[ReportEntry]:
-    best: dict[tuple[str, str], ReportEntry] = {}
-    for entry in entries:
-        key = (entry.film.slug, entry.offer.country)
-        current_best = best.get(key)
-        if current_best is None:
-            best[key] = entry
-            continue
-        rank = (_MONETIZATION_PRIORITY.get(entry.offer.monetization_type, 9), len(entry.offer.package_clear_name))
-        current_rank = (_MONETIZATION_PRIORITY.get(current_best.offer.monetization_type, 9),
-                        len(current_best.offer.package_clear_name))
-        if rank < current_rank:
-            best[key] = entry
-    return list(best.values())
-
-
-def _group_by_film(entries: list[ReportEntry]) -> list[tuple]:
-    """One (film, offers) group per film, preserving first-seen order — a
-    film with new offers in several countries gets one grid card listing
-    every brand it's newly on, rather than one card per country."""
-    order: list[str] = []
-    by_slug: dict[str, dict] = {}
-    for e in entries:
-        group = by_slug.setdefault(e.film.slug, {"film": e.film, "offers": []})
-        if e.film.slug not in order:
-            order.append(e.film.slug)
-        group["offers"].append(e.offer)
-    return [(by_slug[slug]["film"], by_slug[slug]["offers"]) for slug in order]
 
 
 # ---------------------------------------------------------------- availability audits

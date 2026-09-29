@@ -10,11 +10,12 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import drop_past_showings, listing_match_key, match_watchlist_film
+from .cinemas import CINEMA_VENUES, drop_past_showings, listing_match_key, match_watchlist_film
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
 from .languages import LANGUAGE_NAMES, is_subtitled, language_name
+from .notify import VAPID_PUBLIC_KEY
 from .state import StateDoc
 
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
@@ -577,7 +578,7 @@ def _format_cinema_datetime(iso: str) -> str:
 
 
 def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> dict[str, dict]:
-    """Every watchlist film with an upcoming screening at one of the four
+    """Every watchlist film with an upcoming screening at one of the
     cinemas in cinemas.py, mapped to its single soonest showing — shared
     by the Home section below and the Films tab's own per-card note, so
     both agree on which showing counts as "next" for a given film."""
@@ -792,6 +793,7 @@ def _settings_data(config: dict[str, CountryConfig], global_subscriptions: list[
         "countries": countries,
         "refresh_worker_url": REFRESH_WORKER_URL,
         "refresh_trigger_secret": REFRESH_TRIGGER_SECRET,
+        "vapid_public_key": VAPID_PUBLIC_KEY,
     }
 
 
@@ -897,7 +899,7 @@ def _search_taxonomy(
 
 def _cinema_listings(state: StateDoc, now: datetime | None = None) -> list[dict]:
     """One row per film for the full Cinemas tab — a matched watchlist
-    film showing at several of the four cinemas merges into a single row
+    film showing at several of the cinemas merges into a single row
     (grouped by slug, the one reliable cross-cinema identity a match
     gives us) with every cinema's showtimes attached, rather than one
     card per (cinema, title) like an unmatched film still gets (title
@@ -993,6 +995,7 @@ def build_dashboard_data(
     custom_lists: list[CustomList] = (),
     list_sources: dict[str, set[str]] | None = None,
     list_totals: dict[str, int] | None = None,
+    notification_log: list[dict] | None = None,
 ) -> dict:
     watch_together = watch_together or {}
     # Already narrowed to watchlist/diary slugs by the DB (see
@@ -1048,6 +1051,9 @@ def build_dashboard_data(
 
     return {
         "last_run_at": state.last_run_at,
+        # Settings → Notifications' history (db.load_notification_log: the
+        # newest 50, a few KB).
+        "notification_log": notification_log or [],
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
         "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, discovery_films,
@@ -1076,6 +1082,7 @@ def build_dashboard_data(
         "for_you": _for_you_data(state.for_you, {**discovery_films, **films_by_slug}, {r["slug"] for r in rows},
                                  dismissed_recommendations, set(state.diary)),
         "cinemas": _cinema_listings(state),
+        "cinema_venues": list(CINEMA_VENUES),
         "settings": _settings_data(config, global_subscriptions),
         "search_taxonomy": _search_taxonomy(state, config, global_subscriptions, revisitable),
     }
@@ -1174,6 +1181,18 @@ _TEMPLATE = """<!DOCTYPE html>
   .icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .icon-btn:disabled:hover { color: var(--text-muted); border-color: var(--hairline-strong); }
   .settings-block { margin-bottom: 22px; }
+  .notification-log { margin-top: 14px; display: flex; flex-direction: column; }
+  .notification-log-row {
+    display: flex; gap: 10px; align-items: flex-start; padding: 10px 0;
+    border-top: 1px solid var(--hairline);
+  }
+  .notification-log-row.linked { cursor: pointer; }
+  .notification-log-row .poster-thumb, .notification-log-row .poster-placeholder { margin-top: 1px; }
+  .notification-log-text { flex: 1; min-width: 0; }
+  .notification-log-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .notification-log-body { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .notification-log-meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+  .notification-log-meta .not-sent { color: #e8a13a; }
   .settings-service-group { margin-bottom: 18px; }
   .settings-service-group > h4 {
     font-size: 12.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-muted);
@@ -1317,6 +1336,11 @@ _TEMPLATE = """<!DOCTYPE html>
   #cinemaVenueToggles, #cinemaDateFilter {
     display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center;
   }
+  .cinema-day-heading {
+    grid-column: 1 / -1; margin: 10px 0 0; font-size: 13px; font-weight: 600;
+    color: var(--text-muted); letter-spacing: 0.01em;
+  }
+  .cinema-day-heading:first-child { margin-top: 0; }
   .sarah-filter { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
   .poster-thumb {
     width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
@@ -2348,6 +2372,17 @@ _TEMPLATE = """<!DOCTYPE html>
     <p class="muted" id="servicesSaveStatus"></p>
   </div>
   <div class="settings-block">
+    <h3 class="home-section-header">Notifications</h3>
+    <p class="muted">
+      One when a film on your watchlist starts streaming somewhere it wasn't before, and
+      nothing else. Until a device turns these on, the same news comes by email instead.
+    </p>
+    <p class="muted" id="notificationStatus"></p>
+    <button class="back-btn" id="notificationToggle" hidden style="margin-bottom:0;"></button>
+    <span class="settings-subgroup-label" style="display:block; margin-top: 20px;">History</span>
+    <div id="notificationLog" class="notification-log"></div>
+  </div>
+  <div class="settings-block">
     <h3 class="home-section-header">Refresh dashboard data</h3>
     <p class="muted">
       A new Letterboxd log already triggers this automatically within about 15 minutes — the
@@ -2802,7 +2837,150 @@ function buildServiceEditor(label, key, values, pillClass) {
   return wrap;
 }
 
+// ---------- Push notifications ----------
+//
+// iOS delivers Web Push only to a site saved to the Home Screen and opened
+// from there, and only asks for permission from a tap — so this is a button,
+// never a prompt on load. The subscription goes to the Worker, which stores
+// it in Postgres for the daily run to send to (notify.py's send_push).
+const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushRegistration = pushSupported && window.isSecureContext
+  ? navigator.serviceWorker.register('sw.js').catch(() => null)
+  : Promise.resolve(null);
+
+function vapidKeyBytes(base64url) {
+  const padded = (base64url + '='.repeat((4 - base64url.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+}
+
+async function currentPushSubscription() {
+  const registration = await pushRegistration;
+  return registration ? registration.pushManager.getSubscription() : null;
+}
+
+async function renderNotificationSettings() {
+  const status = document.getElementById('notificationStatus');
+  const button = document.getElementById('notificationToggle');
+  button.hidden = true;
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  if (!pushSupported || !(await pushRegistration)) {
+    status.textContent = isIOS && !standalone
+      ? 'On iPhone, add this page to your Home Screen first (Share → Add to Home Screen), then open it from there.'
+      : "This browser can't receive notifications from the dashboard.";
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    status.textContent = 'Notifications are blocked for this app — allow them in your device settings, then come back here.';
+    return;
+  }
+  const subscription = await currentPushSubscription();
+  status.textContent = subscription ? 'On for this device.' : 'Off for this device.';
+  button.textContent = subscription ? 'Turn off' : 'Turn on notifications';
+  button.disabled = false;
+  button.hidden = false;
+}
+
+async function togglePushNotifications() {
+  const status = document.getElementById('notificationStatus');
+  const button = document.getElementById('notificationToggle');
+  button.disabled = true;
+  try {
+    const existing = await currentPushSubscription();
+    if (existing) {
+      await searchWorker('/push-unsubscribe', { endpoint: existing.endpoint }).catch(() => null);
+      await existing.unsubscribe();
+    } else {
+      if (await Notification.requestPermission() !== 'granted') {
+        await renderNotificationSettings();
+        return;
+      }
+      const registration = await pushRegistration;
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: vapidKeyBytes(DATA.settings.vapid_public_key),
+      });
+      const result = await searchWorker('/push-subscribe', subscription.toJSON()).catch(() => null);
+      if (!result || !result.ok) {
+        // Not stored anywhere the daily run can see, so it isn't really on.
+        await subscription.unsubscribe();
+        status.textContent = "Couldn't save this device" + (result && result.error ? ' (' + result.error + ')' : '') + ' — try again later.';
+        button.disabled = false;
+        return;
+      }
+      registration.showNotification('Notifications are on', {
+        body: "You'll hear when a film on your watchlist starts streaming.",
+        icon: 'icons/icon-192.png',
+      });
+    }
+  } catch (err) {
+    status.textContent = 'Something went wrong: ' + err.message;
+    button.disabled = false;
+    return;
+  }
+  await renderNotificationSettings();
+}
+
+document.getElementById('notificationToggle').addEventListener('click', togglePushNotifications);
+
+// A notification links to ?film=<slug>. Tapped with the app closed, that's
+// the URL it opens with (handled after the last view is restored, below);
+// with it already open, the service worker hands the URL over instead.
+function openFilmFromUrl(href) {
+  const slug = new URL(href, location.href).searchParams.get('film');
+  if (slug) openFilmDetail(slug);
+}
+if (pushSupported) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    if (event.data && event.data.type === 'open-url') openFilmFromUrl(event.data.url);
+  });
+}
+
+// What the daily run sent (db.notification_log), newest first — each film's
+// own notification, even on a day several went out as one summary.
+function notificationDateLabel(iso) {
+  const sent = new Date(iso);
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 86400000);
+  const time = sent.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (days === 0) return 'Today, ' + time;
+  if (days === 1) return 'Yesterday, ' + time;
+  return sent.toLocaleDateString([], { day: 'numeric', month: 'short', year: days > 300 ? 'numeric' : undefined });
+}
+
+const NOTIFICATION_CHANNELS = { push: 'Push', email: 'Email', 'not sent': 'Not sent' };
+
+function renderNotificationLog() {
+  const container = document.getElementById('notificationLog');
+  container.innerHTML = '';
+  const entries = DATA.notification_log || [];
+  if (!entries.length) {
+    container.innerHTML = '<p class="muted">Nothing yet — each notification will be listed here.</p>';
+    return;
+  }
+  entries.forEach(entry => {
+    const film = entry.slug ? filmBySlug(entry.slug) : null;
+    const row = document.createElement('div');
+    row.className = 'notification-log-row' + (film ? ' linked' : '');
+    const poster = film && film.poster_url
+      ? '<img class="poster-thumb" loading="lazy" alt="" src="' + escAttr(film.poster_url) + '">'
+      : '<div class="poster-placeholder"></div>';
+    const channel = NOTIFICATION_CHANNELS[entry.channel] || entry.channel;
+    row.innerHTML = poster +
+      '<div class="notification-log-text">' +
+        '<div class="notification-log-title">' + esc(entry.title) + '</div>' +
+        '<div class="notification-log-body">' + esc(entry.body) + '</div>' +
+        '<div class="notification-log-meta">' + esc(notificationDateLabel(entry.sent_at)) + ' · ' +
+          (entry.channel === 'not sent' ? '<span class="not-sent">' + esc(channel) + '</span>' : esc(channel)) +
+        '</div>' +
+      '</div>';
+    if (film) row.addEventListener('click', () => openFilmDetail(entry.slug, 'settings'));
+    container.appendChild(row);
+  });
+}
+
 function renderSettings() {
+  renderNotificationSettings();
+  renderNotificationLog();
   document.getElementById('settingsAccount').innerHTML =
     '<a class="film-link" target="_blank" href="' + DATA.letterboxd_watchlist_url + '">' +
     esc(DATA.settings.letterboxd_username) + '</a>';
@@ -5749,12 +5927,15 @@ document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateCl
 
 // ---------- Cinemas ----------
 
-const CINEMA_VENUES = ['Prince Charles Cinema', 'Barbican', 'Vue Fulham Broadway', 'Riverside Studios'];
+const CINEMA_VENUES = DATA.cinema_venues;
 // Single-select, same as Services/Country's quick-jump chips — one click
 // on a venue shows only that venue (not "toggle this one off"), '' means
 // no filter.
 let cinemaVenueFilter = '';
+// 'all', one of CINEMA_DATE_OPTIONS' ranges, or 'day' for the one date
+// picked from the day menu (cinemaDay).
 let cinemaDateMode = 'all';
+let cinemaDay = '';
 
 function renderCinemaVenueFilter() {
   const entries = CINEMA_VENUES.map(venue => ({
@@ -5768,11 +5949,50 @@ function renderCinemaVenueFilter() {
   });
 }
 
+// Showtimes are London wall-clock strings, compared by their date part —
+// so days here are local dates as the same YYYY-MM-DD, never
+// toISOString()'s UTC ones (in summer UTC's "today" ends an hour early).
+function cinemaIsoDay(offsetDays) {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function cinemaDayLabel(isoDay) {
+  const [y, m, d] = isoDay.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+// Weeks are the next seven days and the seven after, not calendar weeks:
+// on a Sunday a Monday-to-Sunday "this week" would be today alone.
 const CINEMA_DATE_OPTIONS = [
   { value: 'all', label: 'All' },
-  { value: 'today', label: 'Today' },
-  { value: 'tomorrow', label: 'Tomorrow' },
+  { value: 'today', label: 'Today', from: 0, to: 0 },
+  { value: 'tomorrow', label: 'Tomorrow', from: 1, to: 1 },
+  { value: 'thisweek', label: 'This week', from: 0, to: 6 },
+  { value: 'nextweek', label: 'Next week', from: 7, to: 13 },
 ];
+
+// [first, last] ISO day of the current date filter, inclusive, or null.
+function cinemaDateRange() {
+  if (cinemaDateMode === 'day') return [cinemaDay, cinemaDay];
+  const opt = CINEMA_DATE_OPTIONS.find(o => o.value === cinemaDateMode);
+  return opt && opt.from != null ? [cinemaIsoDay(opt.from), cinemaIsoDay(opt.to)] : null;
+}
+
+function cinemaDateFilterLabel() {
+  if (cinemaDateMode === 'day') return cinemaDayLabel(cinemaDay);
+  const opt = CINEMA_DATE_OPTIONS.find(o => o.value === cinemaDateMode);
+  if (opt.from === opt.to) return opt.label;
+  return opt.label + ' (' + cinemaDayLabel(cinemaIsoDay(opt.from)) + ' – ' + cinemaDayLabel(cinemaIsoDay(opt.to)) + ')';
+}
+
+function setCinemaDateMode(mode, day = '') {
+  cinemaDateMode = mode;
+  cinemaDay = day;
+  renderCinemaDateFilter();
+  renderCinemas();
+}
 
 function renderCinemaDateFilter() {
   const container = document.getElementById('cinemaDateFilter');
@@ -5781,13 +6001,22 @@ function renderCinemaDateFilter() {
     const pill = document.createElement('span');
     pill.className = 'pill-toggle' + (cinemaDateMode === opt.value ? ' active' : '');
     pill.textContent = opt.label;
-    pill.addEventListener('click', () => {
-      cinemaDateMode = opt.value;
-      renderCinemaDateFilter();
-      renderCinemas();
-    });
+    pill.addEventListener('click', () => setCinemaDateMode(opt.value));
     container.appendChild(pill);
   });
+
+  // Any single day with something on, for the day a pill doesn't reach.
+  const days = [...new Set(DATA.cinemas.flatMap(r => r.showtimes.map(s => s.showtime.slice(0, 10))))].sort();
+  const select = document.createElement('select');
+  select.id = 'cinemaDaySelect';
+  select.innerHTML = '<option value="">Pick a day…</option>' +
+    days.map(day => '<option value="' + day + '">' + esc(cinemaDayLabel(day)) + '</option>').join('');
+  select.value = cinemaDateMode === 'day' ? cinemaDay : '';
+  select.addEventListener('change', () => {
+    if (select.value) setCinemaDateMode('day', select.value);
+    else setCinemaDateMode('all');
+  });
+  container.appendChild(select);
 }
 
 function formatShowtimeChip(showtime, bookingUrl) {
@@ -5799,7 +6028,7 @@ function formatShowtimeChip(showtime, bookingUrl) {
     esc(label) + ' ↗</a>';
 }
 
-// A merged (matched) row can span several of the four cinemas — grouped
+// A merged (matched) row can span several cinemas — grouped
 // here so both the Cinemas-tab card and quick-look's showtimes section
 // render "one sub-list per cinema" instead of one flat, unlabeled list.
 // Groups are ordered by their own soonest showing, same "soonest first"
@@ -5888,8 +6117,8 @@ function renderActiveCinemaFilters() {
   if (cinemaDateMode !== 'all') {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = (cinemaDateMode === 'today' ? 'Today' : 'Tomorrow') + ' ✕';
-    chip.addEventListener('click', () => { cinemaDateMode = 'all'; renderCinemaDateFilter(); renderCinemas(); });
+    chip.textContent = cinemaDateFilterLabel() + ' ✕';
+    chip.addEventListener('click', () => setCinemaDateMode('all'));
     container.appendChild(chip);
   }
   if (cinemaVenueFilter) {
@@ -5905,38 +6134,56 @@ function renderActiveCinemaFilters() {
   clearAll.addEventListener('click', () => {
     document.getElementById('cinemaSearch').value = '';
     document.getElementById('cinemaSearchClear').classList.add('hidden');
-    cinemaDateMode = 'all';
-    renderCinemaDateFilter();
     cinemaVenueFilter = '';
     renderCinemaVenueFilter();
-    renderCinemas();
+    setCinemaDateMode('all');
   });
   container.appendChild(clearAll);
 }
 
+function cinemaDayHeading(isoDay) {
+  const label = cinemaDayLabel(isoDay);
+  if (isoDay === cinemaIsoDay(0)) return 'Today · ' + label;
+  if (isoDay === cinemaIsoDay(1)) return 'Tomorrow · ' + label;
+  return label;
+}
+
+// Ordered by date of showing: each film sits under the day of its first
+// showing that the filters leave, soonest first, with the rest of its
+// showings on the same card.
 function renderCinemas() {
   const container = document.getElementById('cinemasGrid');
   container.innerHTML = '';
   const q = document.getElementById('cinemaSearch').value.trim().toLowerCase();
   renderActiveCinemaFilters();
+  const range = cinemaDateRange();
 
-  // Local dates, not toISOString()'s UTC ones — showtimes are London
-  // wall-clock, and in summer UTC's "today" ends an hour early.
-  const localIso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
-    String(d.getDate()).padStart(2, '0');
-  const now = new Date();
-  const todayIso = localIso(now);
-  const tomorrowIso = localIso(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
-
-  const frag = document.createDocumentFragment();
+  const visible = [];
   DATA.cinemas.forEach(row => {
     if (q && !cinemaSearchHaystack(row).includes(q)) return;
     let showtimes = row.showtimes;
     if (cinemaVenueFilter) showtimes = showtimes.filter(s => s.cinema === cinemaVenueFilter);
-    if (cinemaDateMode === 'today') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === todayIso);
-    else if (cinemaDateMode === 'tomorrow') showtimes = showtimes.filter(s => s.showtime.slice(0, 10) === tomorrowIso);
-    if (!showtimes.length) return;
-    frag.appendChild(cinemaCardHtml({ ...row, showtimes }));
+    if (range) showtimes = showtimes.filter(s => {
+      const day = s.showtime.slice(0, 10);
+      return day >= range[0] && day <= range[1];
+    });
+    if (showtimes.length) visible.push({ ...row, showtimes });
+  });
+  visible.sort((a, b) => a.showtimes[0].showtime < b.showtimes[0].showtime ? -1
+    : a.showtimes[0].showtime > b.showtimes[0].showtime ? 1 : 0);
+
+  const frag = document.createDocumentFragment();
+  let currentDay = null;
+  visible.forEach(row => {
+    const day = row.showtimes[0].showtime.slice(0, 10);
+    if (day !== currentDay) {
+      currentDay = day;
+      const heading = document.createElement('h3');
+      heading.className = 'cinema-day-heading';
+      heading.textContent = cinemaDayHeading(day);
+      frag.appendChild(heading);
+    }
+    frag.appendChild(cinemaCardHtml(row));
   });
   container.appendChild(frag);
   ensureNotEmpty(container, 'No showtimes match your search and filters.');
@@ -6685,6 +6932,13 @@ if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   viewScrollPositions['view-' + saved.view] = saved.scrollY || 0;
   showView(saved.view);
 })();
+
+// Opened from a notification: the film's page, over whatever was restored.
+// The parameter is dropped straight away so a later reload doesn't reopen it.
+if (new URLSearchParams(location.search).has('film')) {
+  openFilmFromUrl(location.href);
+  history.replaceState(history.state, '', location.pathname + location.hash);
+}
 
 // ---------- Pull to refresh (mobile) ----------
 // Reload picks up whatever dashboard.html the last daily run deployed —

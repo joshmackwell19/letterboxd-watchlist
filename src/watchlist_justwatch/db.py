@@ -71,6 +71,28 @@ ALTER TABLE films ADD COLUMN IF NOT EXISTS tmdb_id INTEGER;
 -- A row with a NULL slug is a listing that has no Letterboxd film —
 -- remembered so the daily run doesn't pay two network calls rediscovering
 -- that a Bing birthday screening still isn't a film.
+-- Web Push subscriptions, one per device that tapped "Turn on
+-- notifications" on the dashboard. Written by the Worker (/push-subscribe,
+-- over Neon's HTTP endpoint), read and pruned by run(); never part of
+-- save_state's full replace.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Every notification the daily run sent (or tried to), one row per film,
+-- for the dashboard's Settings → Notifications history. channel is how it
+-- went out: 'push', 'email', or 'not sent' (every channel failed or none is
+-- set up). Appended to, never part of save_state's full replace.
+CREATE TABLE IF NOT EXISTS notification_log (
+    id SERIAL PRIMARY KEY,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    slug TEXT,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    channel TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cinema_film_matches (
     listing_key TEXT PRIMARY KEY,
     slug TEXT,
@@ -226,6 +248,41 @@ def get_meta_value(database_url: str, key: str):
         return row[0] if row else None
 
 
+# The per-film fields every showing of a film at a venue repeats. A busy
+# multiplex lists one film dozens of times a fortnight, and a CinemaGuide
+# poster link alone is ~600 characters — so they're stored on the first
+# showing of each (cinema, title) only and copied back to the rest on load.
+# Every run (and every dashboard regen) reads this table whole, so what it
+# weighs is Neon transfer quota.
+_SHOWING_FILM_FIELDS = ("synopsis", "poster_url")
+
+
+def _compact_showtimes(showtimes: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    compacted = []
+    for showing in showtimes:
+        key = (showing["cinema"], showing["title"])
+        if key in seen:
+            showing = {**showing, **dict.fromkeys(_SHOWING_FILM_FIELDS)}
+        seen.add(key)
+        compacted.append(showing)
+    return compacted
+
+
+def _expand_showtimes(showtimes: list[dict]) -> list[dict]:
+    film_fields: dict[tuple[str, str], dict] = {}
+    for showing in showtimes:
+        fields = film_fields.setdefault((showing["cinema"], showing["title"]), {})
+        for name in _SHOWING_FILM_FIELDS:
+            if fields.get(name) is None:
+                fields[name] = showing[name]
+    expanded = []
+    for showing in showtimes:
+        fields = film_fields[(showing["cinema"], showing["title"])]
+        expanded.append({**showing, **{name: showing[name] or fields[name] for name in _SHOWING_FILM_FIELDS}})
+    return expanded
+
+
 def load_state(database_url: str) -> StateDoc:
     with psycopg.connect(database_url) as conn:
         _ensure_schema(conn)
@@ -265,7 +322,7 @@ def load_state(database_url: str) -> StateDoc:
                 "SELECT listing_key, data FROM cinema_film_matches"
             ).fetchall()
         }
-        cinema_showtimes = [
+        cinema_showtimes = _expand_showtimes([
             {"cinema": cinema, "title": title, "year": year, "showtime": showtime,
              "duration_minutes": duration_minutes, "director": director, "synopsis": synopsis,
              "poster_url": poster_url, "booking_url": booking_url}
@@ -274,7 +331,7 @@ def load_state(database_url: str) -> StateDoc:
                 "SELECT cinema, title, year, showtime, duration_minutes, director, synopsis, "
                 "poster_url, booking_url FROM cinema_showtimes"
             ).fetchall()
-        ]
+        ])
 
     return StateDoc(
         schema_version=meta.get("schema_version", SCHEMA_VERSION),
@@ -369,7 +426,7 @@ def save_state(database_url: str, state: StateDoc) -> None:
                 [
                     (s["cinema"], s["title"], s["year"], s["showtime"], s["duration_minutes"],
                      s["director"], s["synopsis"], s["poster_url"], s["booking_url"])
-                    for s in state.cinema_showtimes
+                    for s in _compact_showtimes(state.cinema_showtimes)
                 ],
             )
 
@@ -409,6 +466,47 @@ def load_watch_together(database_url: str) -> dict[str, dict]:
         slug: {"status": status, "added_at": added_at, "decided_at": decided_at}
         for slug, status, added_at, decided_at in rows
     }
+
+
+def load_push_subscriptions(database_url: str) -> list[dict]:
+    """Every subscribed device, in the shape pywebpush takes."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions").fetchall()
+    return [{"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}} for endpoint, p256dh, auth in rows]
+
+
+def delete_push_subscriptions(database_url: str, endpoints: list[str]) -> None:
+    """Drops subscriptions the push service says are gone (the app was
+    removed from the home screen, or notifications turned off)."""
+    if not endpoints:
+        return
+    with psycopg.connect(database_url) as conn:
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ANY(%s)", (endpoints,))
+
+
+def log_notifications(database_url: str, rows: list[dict]) -> None:
+    """rows: {slug, title, body, channel} — see the notification_log table."""
+    if not rows:
+        return
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO notification_log (slug, title, body, channel) VALUES (%s, %s, %s, %s)",
+                [(r.get("slug"), r["title"], r["body"], r["channel"]) for r in rows],
+            )
+
+
+def load_notification_log(database_url: str, limit: int = 50) -> list[dict]:
+    """The most recent notifications, newest first."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            "SELECT sent_at, slug, title, body, channel FROM notification_log ORDER BY sent_at DESC, id DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+    return [{"sent_at": sent_at.isoformat(), "slug": slug, "title": title, "body": body, "channel": channel}
+            for sent_at, slug, title, body, channel in rows]
 
 
 def seed_pending_watch_together(database_url: str, slugs: set[str], added_at: str) -> None:

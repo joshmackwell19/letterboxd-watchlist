@@ -30,7 +30,13 @@ jobs:
           # they only exist on Cloudflare's side, this repo has no copy of
           # them, and naming them here would upload empty values over the
           # real ones.
+          #
+          # DATABASE_URL likewise: /push-subscribe stores a device's push
+          # subscription straight into Postgres (see the Worker's own comment
+          # on why that one doesn't go through a workflow).
           secrets: |
             TMDB_API_KEY
+            DATABASE_URL
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

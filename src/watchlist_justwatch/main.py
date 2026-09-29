@@ -5,6 +5,7 @@ import sys
 import time
 import traceback
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,10 +20,14 @@ from .analysis import (
     render_ranking,
 )
 from .cinemas import (
+    CINEMA_BARBICAN,
+    CINEMA_PRINCE_CHARLES,
+    CINEMA_RIVERSIDE,
+    VUE_SITES,
+    VueProgramme,
     fetch_barbican,
     fetch_prince_charles,
     fetch_riverside,
-    fetch_vue,
     MATCHER_VERSION,
     drop_past_showings,
     listing_match_key,
@@ -36,18 +41,23 @@ from .config import (
 from .custom_lists import all_source_paths, load_custom_lists, total_groups
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import (
-    connect, custom_list_source_fetch_times, custom_list_source_totals, get_meta_value,
-    load_custom_list_memberships, load_state, load_taste_inputs, load_watch_together, save_custom_list_source,
+    connect, custom_list_source_fetch_times, custom_list_source_totals, delete_push_subscriptions, get_meta_value,
+    load_custom_list_memberships, load_notification_log, load_push_subscriptions, log_notifications, load_state, load_taste_inputs, load_watch_together, save_custom_list_source,
     save_state, seed_pending_watch_together, set_watch_together_status, set_watch_together_statuses_batch,
 )
-from .diff import build_report
+from .diff import build_report, newly_streaming
 from .for_you import build_for_you
 from .html_email import (
+    DASHBOARD_URL,
     render_country_audit_html,
     render_country_audit_text,
     render_film_audit_html,
     render_film_audit_text,
-    render_report_html,
+    film_notification,
+    newly_streaming_notifications,
+    newly_streaming_subject,
+    render_newly_streaming_html,
+    render_newly_streaming_text,
     render_weekly_digest_html,
     render_weekly_digest_text,
 )
@@ -65,7 +75,7 @@ from .letterboxd import (
     get_film_details_by_tmdb_id,
 )
 from .models import FilmState, OfferRecord, WatchlistFilm
-from .notify import send_if_configured
+from .notify import push_is_configured, send_if_configured, send_push
 from .report import render_report
 from .similar import (
     discover_because_watched,
@@ -602,14 +612,16 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
 
     # Cinema showtimes: independent of the watchlist refresh above, and
     # each venue's own site is a separate point of failure — one venue's
-    # markup changing shouldn't cost the other three, so each gets its own
+    # markup changing shouldn't cost the others, so each gets its own
     # try/except and falls back to yesterday's listing for just that venue
-    # rather than the whole feature going blank for a day.
+    # rather than the whole feature going blank for a day. The Vue sites
+    # share one fetch (see VueProgramme) but still fail one site at a time.
+    vue = VueProgramme()
     cinema_fetchers = [
-        ("Prince Charles Cinema", fetch_prince_charles),
-        ("Barbican", fetch_barbican),
-        ("Vue Fulham Broadway", fetch_vue),
-        ("Riverside Studios", fetch_riverside),
+        (CINEMA_PRINCE_CHARLES, fetch_prince_charles),
+        (CINEMA_BARBICAN, fetch_barbican),
+        *((site.name, partial(vue.fetch, site)) for site in VUE_SITES),
+        (CINEMA_RIVERSIDE, fetch_riverside),
     ]
     cinema_showtimes: list[dict] = []
     for cinema_name, fetcher in cinema_fetchers:
@@ -670,6 +682,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     # section on its own, so newly-detected have/free offers accumulate into
     # a rolling log instead of a one-day snapshot. Skipped on a true first
     # run, where every offer would otherwise look "new".
+    newly_streaming_films = []
     if previous_state.films:
         today = now_iso[:10]
         previous_snapshot = compute_offer_snapshot(previous_state, config, global_subscriptions, revisitable)
@@ -685,19 +698,34 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
         current_state.recent_additions = [
             a for a in new_additions + previous_state.recent_additions if a["added_at"] >= retention_cutoff
         ]
+        newly_streaming_films = [
+            (current_state.films[slug], offers)
+            for slug, offers in newly_streaming(previous_snapshot, current_snapshot, set(config)).items()
+        ]
 
     report = build_report(previous_state, current_state, config)
     text = render_report(report, config, global_subscriptions, revisitable)
 
-    # Persist before emailing — everything the day's run actually computed
-    # (JustWatch refresh, discovery, diary) shouldn't be lost just because
-    # Resend is having an outage; the email is a nice-to-have on top.
+    # Persist before notifying — everything the day's run actually computed
+    # (JustWatch refresh, discovery, diary) shouldn't be lost just because a
+    # push service or Resend is having an outage.
     save_state(database_url, current_state)
+
+    # The notification is only for a watchlist film that's started streaming
+    # somewhere it wasn't — the day-to-day churn (new countries for a film
+    # already streaming, new watchlist additions) stays on the dashboard. A
+    # second run the same day diffs against the first's saved state, so it
+    # can't repeat what the first already sent. Sent before the dashboard is
+    # built, so today's shows up in its notification history.
+    if newly_streaming_films:
+        _notify_newly_streaming(database_url, newly_streaming_films, run_warnings, _warn)
+
     watch_together = load_watch_together(database_url)
     custom_lists = load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH)
     _refresh_custom_list_sources(database_url, custom_lists, _warn, limit=CUSTOM_LIST_SOURCES_PER_RUN)
     dashboard_data = build_dashboard_data(current_state, favorites, config, global_subscriptions, revisitable,
                                           dismissed, watch_together=watch_together,
+                                          notification_log=load_notification_log(database_url),
                                           **_custom_list_inputs(database_url, custom_lists, current_state))
     DEFAULT_DASHBOARD_PATH.write_text(render_dashboard_html(dashboard_data))
 
@@ -705,22 +733,64 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     # carried-forward-on-failure by design (see above) — the run still
     # reports success either way, so without this, "one bad day" and "this
     # has been broken for a week" look identical unless someone happens to
-    # go read stderr. Surfaced two ways: on the Actions run page directly
-    # (visible even on a day with nothing else to report), and folded into
-    # whatever email actually goes out today.
+    # go read stderr. Surfaced on the Actions run page, visible even on a day
+    # with nothing else to report; warnings alone no longer notify anyone.
     if run_warnings:
         _write_step_summary(run_warnings)
-
-    if text or run_warnings:
-        print(text or "No new availability changes.")
-        subject = "Letterboxd Watchlist — new availability" if text else "Letterboxd Watchlist — pipeline warnings"
-        email_text = _prepend_warnings(text, run_warnings)
-        html_body = render_report_html(report, config, global_subscriptions, revisitable) if text else None
-        send_if_configured(subject, email_text, html_body=html_body)
-    else:
-        print("No new availability changes.")
+    print(text or "No new availability changes.")
 
     return 0
+
+
+def _notify_newly_streaming(database_url: str, films: list[tuple], run_warnings: list[str], warn) -> None:
+    """A push notification to every device that turned them on. Email is the
+    fallback only while no device has (or if every push failed), so a film
+    starting to stream is never dropped on the floor. Either way each film
+    goes in the notification log, saying how it went out."""
+    channel = "not sent"
+    subscriptions = load_push_subscriptions(database_url) if push_is_configured() else []
+    if subscriptions:
+        sent, gone, errors = send_push(subscriptions, newly_streaming_notifications(films))
+        delete_push_subscriptions(database_url, gone)
+        for error in errors[:5]:
+            warn(f"push notification failed ({error})")
+        if sent:
+            channel = "push"
+    if channel != "push":
+        email_text = _prepend_warnings(render_newly_streaming_text(films), run_warnings)
+        if send_if_configured(newly_streaming_subject(films), email_text,
+                              html_body=render_newly_streaming_html(films)):
+            channel = "email"
+    log_notifications(database_url, [
+        {"slug": film.slug, **_log_fields(film_notification(film, offers)), "channel": channel}
+        for film, offers in films
+    ])
+
+
+def _log_fields(notification: dict) -> dict:
+    return {"title": notification["title"], "body": notification["body"]}
+
+
+def _send_test_push(database_url: str) -> int:
+    if not push_is_configured():
+        print("VAPID_PRIVATE_KEY isn't set.", file=sys.stderr)
+        return 1
+    subscriptions = load_push_subscriptions(database_url)
+    if not subscriptions:
+        print("No device has turned on notifications yet (dashboard → Settings → Notifications).", file=sys.stderr)
+        return 1
+    test = {
+        "title": "Watchlist notifications work",
+        "body": "You'll hear from it when a film on your watchlist starts streaming.",
+        "url": DASHBOARD_URL, "tag": "test",
+    }
+    sent, gone, errors = send_push(subscriptions, [test])
+    delete_push_subscriptions(database_url, gone)
+    log_notifications(database_url, [{"slug": None, **_log_fields(test), "channel": "push" if sent else "not sent"}])
+    print(f"Sent to {sent} of {len(subscriptions)} device(s); {len(gone)} gone, {len(errors)} failed.")
+    for error in errors:
+        print(f"  {error}", file=sys.stderr)
+    return 0 if sent else 1
 
 
 def _write_step_summary(warnings: list[str]) -> None:
@@ -784,6 +854,9 @@ def main() -> None:
                          help="Send the weekly roundup email (films added to/leaving your streaming "
                               "services this week, main services grouped with posters, everything else "
                               "condensed), using already-fetched state (no network calls), then exit")
+    parser.add_argument("--test-push", action="store_true",
+                         help="Send a test push notification to every device that turned them on "
+                              "(needs VAPID_PRIVATE_KEY), then exit")
     parser.add_argument("--main-services", type=Path, default=DEFAULT_MAIN_SERVICES_PATH)
     parser.add_argument("--backfill-diary", action="store_true",
                          help="One-time full watch-history backfill into state.diary — must be run "
@@ -1030,6 +1103,7 @@ def main() -> None:
         watch_together = load_watch_together(args.database_url)
         data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable, dismissed,
                                     watch_together=watch_together,
+                                    notification_log=load_notification_log(args.database_url),
                                     **_custom_list_inputs(args.database_url,
                                                           load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH), state))
         args.dashboard_path.write_text(render_dashboard_html(data))
@@ -1062,6 +1136,9 @@ def main() -> None:
                                    text, html_body=html_body)
         print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
         sys.exit(0)
+
+    if args.test_push:
+        sys.exit(_send_test_push(args.database_url))
 
     if args.weekly_digest:
         config = load_config(args.config)

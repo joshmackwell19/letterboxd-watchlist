@@ -561,6 +561,28 @@ def parse_rated_films_page(html: str) -> tuple[list[tuple[str, str | None, int]]
     return rated, _has_next_page(html)
 
 
+def parse_member_list_page(html: str) -> tuple[list[str], bool]:
+    """Usernames per row of a film's /fans/ table (members with it among
+    their four favourites), plus whether there's a next page. The same
+    person table as /members/rated/ (checked against the live page on
+    2026-09-29: 25 rows a page, sorted by username when logged out);
+    screening treats a loaded page with nobody on it as the parser failing
+    and stops."""
+    users = [match.group(1) for row in PERSON_ROW_SPLIT_RE.split(html)[1:]
+             if (match := PERSON_LINK_RE.search(row))]
+    return users, _has_next_page(html)
+
+
+FAN_COUNT_RE = re.compile(r'/fans/"[^>]*title="([\d,]+)&nbsp;fans"')
+
+
+def parse_fan_count(html: str) -> int | None:
+    """How many fans a film has, from the "7,017 fans" tooltip on its
+    sub-nav's Fans tab (on every /film/<slug>/ page, /fans/ included)."""
+    match = FAN_COUNT_RE.search(html)
+    return int(match.group(1).replace(",", "")) if match else None
+
+
 def parse_member_ratings_page(html: str) -> tuple[list[tuple[str, int]], bool]:
     """(username, half-stars) per row of a film's /members/rated/<stars>/
     table, plus whether there's a next page."""

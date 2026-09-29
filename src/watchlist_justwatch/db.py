@@ -71,6 +71,16 @@ ALTER TABLE films ADD COLUMN IF NOT EXISTS tmdb_id INTEGER;
 -- A row with a NULL slug is a listing that has no Letterboxd film —
 -- remembered so the daily run doesn't pay two network calls rediscovering
 -- that a Bing birthday screening still isn't a film.
+-- Web Push subscriptions, one per device that tapped "Turn on
+-- notifications" on the dashboard. Written by the Worker (/push-subscribe,
+-- over Neon's HTTP endpoint), read and pruned by run(); never part of
+-- save_state's full replace.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS cinema_film_matches (
     listing_key TEXT PRIMARY KEY,
     slug TEXT,
@@ -444,6 +454,23 @@ def load_watch_together(database_url: str) -> dict[str, dict]:
         slug: {"status": status, "added_at": added_at, "decided_at": decided_at}
         for slug, status, added_at, decided_at in rows
     }
+
+
+def load_push_subscriptions(database_url: str) -> list[dict]:
+    """Every subscribed device, in the shape pywebpush takes."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions").fetchall()
+    return [{"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}} for endpoint, p256dh, auth in rows]
+
+
+def delete_push_subscriptions(database_url: str, endpoints: list[str]) -> None:
+    """Drops subscriptions the push service says are gone (the app was
+    removed from the home screen, or notifications turned off)."""
+    if not endpoints:
+        return
+    with psycopg.connect(database_url) as conn:
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ANY(%s)", (endpoints,))
 
 
 def seed_pending_watch_together(database_url: str, slugs: set[str], added_at: str) -> None:

@@ -1,5 +1,5 @@
 from watchlist_justwatch.config import CountryConfig
-from watchlist_justwatch.diff import build_report, diff_film_offers
+from watchlist_justwatch.diff import build_report, diff_film_offers, newly_streaming
 from watchlist_justwatch.models import FilmState, OfferRecord
 from watchlist_justwatch.state import StateDoc
 
@@ -108,3 +108,26 @@ def test_build_report_ignores_offers_in_untracked_countries():
     report = build_report(previous_state, current_state, {"AU": AU})
 
     assert report.is_empty()
+
+
+def test_newly_streaming_flags_a_film_that_streamed_nowhere_before():
+    previous = {"a": {}, "b": {("Netflix", "GB"): "have"}}
+    current = {"a": {("MUBI", "US"): "subscription"}, "b": {("Netflix", "GB"): "have", ("MUBI", "US"): "subscription"}}
+    assert newly_streaming(previous, current, {"GB", "US"}) == {"a": {("MUBI", "US"): "subscription"}}
+
+
+def test_newly_streaming_ignores_new_watchlist_additions():
+    # No snapshot yesterday means it was just added, not that it started streaming.
+    assert newly_streaming({}, {"a": {("MUBI", "US"): "subscription"}}, {"US"}) == {}
+
+
+def test_newly_streaming_only_counts_tracked_countries():
+    # Streaming only in an untracked country yesterday is still "nowhere",
+    # and a new offer only there isn't news.
+    previous = {"a": {("MUBI", "FR"): "subscription"}, "b": {}}
+    current = {"a": {("MUBI", "FR"): "subscription", ("Netflix", "GB"): "have"}, "b": {("MUBI", "FR"): "subscription"}}
+    assert newly_streaming(previous, current, {"GB"}) == {"a": {("Netflix", "GB"): "have"}}
+
+
+def test_newly_streaming_empty_when_it_stops_streaming():
+    assert newly_streaming({"a": {("Netflix", "GB"): "have"}}, {"a": {}}, {"GB"}) == {}

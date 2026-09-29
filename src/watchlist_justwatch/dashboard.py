@@ -15,6 +15,7 @@ from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
 from .languages import LANGUAGE_NAMES, is_subtitled, language_name
+from .notify import VAPID_PUBLIC_KEY
 from .state import StateDoc
 
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
@@ -792,6 +793,7 @@ def _settings_data(config: dict[str, CountryConfig], global_subscriptions: list[
         "countries": countries,
         "refresh_worker_url": REFRESH_WORKER_URL,
         "refresh_trigger_secret": REFRESH_TRIGGER_SECRET,
+        "vapid_public_key": VAPID_PUBLIC_KEY,
     }
 
 
@@ -2354,6 +2356,15 @@ _TEMPLATE = """<!DOCTYPE html>
     <p class="muted" id="servicesSaveStatus"></p>
   </div>
   <div class="settings-block">
+    <h3 class="home-section-header">Notifications</h3>
+    <p class="muted">
+      One when a film on your watchlist starts streaming somewhere it wasn't before, and
+      nothing else. Until a device turns these on, the same news comes by email instead.
+    </p>
+    <p class="muted" id="notificationStatus"></p>
+    <button class="back-btn" id="notificationToggle" hidden style="margin-bottom:0;"></button>
+  </div>
+  <div class="settings-block">
     <h3 class="home-section-header">Refresh dashboard data</h3>
     <p class="muted">
       A new Letterboxd log already triggers this automatically within about 15 minutes — the
@@ -2808,7 +2819,107 @@ function buildServiceEditor(label, key, values, pillClass) {
   return wrap;
 }
 
+// ---------- Push notifications ----------
+//
+// iOS delivers Web Push only to a site saved to the Home Screen and opened
+// from there, and only asks for permission from a tap — so this is a button,
+// never a prompt on load. The subscription goes to the Worker, which stores
+// it in Postgres for the daily run to send to (notify.py's send_push).
+const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushRegistration = pushSupported && window.isSecureContext
+  ? navigator.serviceWorker.register('sw.js').catch(() => null)
+  : Promise.resolve(null);
+
+function vapidKeyBytes(base64url) {
+  const padded = (base64url + '='.repeat((4 - base64url.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+}
+
+async function currentPushSubscription() {
+  const registration = await pushRegistration;
+  return registration ? registration.pushManager.getSubscription() : null;
+}
+
+async function renderNotificationSettings() {
+  const status = document.getElementById('notificationStatus');
+  const button = document.getElementById('notificationToggle');
+  button.hidden = true;
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  if (!pushSupported || !(await pushRegistration)) {
+    status.textContent = isIOS && !standalone
+      ? 'On iPhone, add this page to your Home Screen first (Share → Add to Home Screen), then open it from there.'
+      : "This browser can't receive notifications from the dashboard.";
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    status.textContent = 'Notifications are blocked for this app — allow them in your device settings, then come back here.';
+    return;
+  }
+  const subscription = await currentPushSubscription();
+  status.textContent = subscription ? 'On for this device.' : 'Off for this device.';
+  button.textContent = subscription ? 'Turn off' : 'Turn on notifications';
+  button.disabled = false;
+  button.hidden = false;
+}
+
+async function togglePushNotifications() {
+  const status = document.getElementById('notificationStatus');
+  const button = document.getElementById('notificationToggle');
+  button.disabled = true;
+  try {
+    const existing = await currentPushSubscription();
+    if (existing) {
+      await searchWorker('/push-unsubscribe', { endpoint: existing.endpoint }).catch(() => null);
+      await existing.unsubscribe();
+    } else {
+      if (await Notification.requestPermission() !== 'granted') {
+        await renderNotificationSettings();
+        return;
+      }
+      const registration = await pushRegistration;
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: vapidKeyBytes(DATA.settings.vapid_public_key),
+      });
+      const result = await searchWorker('/push-subscribe', subscription.toJSON()).catch(() => null);
+      if (!result || !result.ok) {
+        // Not stored anywhere the daily run can see, so it isn't really on.
+        await subscription.unsubscribe();
+        status.textContent = "Couldn't save this device" + (result && result.error ? ' (' + result.error + ')' : '') + ' — try again later.';
+        button.disabled = false;
+        return;
+      }
+      registration.showNotification('Notifications are on', {
+        body: "You'll hear when a film on your watchlist starts streaming.",
+        icon: 'icons/icon-192.png',
+      });
+    }
+  } catch (err) {
+    status.textContent = 'Something went wrong: ' + err.message;
+    button.disabled = false;
+    return;
+  }
+  await renderNotificationSettings();
+}
+
+document.getElementById('notificationToggle').addEventListener('click', togglePushNotifications);
+
+// A notification links to ?film=<slug>. Tapped with the app closed, that's
+// the URL it opens with (handled after the last view is restored, below);
+// with it already open, the service worker hands the URL over instead.
+function openFilmFromUrl(href) {
+  const slug = new URL(href, location.href).searchParams.get('film');
+  if (slug) openFilmDetail(slug);
+}
+if (pushSupported) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    if (event.data && event.data.type === 'open-url') openFilmFromUrl(event.data.url);
+  });
+}
+
 function renderSettings() {
+  renderNotificationSettings();
   document.getElementById('settingsAccount').innerHTML =
     '<a class="film-link" target="_blank" href="' + DATA.letterboxd_watchlist_url + '">' +
     esc(DATA.settings.letterboxd_username) + '</a>';
@@ -6760,6 +6871,13 @@ if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   viewScrollPositions['view-' + saved.view] = saved.scrollY || 0;
   showView(saved.view);
 })();
+
+// Opened from a notification: the film's page, over whatever was restored.
+// The parameter is dropped straight away so a later reload doesn't reopen it.
+if (new URLSearchParams(location.search).has('film')) {
+  openFilmFromUrl(location.href);
+  history.replaceState(history.state, '', location.pathname + location.hash);
+}
 
 // ---------- Pull to refresh (mobile) ----------
 // Reload picks up whatever dashboard.html the last daily run deployed —

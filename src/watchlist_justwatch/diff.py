@@ -67,3 +67,26 @@ def build_report(previous_state: StateDoc, current_state: StateDoc, config: dict
             report.unmatched.append(current_film)
 
     return report
+
+
+def newly_streaming(
+    previous_snapshot: dict[str, dict[tuple[str, str], str]],
+    current_snapshot: dict[str, dict[tuple[str, str], str]],
+    countries: set[str],
+) -> dict[str, dict[tuple[str, str], str]]:
+    """slug -> today's {(brand, country): classification}, for each film that
+    streamed nowhere in the tracked countries yesterday and does today — the
+    only thing the daily email is sent for. Snapshots are
+    dashboard.compute_offer_snapshot's, so "streaming" means any
+    subscription/free offer on a real brand, whether or not it's a service
+    you have. A film with no previous snapshot is a new watchlist addition,
+    not a change in availability, so it never counts."""
+    result = {}
+    for slug, offers in current_snapshot.items():
+        previous = previous_snapshot.get(slug)
+        if previous is None or any(country in countries for _brand, country in previous):
+            continue
+        tracked = {key: cls for key, cls in offers.items() if key[1] in countries}
+        if tracked:
+            result[slug] = tracked
+    return result

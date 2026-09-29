@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "defusedxml>=0.7.1",
     "beautifulsoup4>=4.12",
+    "pywebpush>=2.0",
 ]
 
 [project.optional-dependencies]

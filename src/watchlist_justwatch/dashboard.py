@@ -995,6 +995,7 @@ def build_dashboard_data(
     custom_lists: list[CustomList] = (),
     list_sources: dict[str, set[str]] | None = None,
     list_totals: dict[str, int] | None = None,
+    notification_log: list[dict] | None = None,
 ) -> dict:
     watch_together = watch_together or {}
     # Already narrowed to watchlist/diary slugs by the DB (see
@@ -1050,6 +1051,9 @@ def build_dashboard_data(
 
     return {
         "last_run_at": state.last_run_at,
+        # Settings → Notifications' history (db.load_notification_log: the
+        # newest 50, a few KB).
+        "notification_log": notification_log or [],
         "letterboxd_watchlist_url": f"https://letterboxd.com/{LETTERBOXD_USERNAME}/watchlist/",
         "main_brands": main_brands,
         "home_sections": _build_home_sections(josh_state, josh_offers, films_by_slug, discovery_films,
@@ -1177,6 +1181,18 @@ _TEMPLATE = """<!DOCTYPE html>
   .icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .icon-btn:disabled:hover { color: var(--text-muted); border-color: var(--hairline-strong); }
   .settings-block { margin-bottom: 22px; }
+  .notification-log { margin-top: 14px; display: flex; flex-direction: column; }
+  .notification-log-row {
+    display: flex; gap: 10px; align-items: flex-start; padding: 10px 0;
+    border-top: 1px solid var(--hairline);
+  }
+  .notification-log-row.linked { cursor: pointer; }
+  .notification-log-row .poster-thumb, .notification-log-row .poster-placeholder { margin-top: 1px; }
+  .notification-log-text { flex: 1; min-width: 0; }
+  .notification-log-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .notification-log-body { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .notification-log-meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+  .notification-log-meta .not-sent { color: #e8a13a; }
   .settings-service-group { margin-bottom: 18px; }
   .settings-service-group > h4 {
     font-size: 12.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-muted);
@@ -2363,6 +2379,8 @@ _TEMPLATE = """<!DOCTYPE html>
     </p>
     <p class="muted" id="notificationStatus"></p>
     <button class="back-btn" id="notificationToggle" hidden style="margin-bottom:0;"></button>
+    <span class="settings-subgroup-label" style="display:block; margin-top: 20px;">History</span>
+    <div id="notificationLog" class="notification-log"></div>
   </div>
   <div class="settings-block">
     <h3 class="home-section-header">Refresh dashboard data</h3>
@@ -2918,8 +2936,51 @@ if (pushSupported) {
   });
 }
 
+// What the daily run sent (db.notification_log), newest first — each film's
+// own notification, even on a day several went out as one summary.
+function notificationDateLabel(iso) {
+  const sent = new Date(iso);
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 86400000);
+  const time = sent.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (days === 0) return 'Today, ' + time;
+  if (days === 1) return 'Yesterday, ' + time;
+  return sent.toLocaleDateString([], { day: 'numeric', month: 'short', year: days > 300 ? 'numeric' : undefined });
+}
+
+const NOTIFICATION_CHANNELS = { push: 'Push', email: 'Email', 'not sent': 'Not sent' };
+
+function renderNotificationLog() {
+  const container = document.getElementById('notificationLog');
+  container.innerHTML = '';
+  const entries = DATA.notification_log || [];
+  if (!entries.length) {
+    container.innerHTML = '<p class="muted">Nothing yet — each notification will be listed here.</p>';
+    return;
+  }
+  entries.forEach(entry => {
+    const film = entry.slug ? filmBySlug(entry.slug) : null;
+    const row = document.createElement('div');
+    row.className = 'notification-log-row' + (film ? ' linked' : '');
+    const poster = film && film.poster_url
+      ? '<img class="poster-thumb" loading="lazy" alt="" src="' + escAttr(film.poster_url) + '">'
+      : '<div class="poster-placeholder"></div>';
+    const channel = NOTIFICATION_CHANNELS[entry.channel] || entry.channel;
+    row.innerHTML = poster +
+      '<div class="notification-log-text">' +
+        '<div class="notification-log-title">' + esc(entry.title) + '</div>' +
+        '<div class="notification-log-body">' + esc(entry.body) + '</div>' +
+        '<div class="notification-log-meta">' + esc(notificationDateLabel(entry.sent_at)) + ' · ' +
+          (entry.channel === 'not sent' ? '<span class="not-sent">' + esc(channel) + '</span>' : esc(channel)) +
+        '</div>' +
+      '</div>';
+    if (film) row.addEventListener('click', () => openFilmDetail(entry.slug, 'settings'));
+    container.appendChild(row);
+  });
+}
+
 function renderSettings() {
   renderNotificationSettings();
+  renderNotificationLog();
   document.getElementById('settingsAccount').innerHTML =
     '<a class="film-link" target="_blank" href="' + DATA.letterboxd_watchlist_url + '">' +
     esc(DATA.settings.letterboxd_username) + '</a>';

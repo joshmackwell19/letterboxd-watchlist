@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     auth TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Every notification the daily run sent (or tried to), one row per film,
+-- for the dashboard's Settings → Notifications history. channel is how it
+-- went out: 'push', 'email', or 'not sent' (every channel failed or none is
+-- set up). Appended to, never part of save_state's full replace.
+CREATE TABLE IF NOT EXISTS notification_log (
+    id SERIAL PRIMARY KEY,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    slug TEXT,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    channel TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cinema_film_matches (
     listing_key TEXT PRIMARY KEY,
     slug TEXT,
@@ -471,6 +483,30 @@ def delete_push_subscriptions(database_url: str, endpoints: list[str]) -> None:
         return
     with psycopg.connect(database_url) as conn:
         conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ANY(%s)", (endpoints,))
+
+
+def log_notifications(database_url: str, rows: list[dict]) -> None:
+    """rows: {slug, title, body, channel} — see the notification_log table."""
+    if not rows:
+        return
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO notification_log (slug, title, body, channel) VALUES (%s, %s, %s, %s)",
+                [(r.get("slug"), r["title"], r["body"], r["channel"]) for r in rows],
+            )
+
+
+def load_notification_log(database_url: str, limit: int = 50) -> list[dict]:
+    """The most recent notifications, newest first."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            "SELECT sent_at, slug, title, body, channel FROM notification_log ORDER BY sent_at DESC, id DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+    return [{"sent_at": sent_at.isoformat(), "slug": slug, "title": title, "body": body, "channel": channel}
+            for sent_at, slug, title, body, channel in rows]
 
 
 def seed_pending_watch_together(database_url: str, slugs: set[str], added_at: str) -> None:

@@ -159,8 +159,12 @@ def import_corpus(database_url: str, ml_dir: str, slug_by_tmdb: dict[int, str], 
                         count += 1
             log(f"loaded {count} ratings; indexing")
             conn.execute("ALTER TABLE rater_ratings ADD PRIMARY KEY (rater_id, film_id)")
-            conn.execute("CREATE INDEX rater_ratings_film_idx ON rater_ratings (film_id)")
+            # Covering, unlike the schema's own: the similarity aggregate
+            # reads every rating of ~600 films, and fetching each from the
+            # heap took minutes a query at this size. The schema's CREATE
+            # INDEX IF NOT EXISTS leaves this one alone, being the same name.
+            conn.execute("CREATE INDEX rater_ratings_film_idx ON rater_ratings (film_id) INCLUDE (rater_id, rating)")
             db.taste_meta_set(conn, "corpus", "movielens")
-        conn.execute("ANALYZE")
+        conn.execute("VACUUM ANALYZE")  # the visibility map, so those scans stay index-only
         mu = db.refresh_rater_baselines(conn, lambda_film=LAMBDA_FILM, lambda_rater=LAMBDA_RATER, now_iso=now)
     return {"matched_in_movielens": len(josh_movies), "members": len(users), "ratings": count, "mu": mu}

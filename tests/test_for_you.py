@@ -73,18 +73,27 @@ class _FakeDb:
     def __init__(self, ids: dict[str, int]):
         self.ids = ids
         self.kinds_saved = {}
+        self.similarity_means = None
+        self.prediction_calls = []
 
     def rater_film_lookup(self, conn, slugs):
         return {s: (self.ids[s], 0.0, 10, s.title()) for s in slugs if s in self.ids}
 
     def rater_similarities(self, conn, ids, residuals, *, mu, min_overlap, film_means=None):
+        self.similarity_means = film_means
         return [(1, "sarahveen", 145, 0.37), (2, "stranger", 80, 0.44)]
 
+    def screened_pages(self, conn):
+        return {("rated-0", 5.0, 1)}
+
     def rater_predictions(self, conn, nb_ids, weights, *, mu, lambda_pred, min_support, target_film_ids=None,
-                          exclude_film_ids=None, limit=None, **_):
-        if target_film_ids is not None:   # the watchlist
+                          exclude_film_ids=None, limit=None, **kwargs):
+        self.prediction_calls.append({"targets": target_film_ids,
+                                      **{k: dict(v) if isinstance(v, dict) else v for k, v in kwargs.items()}})
+        if target_film_ids is not None:   # the watchlist, or picks being re-scored
             return [self._row(fid, nb) for fid, nb in ((self.ids["seen-watchlisted"], 0.9),
-                                                      (self.ids["wl-good"], 0.6), (self.ids["wl-ok"], 0.1))
+                                                      (self.ids["wl-good"], 0.6), (self.ids["wl-ok"], 0.1),
+                                                      (self.ids["pick-film"], 0.3), (self.ids["pick-nowhere"], 0.2))
                     if fid in target_film_ids]
         return [self._row(self.ids["pick-tv"], 0.8, kind="tv"), self._row(self.ids["pick-film"], 0.7),
                 self._row(self.ids["pick-nowhere"], 0.6)]
@@ -119,7 +128,8 @@ def test_build_for_you_assembles_the_days_payload(monkeypatch):
     slugs = ["seen-watchlisted", "wl-good", "wl-ok", "pick-tv", "pick-film", "pick-nowhere", "loved-1"]
     fake = _FakeDb({s: i for i, s in enumerate(slugs, start=100)})
     for name in ("rater_film_lookup", "rater_similarities", "rater_predictions", "set_rater_film_kinds",
-                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary"):
+                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary",
+                 "screened_pages"):
         monkeypatch.setattr(for_you.db, name, getattr(fake, name))
     monkeypatch.setattr(taste, "_ensure_mu", lambda conn: 3.5)
 
@@ -213,7 +223,8 @@ def test_build_for_you_keeps_dismissed_films_out_of_picks(monkeypatch):
     slugs = ["seen-watchlisted", "wl-good", "wl-ok", "pick-tv", "pick-film", "pick-nowhere", "loved-1"]
     fake = _FakeDb({s: i for i, s in enumerate(slugs, start=100)})
     for name in ("rater_film_lookup", "rater_similarities", "rater_predictions", "set_rater_film_kinds",
-                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary"):
+                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary",
+                 "screened_pages"):
         monkeypatch.setattr(for_you.db, name, getattr(fake, name))
     monkeypatch.setattr(taste, "_ensure_mu", lambda conn: 3.5)
     diary = {f"rated-{i}": {"personal_rating": 3.0 + (i % 5) * 0.5} for i in range(60)}
@@ -272,7 +283,7 @@ def test_build_for_you_marks_marvel_films_down_and_ranks_by_the_new_estimate(mon
     fake.set_rater_film_studios = lambda conn, studios: saved.update(studios)
     for name in ("rater_film_lookup", "rater_similarities", "rater_predictions", "set_rater_film_kinds",
                  "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary",
-                 "rater_film_studios", "set_rater_film_studios"):
+                 "rater_film_studios", "set_rater_film_studios", "screened_pages"):
         monkeypatch.setattr(for_you.db, name, getattr(fake, name))
     monkeypatch.setattr(taste, "_ensure_mu", lambda conn: 3.5)
     diary = {f"rated-{i}": {"personal_rating": 3.5, "rating": 3.5} for i in range(60)}   # offset 0 from Letterboxd
@@ -304,7 +315,8 @@ def test_build_for_you_ranks_films_that_both_show_5_stars_by_the_uncapped_estima
     slugs = ["seen-watchlisted", "wl-good", "wl-ok", "pick-tv", "pick-film", "pick-nowhere", "loved-1"]
     fake = _FakeDb({s: i for i, s in enumerate(slugs, start=100)})
     for name in ("rater_film_lookup", "rater_similarities", "rater_predictions", "set_rater_film_kinds",
-                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary"):
+                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary",
+                 "screened_pages"):
         monkeypatch.setattr(for_you.db, name, getattr(fake, name))
     monkeypatch.setattr(taste, "_ensure_mu", lambda conn: 3.5)
     diary = {f"rated-{i}": {"personal_rating": 3.5, "rating": 3.5} for i in range(60)}   # offset 0 from Letterboxd
@@ -317,3 +329,38 @@ def test_build_for_you_ranks_films_that_both_show_5_stars_by_the_uncapped_estima
     )
     assert payload["scores"]["wl-good"]["predicted"] == payload["scores"]["wl-ok"]["predicted"] == 5.0
     assert payload["watchlist"] == ["wl-ok", "wl-good"]
+
+
+def test_build_for_you_measures_everything_from_the_letterboxd_average(monkeypatch):
+    slugs = ["seen-watchlisted", "wl-good", "wl-ok", "pick-tv", "pick-film", "pick-nowhere", "loved-1",
+             "rated-0", "rated-1"]
+    fake = _FakeDb({s: i for i, s in enumerate(slugs, start=100)})
+    for name in ("rater_film_lookup", "rater_similarities", "rater_predictions", "set_rater_film_kinds",
+                 "neighbour_fans", "taste_because", "taste_fans_also_loved", "rater_corpus_summary",
+                 "screened_pages"):
+        monkeypatch.setattr(for_you.db, name, getattr(fake, name))
+    monkeypatch.setattr(taste, "_ensure_mu", lambda conn: 3.5)
+    diary = {f"rated-{i}": {"personal_rating": 4.0, "rating": 3.5} for i in range(60)}   # +0.5 on Letterboxd
+    payload, _ = build_for_you(
+        None, diary=diary, josh_watchlist={"wl-good", "wl-ok"}, known_slugs={"wl-good", "wl-ok"},
+        discovery_films={}, sarah_username=None, generated_at="t",
+        fetch_details=lambda slug: {**_details(rating=3.8), "tmdb_kind": "movie"},
+        enrich=lambda cands: ([c["slug"] for c in cands], {c["slug"]: {**c, "all_offers": [{}]} for c in cands}),
+        letterboxd_averages={"wl-good": 3.9, "wl-ok": 3.0},
+    )
+    # Josh's ratings were matched against their Letterboxd averages...
+    assert fake.similarity_means == [3.5, 3.5]
+    watchlist_call, pool_call, rescore = fake.prediction_calls[:3]
+    # ...and every scoring query re-centres on the averages known so far
+    assert watchlist_call["film_means"][fake.ids["wl-good"]] == 3.9
+    assert watchlist_call["film_means"][fake.ids["rated-1"]] == 3.5
+    # the neighbours' own offsets leave out the screened film
+    assert fake.ids["rated-0"] not in watchlist_call["offset_means"]
+    assert fake.ids["rated-1"] in watchlist_call["offset_means"]
+    # a pick's average arrives with its page, and it's scored again with it
+    assert fake.ids["pick-film"] not in pool_call["film_means"]
+    assert rescore["targets"] == [fake.ids["pick-film"], fake.ids["pick-nowhere"]]
+    assert rescore["film_means"][fake.ids["pick-film"]] == 3.8
+    # so the pick's estimate is 3.8 + 0.5 + the re-scored 0.3, not the pool's 0.7
+    assert payload["scores"]["pick-film"]["predicted"] == pytest.approx(4.6)
+    assert payload["scores"]["wl-good"]["predicted"] == pytest.approx(3.9 + 0.5 + 0.6)

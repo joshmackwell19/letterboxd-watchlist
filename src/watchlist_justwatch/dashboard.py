@@ -3931,10 +3931,10 @@ function forYouMatchesHtml() {
       '<h4>How this works</h4>' +
       '<p>From ' + FOR_YOU.corpus.ratings.toLocaleString('en-GB') + ' public ratings by ' + FOR_YOU.corpus.raters +
         ' Letterboxd members, the ' + matches.count + ' whose ratings rise and fall most like yours are your matches. ' +
-        'A film’s estimate starts from how it’s usually rated and moves with how your matches rated it, compared ' +
-        'with what each of them normally gives.</p>' +
-      '<p>It’s an estimate, not a verdict — it hasn’t yet been shown to beat simply trusting the Letterboxd ' +
-        'average, which is why the two sit side by side.</p>' +
+        'A film’s estimate starts from its Letterboxd average, adjusted for how you usually rate against it, ' +
+        'and moves with how your matches rated it against that same average.</p>' +
+      '<p>Tested on your own ratings, it predicts them more closely than the Letterboxd average alone — but ' +
+        'it’s still an estimate, not a verdict, which is why the two sit side by side.</p>' +
       '<p class="updated">Updated ' + esc(updated) + ' · ' + unscored + ' watchlist films too few matches have rated get no estimate</p>' +
     '</div>';
 }

@@ -7,8 +7,8 @@ network-free and only reads it.
 Four things, all from the same neighbours --taste-recommend uses:
 - an estimate for every watchlist film enough of them have rated — the
   film's Letterboxd average plus Josh's offset from it, plus how his
-  neighbours rate it against the corpus (film_estimate), with Marvel films
-  marked down;
+  neighbours rate it against that same average (film_estimate), with
+  Marvel films marked down;
 - new picks — films Josh hasn't seen or watchlisted, best estimate first,
   TV left out — which go through the same enrichment as a discovery
   section and ship as discovery films, so quick look, the film page and
@@ -57,14 +57,18 @@ def is_marvel(companies: list[str] | None) -> bool:
 def uncapped_estimate(nb_offset: float, *, letterboxd_average: float | None, letterboxd_offset: float,
                       corpus_base: float, marvel: bool) -> float:
     """What Josh would probably give a film: its Letterboxd average plus his
-    usual offset from it, plus how his neighbours rate it against the
-    corpus (nb_offset) — the "simple swap", the one variant --taste-eval
-    found ranks his films better than the Letterboxd average alone
-    (Spearman +0.046 [+0.028, +0.065] over 703 films, most distinctive
-    included, 2026-09-25). A film with no Letterboxd average starts from the
-    corpus's own estimate (`corpus_base`) instead. A Marvel film then loses
-    MARVEL_PENALTY of it. Not clamped to Letterboxd's 0.5–5★: films are
-    ranked on this, since the best of them all clamp to 5★ and would tie."""
+    usual offset from it, plus how his neighbours rate it against that same
+    average (nb_offset, re-centred on it — see build_for_you) — "Letterboxd
+    + twins", which --taste-eval found beats the Letterboxd average alone
+    both in stars (RMSE −0.019 [−0.031, −0.008], and against the placebo
+    that only rescales it, so it's taste rather than recalibration) and in
+    ranking (Spearman +0.044 [+0.019, +0.068]), over 711 films with the
+    most distinctive included, 667 members, 2026-09-29. A film with no
+    Letterboxd average starts from the corpus's own estimate
+    (`corpus_base`) instead, its nb_offset measured against the corpus too.
+    A Marvel film then loses MARVEL_PENALTY of it. Not clamped to
+    Letterboxd's 0.5–5★: films are ranked on this, since the best of them
+    all clamp to 5★ and would tie."""
     base = letterboxd_average + letterboxd_offset if letterboxd_average is not None else corpus_base
     value = base + nb_offset
     return value * (1 - MARVEL_PENALTY) if marvel else value
@@ -197,25 +201,41 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     mu = taste._ensure_mu(conn)
     if mu is None:
         return None, {}
-    params = taste.DEFAULT_PARAMS
+    params = taste.LETTERBOXD_DEFAULT
     seen = set(diary)
 
     film_info = db.rater_film_lookup(conn, sorted(set(mine) | seen | josh_watchlist | known_slugs))
     offset = taste.my_offset(mine, {slug: info[1] for slug, info in film_info.items()}, mu)
-    ids, residuals = taste.my_residuals(mine, film_info, mu, offset)
+    community = taste.community_ratings_from_diary(diary)
+    lb_offset = taste.letterboxd_offset(mine, community)
+    # Josh's ratings measured from each film's Letterboxd average, and the
+    # members' measured the same way, so that matching and scoring both
+    # sit on top of the average without counting its quality twice.
+    ids, residuals, means = taste.letterboxd_residuals(mine, film_info, community, lb_offset)
     neighbours = taste.select_neighbours(
-        db.rater_similarities(conn, ids, residuals, mu=mu, min_overlap=params.min_overlap), params)
+        db.rater_similarities(conn, ids, residuals, mu=mu, min_overlap=params.min_overlap, film_means=means),
+        params)
     if not neighbours:
         return None, {}
     nb_ids = [n.rater_id for n in neighbours]
     weights = [n.weight for n in neighbours]
 
-    def predictions(**kwargs) -> list[dict]:
-        return db.rater_predictions(conn, nb_ids, weights, mu=mu, lambda_pred=params.lambda_pred, **kwargs)
+    averages = {**community, **(letterboxd_averages or {})}
+    film_means = {film_info[s][0]: avg for s, avg in averages.items() if s in film_info}
+    # Each neighbour's own offset from Letterboxd, over Josh's rated films —
+    # but not the screened ones, where the members recruited through them
+    # gave his exact rating, which would pull their offsets toward his (as
+    # in --taste-eval).
+    screened = {slug for slug, _, _ in db.screened_pages(conn)}
+    offset_means = {film_info[s][0]: community[s] for s in mine
+                    if s in film_info and s in community and s not in screened}
 
-    averages = dict(letterboxd_averages or {})
+    def predictions(**kwargs) -> list[dict]:
+        return db.rater_predictions(conn, nb_ids, weights, mu=mu, lambda_pred=params.lambda_pred,
+                                    film_means=film_means, offset_means=offset_means,
+                                    lambda_rater=taste.LAMBDA_RATER, **kwargs)
+
     film_tmdb = dict(tmdb_ids or {})
-    lb_offset = taste.letterboxd_offset(mine, taste.community_ratings_from_diary(diary))
     marvel: set[int] = set()
 
     def uncapped(row: dict) -> float:
@@ -240,8 +260,16 @@ def build_for_you(conn, *, diary: dict[str, dict], josh_watchlist: set[str], kno
     for c in candidates:
         if c.get("rating") is not None:
             averages[c["slug"]] = c["rating"]
+            film_means[pool_by_slug[c["slug"]]["film_id"]] = c["rating"]
         if c.get("tmdb_id") is not None:
             film_tmdb[c["slug"]] = c["tmdb_id"]
+    # The pool came back measured against the corpus: a pick's Letterboxd
+    # average only arrives with its page. Now that the candidates have
+    # theirs, score them again against it.
+    if candidates:
+        pool_by_slug.update({row["slug"]: row for row in predictions(
+            min_support=max(params.min_support, taste.MIN_SUPPORT_PICKS),
+            target_film_ids=[pool_by_slug[c["slug"]]["film_id"] for c in candidates])})
     if companies_for is not None:
         rows = watch_rows + [pool_by_slug[c["slug"]] for c in candidates]
         marvel |= marvel_film_ids(conn, {row["film_id"]: film_tmdb.get(row["slug"]) for row in rows},

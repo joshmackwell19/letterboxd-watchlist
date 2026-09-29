@@ -212,18 +212,21 @@ def newly_streaming_notifications(films: list[tuple]) -> list[dict]:
         more = f" and {len(films) - 5} more" if len(films) > 5 else ""
         return [{"title": f"{len(films)} watchlist films now streaming", "body": names + more,
                  "url": DASHBOARD_URL, "tag": "newly-streaming"}]
-    notifications = []
-    for film, offers in films:
-        services = [brand + _PUSH_NOTES.get(classification, "")
-                    for brand, classification, _countries in _newly_streaming_services(offers)]
-        more = f" +{len(services) - 3} more" if len(services) > 3 else ""
-        notifications.append({
-            "title": f"Now streaming: {_film_title_year(film)}",
-            "body": "On " + ", ".join(services[:3]) + more,
-            "url": f"{DASHBOARD_URL}?film={film.slug}",
-            "tag": f"streaming-{film.slug}",
-        })
-    return notifications
+    return [film_notification(film, offers) for film, offers in films]
+
+
+def film_notification(film, offers: dict[tuple[str, str], str]) -> dict:
+    """One film's notification — also what the notification log records
+    for it, even on a day it went out folded into a summary."""
+    services = [brand + _PUSH_NOTES.get(classification, "")
+                for brand, classification, _countries in _newly_streaming_services(offers)]
+    more = f" +{len(services) - 3} more" if len(services) > 3 else ""
+    return {
+        "title": f"Now streaming: {_film_title_year(film)}",
+        "body": "On " + ", ".join(services[:3]) + more,
+        "url": f"{DASHBOARD_URL}?film={film.slug}",
+        "tag": f"streaming-{film.slug}",
+    }
 
 
 def render_newly_streaming_html(films: list[tuple]) -> str:

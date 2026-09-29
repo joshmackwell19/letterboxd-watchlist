@@ -1,11 +1,12 @@
 import pytest
 
-from tests.letterboxd_pages import CHALLENGE_PAGE, film_page, following_page, grid_page, members_page
+from tests.letterboxd_pages import CHALLENGE_PAGE, fans_nav, film_page, following_page, grid_page, members_page
 from watchlist_justwatch.letterboxd import (
     LetterboxdBlockedError,
     LetterboxdFetchError,
     fetch_page_strict,
     parse_following_page,
+    parse_fan_count,
     parse_member_list_page,
     parse_member_ratings_page,
     parse_rated_films_page,
@@ -114,3 +115,8 @@ def test_member_list_page_reads_usernames():
     users, has_next = parse_member_list_page(members_page([("alice", 10), ("bob", 9)], next_href="/film/x/fans/page/2/"))
     assert users == ["alice", "bob"] and has_next
     assert parse_member_list_page("<html>nothing here</html>") == ([], False)
+
+
+def test_fan_count_from_the_sub_nav():
+    assert parse_fan_count(f"<ul>{fans_nav('tar-2022', 7017)}</ul>") == 7017
+    assert parse_fan_count("<html>no nav</html>") is None

@@ -35,6 +35,12 @@ def members_page(members: list[tuple[str, int]], *, next_href: str | None = None
     return f'<table class="person-table"><tbody>{"".join(rows)}</tbody></table>{_pagination(next_href)}'
 
 
+def fans_nav(slug: str, fans: int) -> str:
+    """A film page's sub-nav, which carries the fan count."""
+    return (f'<li class="js-route-fans "> <a href="/film/{slug}/fans/" class="tooltip" '
+            f'title="{fans:,}&nbsp;fans"> Fans </a> </li>')
+
+
 def following_page(people: list[tuple[str, int]], *, next_href: str | None = None) -> str:
     """people: (username, films watched)."""
     rows = []

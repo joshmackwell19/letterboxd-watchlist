@@ -48,6 +48,7 @@ from .letterboxd import (
     LetterboxdFetchError,
     fetch_page_strict,
     parse_following_page,
+    parse_fan_count,
     parse_member_list_page,
     parse_member_ratings_page,
     parse_rated_films_page,
@@ -72,6 +73,18 @@ FOLLOWING_HITS = 2
 FANS_STARS = 0.0
 FAVOURITE_HITS = 3
 FAVOURITE_FAN_PAGES = 3
+# Rows on one /fans/ page.
+FANS_PER_PAGE = 25
+
+
+def spread_pages(fans: int, pages: int = FAVOURITE_FAN_PAGES) -> list[int]:
+    """Which /fans/ pages to screen: page 1 and the rest evenly spaced
+    through the list. Logged out, fans are listed by username, so the
+    first few pages would only ever be members whose names start with a
+    digit or an "a" — an arbitrary slice of thousands."""
+    total = max(1, -(-fans // FANS_PER_PAGE))
+    return sorted({1 + round(k * (total - 1) / pages) for k in range(pages)} if total > pages
+                  else set(range(1, total + 1)))
 
 
 def page_hits(page: tuple) -> int:
@@ -86,12 +99,14 @@ def screening_url(slug: str, stars: float, page: int) -> str:
 
 def screening_plan(my_ratings: dict[str, float], community: dict[str, float], *, favourites: list[str],
                    five_star_pages: int, screen_films: int) -> list[tuple[str, float, int]]:
-    """Every (slug, stars, page) to screen, in order: the fans of Josh's four
-    favourites, then who else gave his 5★ films 5★ (most above the
+    """Every (slug, stars, page) to screen, in order: page 1 of the fans of
+    Josh's four favourites (the rest of each favourite's spread_pages are
+    decided once page 1 says how many fans there are — see
+    scrape_raters), then who else gave his 5★ films 5★ (most above the
     Letterboxd average first, `five_star_pages` deep), then page 1 of his
     most distinctive ratings (choose_screening_films). Screening walks each
     film's pages in order and stops at its last."""
-    plan = [(slug, FANS_STARS, page) for slug in favourites for page in range(1, FAVOURITE_FAN_PAGES + 1)]
+    plan = [(slug, FANS_STARS, 1) for slug in favourites]
     fives = sorted((s for s, r in my_ratings.items() if r == 5.0),
                    key=lambda s: (-(5.0 - community.get(s, FALLBACK_CONSENSUS)), s))
     plan += [(slug, 5.0, page) for slug in fives for page in range(1, five_star_pages + 1)]
@@ -454,10 +469,26 @@ def scrape_raters(database_url: str, username: str, my_ratings: dict[str, float]
         done = {(slug, stars, page): count for slug, stars, page, count in db.screened_page_counts(conn)}
         plan = screening_plan(my_ratings, community, favourites=list(favourites),
                               five_star_pages=five_star_pages, screen_films=screen_films)
+        # A favourite's later fans pages, chosen from its fan count when its
+        # page 1 is screened, and kept so an interrupted run resumes them.
+        fan_pages: dict[str, list[int]] = dict(db.taste_meta_get(conn, "fan_pages") or {})
+
+        def with_fan_pages(pages: list[tuple[str, float, int]]) -> list[tuple[str, float, int]]:
+            out = []
+            for item in pages:
+                out.append(item)
+                if item[1] == FANS_STARS and item[2] == 1:
+                    out += [(item[0], FANS_STARS, p) for p in fan_pages.get(item[0], []) if p > 1]
+            return out
+
+        plan = with_fan_pages(plan)
         todo = [page for page in plan if page not in done]
         last_page: set[tuple[str, float]] = set()   # (slug, stars) whose final page has been seen
         screened = 0
-        for slug, stars, page in plan:
+        i = 0
+        while i < len(plan):
+            slug, stars, page = plan[i]
+            i += 1
             if (slug, stars, page) in done:
                 # a page that wasn't full was the film's last
                 if done[(slug, stars, page)] is not None and done[(slug, stars, page)] < 25:
@@ -474,11 +505,21 @@ def scrape_raters(database_url: str, username: str, my_ratings: dict[str, float]
                     return "failed"
                 hits = {u: FAVOURITE_HITS for u in users if u.lower() != username.lower()}
                 count = len(users)
+                if page == 1 and slug not in fan_pages:
+                    fans = parse_fan_count(html) if html else None
+                    fan_pages[slug] = spread_pages(fans) if fans else [1]
+                    db.taste_meta_set(conn, "fan_pages", fan_pages)
+                    later = [(slug, FANS_STARS, p) for p in fan_pages[slug] if p > 1]
+                    plan[i:i] = later
+                    todo += later
+                    log(f"{slug}: {fans if fans else 'an unknown number of'} fans — screening pages "
+                        f"{', '.join(map(str, fan_pages[slug]))}.")
             else:
                 members, has_next = parse_member_ratings_page(html) if html else ([], False)
                 hits = screen_hits(members, round(stars * 2), {username})
                 count = len(members)
-            if not has_next:
+            if not has_next and stars != FANS_STARS:
+                # Fans pages are chosen from the count, not walked in order.
                 last_page.add((slug, stars))
             screened_at = now().isoformat()
             # One transaction, so an interruption can't leave hits counted

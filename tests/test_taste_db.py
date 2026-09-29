@@ -11,7 +11,7 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from tests.letterboxd_pages import CHALLENGE_PAGE, following_page, grid_page, members_page
+from tests.letterboxd_pages import CHALLENGE_PAGE, fans_nav, following_page, grid_page, members_page
 from watchlist_justwatch import db, taste
 from watchlist_justwatch.letterboxd import LetterboxdBlockedError
 
@@ -109,6 +109,30 @@ def test_a_block_stops_the_run_keeps_progress_and_starts_the_cooldown(conn):
     assert retry.requested == []
     assert _scrape(retry, now=NOW + timedelta(hours=25)) == "done"
     assert retry.requested == [f"{LB}/stranger/films/page/1/", f"{LB}/stranger/films/page/2/"]
+
+
+def test_favourite_fans_are_screened_on_pages_spread_through_the_list(conn):
+    pages = _world()
+    fans = f"{LB}/film/cult-film/fans/"
+    pages.pages[fans] = fans_nav("cult-film", 250) + members_page([("fan1", 10)], next_href="/film/cult-film/fans/page/2/")
+    pages.pages[f"{fans}page/4/"] = members_page([("fan4", 8)], next_href="/film/cult-film/fans/page/5/")
+    pages.pages[f"{fans}page/7/"] = members_page([("fan7", 9), ("stranger", 10)], next_href="/film/cult-film/fans/page/8/")
+    run = lambda p, now: taste.scrape_raters(
+        URL, "josh", {"cult-film": 5.0, "overrated": 1.5}, {"cult-film": 3.2, "overrated": 4.3},
+        screen_films=2, max_raters=0, fetcher=_fetcher(p), log=lambda msg: None, now=lambda: now,
+        favourites=["cult-film"])
+    assert run(pages, NOW) == "done"
+    screened = [u for u in pages.requested if "/fans/" in u]
+    assert screened == [fans, f"{fans}page/4/", f"{fans}page/7/"]
+    assert db.taste_meta_get(conn, "fan_pages") == {"cult-film": [1, 4, 7]}
+    hits = dict(conn.execute("SELECT username, screen_hits FROM raters").fetchall())
+    assert hits["fan7"] == taste.FAVOURITE_HITS
+    assert hits["stranger"] == taste.FAVOURITE_HITS + 2   # a fan, and on both rating lists
+
+    # A later run has nothing left to screen, and doesn't re-read the count.
+    again = _world()
+    assert run(again, NOW + timedelta(hours=1)) == "done"
+    assert not [u for u in again.requested if "/fans/" in u]
 
 
 def test_challenge_page_counts_as_a_block(conn):

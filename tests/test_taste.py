@@ -6,6 +6,7 @@ from tests.letterboxd_pages import film_page, grid_page
 from watchlist_justwatch.letterboxd import LetterboxdBlockedError
 from watchlist_justwatch.taste import (
     FANS_STARS,
+    spread_pages,
     FAVOURITE_HITS,
     FilmKindLookup,
     Recruitment,
@@ -485,12 +486,21 @@ def test_screening_plan_orders_favourites_then_five_stars_then_distinctive_witho
     mine = {"fav": 5.0, "loved-classic": 5.0, "loved-oddity": 5.0, "hated": 1.0, "fine": 3.5}
     community = {"fav": 4.0, "loved-classic": 4.6, "loved-oddity": 3.2, "hated": 4.1, "fine": 3.5}
     plan = screening_plan(mine, community, favourites=["fav"], five_star_pages=2, screen_films=2)
-    assert plan[:3] == [("fav", FANS_STARS, 1), ("fav", FANS_STARS, 2), ("fav", FANS_STARS, 3)]
+    # only page 1 of the fans: the rest are chosen once it gives the count
+    assert plan[:1] == [("fav", FANS_STARS, 1)]
     # 5★ films furthest above their average first, two pages each
-    assert plan[3:9] == [("loved-oddity", 5.0, 1), ("loved-oddity", 5.0, 2), ("fav", 5.0, 1), ("fav", 5.0, 2),
+    assert plan[1:7] == [("loved-oddity", 5.0, 1), ("loved-oddity", 5.0, 2), ("fav", 5.0, 1), ("fav", 5.0, 2),
                          ("loved-classic", 5.0, 1), ("loved-classic", 5.0, 2)]
     # the two most distinctive: hated (3.1 off) and loved-oddity (already planned, not repeated)
-    assert plan[9:] == [("hated", 1.0, 1)]
+    assert plan[7:] == [("hated", 1.0, 1)]
+
+
+def test_fans_pages_spread_through_the_list():
+    assert spread_pages(7017) == [1, 94, 188]   # 281 pages
+    assert spread_pages(250) == [1, 4, 7]       # 10 pages
+    assert spread_pages(60) == [1, 2, 3]        # every page, when there are only 3
+    assert spread_pages(30) == [1, 2]
+    assert spread_pages(5) == [1]
 
 
 def test_screening_urls():

@@ -278,6 +278,20 @@ def test_cinema_listings_drops_showings_that_have_already_started():
     assert [s["showtime"] for s in rows[0]["showtimes"]] == ["2026-09-10T20:00:00"]
 
 
+def test_cinema_listings_counts_a_resolved_watchlist_film_as_a_watchlist_match():
+    # "25th Anniversary: Donnie Darko" matches no watchlist title, but the
+    # film run() resolved it to is on the watchlist — so it's that film.
+    state = StateDoc(films={"donnie-darko": _film("donnie-darko", title="Donnie Darko", year=2001)})
+    state.cinema_showtimes = [{**_showing("25th Anniversary: Donnie Darko", 2001, "2026-09-09T18:00:00",
+                                          cinema="BFI IMAX"), "tmdb_id": 141}]
+    state.cinema_matches = {"tmdb:141": {"slug": "donnie-darko", "tmdb_id": 141}}
+
+    rows = _cinema_listings(state, now=_CINEMA_NOW)
+
+    assert rows[0]["matched_slug"] == "donnie-darko"
+    assert rows[0]["title"] == "Donnie Darko"
+
+
 # ---------- _build_home_sections director/cast section cap ----------
 
 def _discovery_entry(slug: str) -> dict:

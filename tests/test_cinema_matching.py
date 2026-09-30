@@ -15,6 +15,7 @@ from watchlist_justwatch.cinemas import (
     listing_match_key,
     match_watchlist_film,
     resolve_listing_to_letterboxd,
+    showing_match_key,
 )
 from watchlist_justwatch.models import FilmState
 
@@ -141,6 +142,25 @@ def test_a_listing_resolves_to_its_letterboxd_film():
     assert match["year"] == 2016
     assert match["rating"] == 4.1
     assert match["director"] == "Damien Chazelle"
+
+
+def test_a_listing_already_matched_to_tmdb_skips_the_search():
+    # Clusterflick's BFI listings arrive matched: a title no search would
+    # agree with ("25th Anniversary: ...") still resolves, by the id.
+    match = resolve_listing_to_letterboxd(
+        "IMAX exclusive previews: La La Land", 2016, tmdb_id=313369,
+        search_movie=lambda *_: pytest.fail("searched"),
+        film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
+
+    assert match["slug"] == "la-la-land"
+    assert match["tmdb_id"] == 313369
+    assert match["year"] == 2016
+
+
+def test_a_listing_with_a_tmdb_id_is_keyed_by_it():
+    showing = {"title": "Ganja and Hess + intro by the curator", "year": 1973, "tmdb_id": 42}
+    assert showing_match_key(showing) == showing_match_key({**showing, "title": "Ganja and Hess"}) == "tmdb:42"
+    assert showing_match_key({**showing, "tmdb_id": None}) == listing_match_key(showing["title"], 1973)
 
 
 def test_a_year_qualified_miss_is_retried_without_the_year():

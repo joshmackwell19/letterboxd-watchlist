@@ -111,6 +111,9 @@ CREATE TABLE IF NOT EXISTS cinema_showtimes (
     poster_url TEXT,
     booking_url TEXT
 );
+-- The TMDB id a listing's source already matched it to (Clusterflick's, for
+-- the BFI venues) — see cinemas.showing_match_key. NULL for every other venue.
+ALTER TABLE cinema_showtimes ADD COLUMN IF NOT EXISTS tmdb_id INTEGER;
 -- Cached members of each Letterboxd list a custom list sources from (see
 -- custom_lists.py). Written per-source by _refresh_custom_list_sources,
 -- deliberately NOT part of save_state's full replace (same as
@@ -325,11 +328,11 @@ def load_state(database_url: str) -> StateDoc:
         cinema_showtimes = _expand_showtimes([
             {"cinema": cinema, "title": title, "year": year, "showtime": showtime,
              "duration_minutes": duration_minutes, "director": director, "synopsis": synopsis,
-             "poster_url": poster_url, "booking_url": booking_url}
+             "poster_url": poster_url, "booking_url": booking_url, "tmdb_id": tmdb_id}
             for (cinema, title, year, showtime, duration_minutes, director, synopsis, poster_url,
-                 booking_url) in conn.execute(
+                 booking_url, tmdb_id) in conn.execute(
                 "SELECT cinema, title, year, showtime, duration_minutes, director, synopsis, "
-                "poster_url, booking_url FROM cinema_showtimes"
+                "poster_url, booking_url, tmdb_id FROM cinema_showtimes"
             ).fetchall()
         ])
 
@@ -422,10 +425,11 @@ def save_state(database_url: str, state: StateDoc) -> None:
         if state.cinema_showtimes:
             conn.cursor().executemany(
                 "INSERT INTO cinema_showtimes (cinema, title, year, showtime, duration_minutes, "
-                "director, synopsis, poster_url, booking_url) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "director, synopsis, poster_url, booking_url, tmdb_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 [
                     (s["cinema"], s["title"], s["year"], s["showtime"], s["duration_minutes"],
-                     s["director"], s["synopsis"], s["poster_url"], s["booking_url"])
+                     s["director"], s["synopsis"], s["poster_url"], s["booking_url"], s.get("tmdb_id"))
                     for s in _compact_showtimes(state.cinema_showtimes)
                 ],
             )

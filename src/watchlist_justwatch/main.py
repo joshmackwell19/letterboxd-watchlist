@@ -23,14 +23,16 @@ from .cinemas import (
     CINEMA_BARBICAN,
     CINEMA_PRINCE_CHARLES,
     CINEMA_RIVERSIDE,
+    CLUSTERFLICK_VENUES,
     VUE_SITES,
     VueProgramme,
     fetch_barbican,
+    fetch_clusterflick,
     fetch_prince_charles,
     fetch_riverside,
     MATCHER_VERSION,
     drop_past_showings,
-    listing_match_key,
+    showing_match_key,
     match_watchlist_film,
     resolve_listing_to_letterboxd,
 )
@@ -230,18 +232,16 @@ def _resolved_cinema_matches(
     # showings rather than the one-off matinee that happens to scrape first.
     showings_per_key: dict[str, int] = {}
     for showing in showtimes:
-        showings_per_key[listing_match_key(showing["title"], showing["year"])] = (
-            showings_per_key.get(listing_match_key(showing["title"], showing["year"]), 0) + 1)
-    showtimes = sorted(
-        showtimes,
-        key=lambda s: -showings_per_key[listing_match_key(s["title"], s["year"])])
+        key = showing_match_key(showing)
+        showings_per_key[key] = showings_per_key.get(key, 0) + 1
+    showtimes = sorted(showtimes, key=lambda s: -showings_per_key[showing_match_key(s)])
 
     for showing in showtimes:
         # Already on the watchlist: that match is better than anything this
         # could find, and it's recomputed at build time anyway.
         if match_watchlist_film(showing["title"], showing["year"], films):
             continue
-        key = listing_match_key(showing["title"], showing["year"])
+        key = showing_match_key(showing)
         if key in resolved:
             continue
 
@@ -269,7 +269,7 @@ def _resolved_cinema_matches(
         budget -= 1
         try:
             match = resolve_listing_to_letterboxd(
-                showing["title"], showing["year"],
+                showing["title"], showing["year"], tmdb_id=showing.get("tmdb_id"),
                 search_movie=_tmdb_search_movie,
                 film_details_by_tmdb_id=get_film_details_by_tmdb_id,
             )
@@ -620,6 +620,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     cinema_fetchers = [
         (CINEMA_PRINCE_CHARLES, fetch_prince_charles),
         (CINEMA_BARBICAN, fetch_barbican),
+        *((name, partial(fetch_clusterflick, name)) for name in CLUSTERFLICK_VENUES),
         *((site.name, partial(vue.fetch, site)) for site in VUE_SITES),
         (CINEMA_RIVERSIDE, fetch_riverside),
     ]

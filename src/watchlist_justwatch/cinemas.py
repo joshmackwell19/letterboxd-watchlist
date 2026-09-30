@@ -14,6 +14,9 @@ from .models import FilmState
 
 CINEMA_PRINCE_CHARLES = "Prince Charles Cinema"
 CINEMA_BARBICAN = "Barbican"
+CINEMA_BFI_SOUTHBANK = "BFI Southbank"
+CINEMA_BFI_IMAX = "BFI IMAX"
+CINEMA_GATE = "The Gate Notting Hill"
 CINEMA_VUE_FULHAM = "Vue Fulham Broadway"
 CINEMA_VUE_SHEPHERDS_BUSH = "Vue Shepherd's Bush"
 CINEMA_VUE_WEST_END = "Vue West End"
@@ -21,8 +24,9 @@ CINEMA_VUE_PICCADILLY = "Vue Piccadilly"
 CINEMA_RIVERSIDE = "Riverside Studios"
 # Every venue, in the order the dashboard's venue filter lists them.
 CINEMA_VENUES = (
-    CINEMA_PRINCE_CHARLES, CINEMA_BARBICAN, CINEMA_VUE_FULHAM, CINEMA_VUE_SHEPHERDS_BUSH,
-    CINEMA_VUE_WEST_END, CINEMA_VUE_PICCADILLY, CINEMA_RIVERSIDE,
+    CINEMA_PRINCE_CHARLES, CINEMA_BARBICAN, CINEMA_BFI_SOUTHBANK, CINEMA_BFI_IMAX, CINEMA_GATE,
+    CINEMA_VUE_FULHAM, CINEMA_VUE_SHEPHERDS_BUSH, CINEMA_VUE_WEST_END, CINEMA_VUE_PICCADILLY,
+    CINEMA_RIVERSIDE,
 )
 
 _HEADERS = {
@@ -514,6 +518,71 @@ def _utc_iso_to_london(value: str | None) -> str | None:
     return parsed.astimezone(LONDON).replace(tzinfo=None).isoformat()
 
 
+# ---------- BFI Southbank, BFI IMAX, The Gate (via Clusterflick) ----------
+# whatson.bfi.org.uk, where both venues' programmes live, answers every
+# datacenter IP with the same Cloudflare challenge as Vue, and CinemaGuide
+# doesn't carry the IMAX at all. Clusterflick (clusterflick.com), an
+# open-source London listings aggregator, publishes each venue's programme
+# as a JSON file in a daily GitHub release under CC BY 4.0, which asks for
+# the credit line the Cinemas tab carries. Its `themoviedb`/`themoviedbs`
+# objects are TMDB's metadata and excluded from that grant, so all that's
+# kept of them is the id — as a join key, which the licence suggests, and
+# which spares resolve_listing_to_letterboxd a title search.
+#
+# Clusterflick covers 400+ London venues in this one schema, so any of them
+# is a line in CLUSTERFLICK_VENUES (its id is the venue's file name in the
+# release). The Gate is a Picturehouse; picturehouses.com isn't blocked, but
+# one more parser to maintain would buy nothing over this one.
+
+CLUSTERFLICK_URL = "https://github.com/clusterflick/data-transformed/releases/latest/download/{venue_id}"
+CLUSTERFLICK_VENUES = {
+    CINEMA_BFI_SOUTHBANK: "bfi.org.uk-southbank",
+    CINEMA_BFI_IMAX: "bfi.org.uk-imax",
+    CINEMA_GATE: "picturehouses.com-the-gate",
+}
+# Talks, workshops and quizzes share the programme but aren't screenings.
+_CLUSTERFLICK_SKIPPED_CATEGORIES = {"talk", "workshop", "quiz"}
+
+
+def fetch_clusterflick(cinema: str) -> list[dict]:
+    showings = _parse_clusterflick(
+        _get_json(CLUSTERFLICK_URL.format(venue_id=CLUSTERFLICK_VENUES[cinema])), cinema)
+    if not showings:
+        # A whole programme with nothing on is a broken release, not a
+        # quiet month — fail so yesterday's is kept.
+        raise CinemaFetchError(f"Clusterflick returned no showings for {cinema}")
+    return showings
+
+
+def _parse_clusterflick(data: list[dict], cinema: str) -> list[dict]:
+    showings: list[dict] = []
+    for event in data:
+        title = event.get("title")
+        if not title or event.get("category") in _CLUSTERFLICK_SKIPPED_CATEGORIES:
+            continue
+        overview = event.get("overview") or {}
+        year = str(overview.get("year") or "")
+        duration_ms = overview.get("duration")
+        # A double bill lists several films under `themoviedbs`, and has no
+        # one id to resolve to.
+        tmdb_id = (event.get("themoviedb") or {}).get("id")
+        for performance in event.get("performances") or []:
+            timestamp = performance.get("time")
+            if not isinstance(timestamp, (int, float)):
+                continue
+            showtime = datetime.fromtimestamp(timestamp / 1000, LONDON).replace(tzinfo=None, microsecond=0)
+            showings.append({
+                "cinema": cinema, "title": title, "year": int(year) if year.isdigit() else None,
+                "showtime": showtime.isoformat(),
+                "duration_minutes": round(duration_ms / 60000) if duration_ms else None,
+                "director": ", ".join(overview.get("directors") or []) or None,
+                "synopsis": None, "poster_url": None,
+                "booking_url": performance.get("bookingUrl") or event.get("url"),
+                "tmdb_id": tmdb_id,
+            })
+    return showings
+
+
 # ---------- Riverside Studios ----------
 # Their listing page only ever fetches its cards via a JS-driven,
 # encrypted filter token (not something derivable without running their
@@ -686,8 +755,17 @@ def listing_match_key(title: str, year: int | None) -> str:
     return f"{_normalize_title(cleaned)}|{title_year or year or ''}"
 
 
+def showing_match_key(showing: dict) -> str:
+    """listing_match_key for a stored showing — except that one its source
+    already matched to TMDB (Clusterflick's) is keyed by that id, which is
+    a firmer identity than any title, and resolves without a search."""
+    if showing.get("tmdb_id"):
+        return f"tmdb:{showing['tmdb_id']}"
+    return listing_match_key(showing["title"], showing["year"])
+
+
 def resolve_listing_to_letterboxd(
-    title: str, year: int | None, *, search_movie, film_details_by_tmdb_id,
+    title: str, year: int | None, *, search_movie, film_details_by_tmdb_id, tmdb_id: int | None = None,
 ) -> dict | None:
     """The Letterboxd film a cinema listing is showing, or None.
 
@@ -702,27 +780,32 @@ def resolve_listing_to_letterboxd(
     Returns None for the listings that genuinely aren't films: an André Rieu
     concert or a Bing birthday screening has no Letterboxd entry, and
     guessing one would be worse than leaving the listing plain.
+
+    A listing that arrives with its TMDB id (see showing_match_key) skips
+    the search, and the title check that guards it, altogether.
     """
     cleaned, title_year = clean_listing_title(title)
-    if not cleaned:
-        return None
     year = title_year or year
-
-    movie = search_movie(cleaned, year)
-    # A repertory listing's year is often the screening's, not the film's, so
-    # a year-qualified miss is retried without it rather than given up on.
-    if movie is None and year is not None:
-        movie = search_movie(cleaned, None)
-    if movie is None:
-        return None
-
-    # TMDB matches loosely — it will answer *something* for a concert film's
-    # title. Requiring the titles to agree once normalized is what keeps
-    # "André Rieu's 2026 Summer Concert" from resolving to a real film.
-    if _normalize_title(movie.get("title") or "") != _normalize_title(cleaned):
-        alt = _normalize_title(movie.get("original_title") or "")
-        if alt != _normalize_title(cleaned):
+    if tmdb_id is not None:
+        movie = {"id": tmdb_id, "title": cleaned or title, "release_date": str(year or "")}
+    else:
+        if not cleaned:
             return None
+        movie = search_movie(cleaned, year)
+        # A repertory listing's year is often the screening's, not the film's, so
+        # a year-qualified miss is retried without it rather than given up on.
+        if movie is None and year is not None:
+            movie = search_movie(cleaned, None)
+        if movie is None:
+            return None
+
+        # TMDB matches loosely — it will answer *something* for a concert film's
+        # title. Requiring the titles to agree once normalized is what keeps
+        # "André Rieu's 2026 Summer Concert" from resolving to a real film.
+        if _normalize_title(movie.get("title") or "") != _normalize_title(cleaned):
+            alt = _normalize_title(movie.get("original_title") or "")
+            if alt != _normalize_title(cleaned):
+                return None
 
     details = film_details_by_tmdb_id(movie["id"])
     if details is None or not details.get("slug"):

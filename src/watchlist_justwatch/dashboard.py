@@ -10,7 +10,7 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import CINEMA_VENUES, drop_past_showings, listing_match_key, match_watchlist_film
+from .cinemas import CINEMA_VENUES, drop_past_showings, match_watchlist_film, showing_match_key
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
@@ -577,6 +577,18 @@ def _format_cinema_datetime(iso: str) -> str:
     return dt.strftime("%a %-d %b") + ", " + dt.strftime("%-I:%M%p").lower()
 
 
+def _watchlist_slug_for_showing(showing: dict, state: StateDoc) -> str | None:
+    """The tracked film a showing is of: by title, or — where the venue's
+    title is one the watchlist can't match ("25th Anniversary: Donnie
+    Darko") — by the Letterboxd film run() resolved the listing to."""
+    slug = match_watchlist_film(showing["title"], showing["year"], state.films)
+    if slug is None:
+        resolved = state.cinema_matches.get(showing_match_key(showing)) or {}
+        if resolved.get("slug") in state.films:
+            slug = resolved["slug"]
+    return slug
+
+
 def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> dict[str, dict]:
     """Every watchlist film with an upcoming screening at one of the
     cinemas in cinemas.py, mapped to its single soonest showing — shared
@@ -585,7 +597,7 @@ def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> di
     soonest_by_slug: dict[str, dict] = {}
 
     for showing in drop_past_showings(state.cinema_showtimes, now):
-        slug = match_watchlist_film(showing["title"], showing["year"], state.films)
+        slug = _watchlist_slug_for_showing(showing, state)
         if slug is None or slug not in state.films:
             continue
         current = soonest_by_slug.get(slug)
@@ -922,14 +934,13 @@ def _cinema_listings(state: StateDoc, now: datetime | None = None) -> list[dict]
     # Only what's still to come — a film whose last showing has passed drops
     # off the tab entirely, since no showtimes means no row.
     for showing in drop_past_showings(state.cinema_showtimes, now):
-        slug = match_watchlist_film(showing["title"], showing["year"], state.films)
+        slug = _watchlist_slug_for_showing(showing, state)
         # Everything the watchlist can't name — most of the programme — falls
         # back to the Letterboxd film run() resolved for it. That match is
         # just as good an identity for merging across venues, so it groups
         # the same way; what it doesn't bring is JustWatch offers, since
         # nothing has ever looked the film up.
-        resolved = None if slug else (state.cinema_matches.get(
-            listing_match_key(showing["title"], showing["year"])) or None)
+        resolved = None if slug else (state.cinema_matches.get(showing_match_key(showing)) or None)
         if resolved is not None and not resolved.get("slug"):
             resolved = None
         group_slug = slug or (resolved["slug"] if resolved else None)
@@ -1341,6 +1352,8 @@ _TEMPLATE = """<!DOCTYPE html>
     color: var(--text-muted); letter-spacing: 0.01em;
   }
   .cinema-day-heading:first-child { margin-top: 0; }
+  .cinema-credit { margin: 20px 0 8px; font-size: 11px; color: var(--text-faint); }
+  .cinema-credit a { color: inherit; }
   .sarah-filter { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
   .poster-thumb {
     width: 32px; height: 47px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
@@ -2401,6 +2414,12 @@ _TEMPLATE = """<!DOCTYPE html>
 <section class="view" id="view-cinemas">
   <div class="active-filters" id="activeCinemaFilters"></div>
   <div id="cinemasGrid" class="film-cards"></div>
+  <!-- CC BY 4.0 asks for this wherever the data appears; filtering to
+       upcoming showings and cleaning titles counts as changing it. -->
+  <p class="cinema-credit">BFI Southbank, BFI IMAX and The Gate screening data from
+    <a href="https://clusterflick.com" target="_blank" rel="noopener">Clusterflick</a>
+    (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>),
+    filtered to upcoming showings.</p>
 </section>
 
 <section class="view" id="view-review">

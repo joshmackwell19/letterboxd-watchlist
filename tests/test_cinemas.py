@@ -6,6 +6,7 @@ from watchlist_justwatch import cinemas
 from watchlist_justwatch.cinemas import (
     CinemaFetchError,
     _parse_cinemaguide,
+    _parse_clusterflick,
     _parse_barbican,
     _parse_barbican_time,
     _parse_hr_min_duration,
@@ -317,6 +318,51 @@ def test_vue_programme_raises_with_both_reasons_when_both_routes_fail(monkeypatc
     for site in VUE_SITES:
         with pytest.raises(CinemaFetchError, match="direct 403.*no Vue showings"):
             programme.fetch(site)
+
+
+# ---------- BFI via Clusterflick ----------
+
+_CLUSTERFLICK_DATA = [
+    {
+        "category": "movie", "title": "25th Anniversary: Donnie Darko",
+        "overview": {"directors": ["Richard Kelly"], "duration": 6780000, "year": "2001"},
+        "performances": [
+            # 18:30 BST
+            {"time": 1790789400000, "bookingUrl": "https://whatson.bfi.org.uk/imax/Online/a"},
+            {"time": None},
+        ],
+        "themoviedb": {"id": 141, "title": "Donnie Darko", "summary": "TMDB's, not ours to store."},
+        "url": "https://whatson.bfi.org.uk/imax/Online/b",
+    },
+    {"category": "talk", "title": "In Conversation", "overview": {},
+     "performances": [{"time": 1790789400000}]},
+    {"category": "multiple-movies", "title": "Double Bill", "overview": {"year": ""},
+     "themoviedbs": [{"id": 1}, {"id": 2}],
+     "performances": [{"time": 1790789400000}], "url": "https://whatson.bfi.org.uk/c"},
+]
+
+
+def test_parse_clusterflick_keeps_only_its_own_fields_and_the_tmdb_id():
+    s, double_bill = _parse_clusterflick(_CLUSTERFLICK_DATA, "BFI IMAX")
+    assert s == {
+        "cinema": "BFI IMAX", "title": "25th Anniversary: Donnie Darko", "year": 2001,
+        "showtime": "2026-09-30T18:30:00", "duration_minutes": 113, "director": "Richard Kelly",
+        # TMDB's metadata is excluded from Clusterflick's licence — only the
+        # id is kept, as a join key.
+        "synopsis": None, "poster_url": None,
+        "booking_url": "https://whatson.bfi.org.uk/imax/Online/a", "tmdb_id": 141,
+    }
+    # No single film to resolve to; the event's own page when a
+    # performance has no booking link.
+    assert double_bill["tmdb_id"] is None
+    assert double_bill["year"] is None
+    assert double_bill["booking_url"] == "https://whatson.bfi.org.uk/c"
+
+
+def test_fetch_clusterflick_fails_on_an_empty_programme(monkeypatch):
+    monkeypatch.setattr(cinemas, "_get_json", lambda url, **_: [])
+    with pytest.raises(CinemaFetchError, match="no showings for BFI Southbank"):
+        cinemas.fetch_clusterflick("BFI Southbank")
 
 
 # ---------- drop_past_showings ----------

@@ -2416,7 +2416,7 @@ _TEMPLATE = """<!DOCTYPE html>
   <div id="cinemasGrid" class="film-cards"></div>
   <!-- CC BY 4.0 asks for this wherever the data appears; filtering to
        upcoming showings and cleaning titles counts as changing it. -->
-  <p class="cinema-credit">BFI Southbank and BFI IMAX screening data from
+  <p class="cinema-credit">BFI Southbank, BFI IMAX and The Gate screening data from
     <a href="https://clusterflick.com" target="_blank" rel="noopener">Clusterflick</a>
     (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>),
     filtered to upcoming showings.</p>

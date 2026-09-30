@@ -16,6 +16,7 @@ CINEMA_PRINCE_CHARLES = "Prince Charles Cinema"
 CINEMA_BARBICAN = "Barbican"
 CINEMA_BFI_SOUTHBANK = "BFI Southbank"
 CINEMA_BFI_IMAX = "BFI IMAX"
+CINEMA_GATE = "The Gate Notting Hill"
 CINEMA_VUE_FULHAM = "Vue Fulham Broadway"
 CINEMA_VUE_SHEPHERDS_BUSH = "Vue Shepherd's Bush"
 CINEMA_VUE_WEST_END = "Vue West End"
@@ -23,8 +24,9 @@ CINEMA_VUE_PICCADILLY = "Vue Piccadilly"
 CINEMA_RIVERSIDE = "Riverside Studios"
 # Every venue, in the order the dashboard's venue filter lists them.
 CINEMA_VENUES = (
-    CINEMA_PRINCE_CHARLES, CINEMA_BARBICAN, CINEMA_BFI_SOUTHBANK, CINEMA_BFI_IMAX, CINEMA_VUE_FULHAM,
-    CINEMA_VUE_SHEPHERDS_BUSH, CINEMA_VUE_WEST_END, CINEMA_VUE_PICCADILLY, CINEMA_RIVERSIDE,
+    CINEMA_PRINCE_CHARLES, CINEMA_BARBICAN, CINEMA_BFI_SOUTHBANK, CINEMA_BFI_IMAX, CINEMA_GATE,
+    CINEMA_VUE_FULHAM, CINEMA_VUE_SHEPHERDS_BUSH, CINEMA_VUE_WEST_END, CINEMA_VUE_PICCADILLY,
+    CINEMA_RIVERSIDE,
 )
 
 _HEADERS = {
@@ -516,7 +518,7 @@ def _utc_iso_to_london(value: str | None) -> str | None:
     return parsed.astimezone(LONDON).replace(tzinfo=None).isoformat()
 
 
-# ---------- BFI Southbank / BFI IMAX (via Clusterflick) ----------
+# ---------- BFI Southbank, BFI IMAX, The Gate (via Clusterflick) ----------
 # whatson.bfi.org.uk, where both venues' programmes live, answers every
 # datacenter IP with the same Cloudflare challenge as Vue, and CinemaGuide
 # doesn't carry the IMAX at all. Clusterflick (clusterflick.com), an
@@ -526,9 +528,18 @@ def _utc_iso_to_london(value: str | None) -> str | None:
 # objects are TMDB's metadata and excluded from that grant, so all that's
 # kept of them is the id — as a join key, which the licence suggests, and
 # which spares resolve_listing_to_letterboxd a title search.
+#
+# Clusterflick covers 400+ London venues in this one schema, so any of them
+# is a line in CLUSTERFLICK_VENUES (its id is the venue's file name in the
+# release). The Gate is a Picturehouse; picturehouses.com isn't blocked, but
+# one more parser to maintain would buy nothing over this one.
 
 CLUSTERFLICK_URL = "https://github.com/clusterflick/data-transformed/releases/latest/download/{venue_id}"
-CLUSTERFLICK_VENUES = {CINEMA_BFI_SOUTHBANK: "bfi.org.uk-southbank", CINEMA_BFI_IMAX: "bfi.org.uk-imax"}
+CLUSTERFLICK_VENUES = {
+    CINEMA_BFI_SOUTHBANK: "bfi.org.uk-southbank",
+    CINEMA_BFI_IMAX: "bfi.org.uk-imax",
+    CINEMA_GATE: "picturehouses.com-the-gate",
+}
 # Talks, workshops and quizzes share the programme but aren't screenings.
 _CLUSTERFLICK_SKIPPED_CATEGORIES = {"talk", "workshop", "quiz"}
 
@@ -537,7 +548,7 @@ def fetch_clusterflick(cinema: str) -> list[dict]:
     showings = _parse_clusterflick(
         _get_json(CLUSTERFLICK_URL.format(venue_id=CLUSTERFLICK_VENUES[cinema])), cinema)
     if not showings:
-        # A whole BFI programme with nothing on is a broken release, not a
+        # A whole programme with nothing on is a broken release, not a
         # quiet month — fail so yesterday's is kept.
         raise CinemaFetchError(f"Clusterflick returned no showings for {cinema}")
     return showings

@@ -21,10 +21,9 @@ from .analysis import (
 )
 from .cinemas import (
     CINEMA_BARBICAN,
-    CINEMA_BFI_IMAX,
-    CINEMA_BFI_SOUTHBANK,
     CINEMA_PRINCE_CHARLES,
     CINEMA_RIVERSIDE,
+    CLUSTERFLICK_VENUES,
     VUE_SITES,
     VueProgramme,
     fetch_barbican,
@@ -621,8 +620,7 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     cinema_fetchers = [
         (CINEMA_PRINCE_CHARLES, fetch_prince_charles),
         (CINEMA_BARBICAN, fetch_barbican),
-        (CINEMA_BFI_SOUTHBANK, partial(fetch_clusterflick, CINEMA_BFI_SOUTHBANK)),
-        (CINEMA_BFI_IMAX, partial(fetch_clusterflick, CINEMA_BFI_IMAX)),
+        *((name, partial(fetch_clusterflick, name)) for name in CLUSTERFLICK_VENUES),
         *((site.name, partial(vue.fetch, site)) for site in VUE_SITES),
         (CINEMA_RIVERSIDE, fetch_riverside),
     ]

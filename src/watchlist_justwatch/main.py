@@ -210,6 +210,10 @@ CINEMA_RESOLVE_PER_RUN = 120
 # be, but occasionally it's a film TMDB hadn't indexed yet on announcement.
 # Re-asking a few weeks later costs almost nothing and catches those.
 CINEMA_NEGATIVE_RETRY_DAYS = 30
+# Consecutive lookups Letterboxd (or TMDB) refuses before a run stops trying:
+# past this it's a block, and the rest are no likelier to get through — each
+# one would just spend its retries' backoff. They're left for the next run.
+CINEMA_RESOLVE_FAILURES_BEFORE_STOP = 5
 
 
 def _resolved_cinema_matches(
@@ -230,6 +234,7 @@ def _resolved_cinema_matches(
     """
     today = datetime.now(timezone.utc).date()
     resolved: dict[str, dict | None] = {}
+    consecutive_failures = 0
 
     # Busiest film first, so on the runs where the budget binds — the first
     # couple, when nothing is cached — it's spent on the films with thirty
@@ -268,6 +273,8 @@ def _resolved_cinema_matches(
                 resolved[key] = cached
                 continue
 
+        if consecutive_failures >= CINEMA_RESOLVE_FAILURES_BEFORE_STOP:
+            continue
         if budget is not None:
             if budget <= 0:
                 continue
@@ -276,13 +283,20 @@ def _resolved_cinema_matches(
             match = resolve_listing_to_letterboxd(
                 showing["title"], showing["year"], tmdb_id=showing.get("tmdb_id"),
                 search_movie=_tmdb_search_movie,
-                film_details_by_tmdb_id=get_film_details_by_tmdb_id,
+                # A lookup that fails (rather than finding nothing) raises,
+                # so it lands below instead of being cached as "not a film".
+                film_details_by_tmdb_id=lambda tmdb_id: get_film_details_by_tmdb_id(tmdb_id, raise_on_error=True),
             )
         except Exception as exc:
             # Not cached: a failure here is about the network, not about the
             # listing, so it shouldn't be remembered as "this isn't a film".
             warn(f"cinema listing {showing['title']!r} could not be resolved this run ({exc})")
+            consecutive_failures += 1
+            if consecutive_failures == CINEMA_RESOLVE_FAILURES_BEFORE_STOP:
+                warn(f"{consecutive_failures} cinema listings in a row failed to resolve; "
+                     "leaving the rest for the next run")
             continue
+        consecutive_failures = 0
         resolved[key] = {**match, "resolved_at": today.isoformat()} if match else {
             "slug": None, "resolved_at": today.isoformat(), "matcher_version": MATCHER_VERSION,
         }

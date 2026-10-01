@@ -685,6 +685,9 @@ _PROGRAMME_PREFIX_RE = re.compile(
 # wrong the title-agreement check in resolve_listing_to_letterboxd rejects
 # the match rather than accepting a wrong one.
 _APPENDED_EVENT_RE = re.compile(r"\s+\+\s+.*$")
+# Vue's re-releases: "Avengers: Endgame Encore". Only ever trailing, and
+# never the whole title — there are films called Encore.
+_ENCORE_SUFFIX_RE = re.compile(r"(?<=\S)\s+encore$", re.IGNORECASE)
 # A bracketed qualifier that is part of the film's real title, not the
 # venue's annotation — stripping these would match the wrong film, or none.
 _KEEP_PAREN_RE = re.compile(r"^(19|20)\d{2}\s+film$|^tv$|^uk$|^us$", re.IGNORECASE)
@@ -722,7 +725,7 @@ def clean_listing_title(title: str) -> tuple[str, int | None]:
         cleaned = stripped
 
     while True:
-        stripped = _FORMAT_SUFFIX_RE.sub("", cleaned).strip()
+        stripped = _ENCORE_SUFFIX_RE.sub("", _FORMAT_SUFFIX_RE.sub("", cleaned)).strip()
         if stripped == cleaned or not stripped:
             break
         cleaned = stripped
@@ -736,6 +739,8 @@ def _normalize_title(title: str) -> str:
     # from matching a real one would otherwise reject the right answer too.
     decomposed = unicodedata.normalize("NFKD", title)
     folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    # "Songbirds and Snakes" at the cinema, "Songbirds & Snakes" on TMDB.
+    folded = folded.replace("&", " and ")
     normalized = _PUNCTUATION_RE.sub("", folded.lower())
     normalized = _LEADING_ARTICLE_RE.sub("", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
@@ -745,7 +750,7 @@ def _normalize_title(title: str) -> str:
 # to nothing under older rules is cached as "not a film" for a month, so
 # without this a fix to the cleaner wouldn't reach the listings it was
 # written for until that month was up — which is exactly backwards.
-MATCHER_VERSION = 2
+MATCHER_VERSION = 3
 
 
 def listing_match_key(title: str, year: int | None) -> str:

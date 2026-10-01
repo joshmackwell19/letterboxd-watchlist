@@ -578,15 +578,17 @@ def _format_cinema_datetime(iso: str) -> str:
 
 
 def _watchlist_slug_for_showing(showing: dict, state: StateDoc) -> str | None:
-    """The tracked film a showing is of: by title, or — where the venue's
-    title is one the watchlist can't match ("25th Anniversary: Donnie
-    Darko") — by the Letterboxd film run() resolved the listing to."""
-    slug = match_watchlist_film(showing["title"], showing["year"], state.films)
-    if slug is None:
-        resolved = state.cinema_matches.get(showing_match_key(showing)) or {}
-        if resolved.get("slug") in state.films:
-            slug = resolved["slug"]
-    return slug
+    """The tracked film a showing is of. The Letterboxd film run() resolved
+    the listing to decides it when there is one — it weighed the listing's
+    year, director and runtime, so it knows a 2026 Sense and Sensibility
+    isn't the 1995 one on the watchlist, and that "25th Anniversary: Donnie
+    Darko" is. Only an unresolved listing falls back to matching titles."""
+    resolved = state.cinema_matches.get(showing_match_key(showing)) or {}
+    if resolved.get("slug"):
+        return resolved["slug"] if resolved["slug"] in state.films else None
+    return match_watchlist_film(showing["title"], showing["year"], state.films,
+                                director=showing.get("director"),
+                                duration_minutes=showing.get("duration_minutes"))
 
 
 def _soonest_cinema_showings(state: StateDoc, now: datetime | None = None) -> dict[str, dict]:
@@ -2415,8 +2417,11 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="active-filters" id="activeCinemaFilters"></div>
   <div id="cinemasGrid" class="film-cards"></div>
   <!-- CC BY 4.0 asks for this wherever the data appears; filtering to
-       upcoming showings and cleaning titles counts as changing it. -->
-  <p class="cinema-credit">BFI Southbank, BFI IMAX and The Gate screening data from
+       upcoming showings and cleaning titles counts as changing it. Its
+       film matching (cinemas.attach_clusterflick_ids) is used for every
+       venue, so the credit covers them all. -->
+  <p class="cinema-credit">BFI Southbank, BFI IMAX and The Gate screening data, and film
+    matching for every cinema, from
     <a href="https://clusterflick.com" target="_blank" rel="noopener">Clusterflick</a>
     (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>),
     filtered to upcoming showings.</p>

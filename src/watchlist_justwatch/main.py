@@ -23,9 +23,12 @@ from .cinemas import (
     CINEMA_BARBICAN,
     CINEMA_PRINCE_CHARLES,
     CINEMA_RIVERSIDE,
+    CLUSTERFLICK_REFERENCE,
     CLUSTERFLICK_VENUES,
     VUE_SITES,
     VueProgramme,
+    attach_clusterflick_ids,
+    fetch_clusterflick_screenings,
     fetch_barbican,
     fetch_clusterflick,
     fetch_prince_charles,
@@ -33,7 +36,6 @@ from .cinemas import (
     MATCHER_VERSION,
     drop_past_showings,
     showing_match_key,
-    match_watchlist_film,
     resolve_listing_to_letterboxd,
 )
 from .config import (
@@ -98,7 +100,9 @@ from .taste import (
     render_evaluation, render_recommendations, scrape_raters,
 )
 from .tmdb_client import production_companies as tmdb_production_companies
+from .tmdb_client import movie_facts as _tmdb_movie_facts
 from .tmdb_client import search_movie as _tmdb_search_movie
+from .tmdb_client import search_movies as _tmdb_search_movies
 from .weekly_digest import compute_weekly_digest
 
 DEFAULT_CONFIG_PATH = Path("config/services.yaml")
@@ -217,16 +221,22 @@ CINEMA_RESOLVE_FAILURES_BEFORE_STOP = 5
 
 
 def _resolved_cinema_matches(
-    showtimes: list[dict], films: dict, previous: dict[str, dict | None], *, warn,
+    showtimes: list[dict], previous: dict[str, dict | None], *, warn,
     budget: int | None = CINEMA_RESOLVE_PER_RUN,
 ) -> dict[str, dict | None]:
-    """Letterboxd films for the cinema listings the watchlist can't identify.
+    """The Letterboxd film each cinema listing is showing.
 
-    The watchlist answers for about a tenth of what's on — everything else
-    was showing as a bare title with no poster of ours, no rating and
-    nowhere to click through to. This resolves the rest through TMDB and
-    Letterboxd and caches the answer, since unlike the watchlist match it's
-    far too expensive to redo at dashboard-build time.
+    The watchlist answers by title for about a tenth of what's on — and a
+    title alone can be the wrong film (a 2026 remake listed as the 1995
+    film on the list). So every listing is resolved through TMDB and
+    Letterboxd on all it says about itself (resolve_listing_to_letterboxd),
+    watchlist films included, and the dashboard trusts this answer over
+    its own title match. Cached, since unlike the watchlist match it's far
+    too expensive to redo at dashboard-build time.
+
+    A match made under older rules (MATCHER_VERSION) is re-checked, but the
+    Letterboxd half of it is reused whenever TMDB still lands on the same
+    film — re-checking costs TMDB requests only, never a Letterboxd page.
 
     `budget` caps how many listings are resolved this run; None resolves
     every one still missing (--resolve-all-cinema-listings), for when a
@@ -235,6 +245,26 @@ def _resolved_cinema_matches(
     today = datetime.now(timezone.utc).date()
     resolved: dict[str, dict | None] = {}
     consecutive_failures = 0
+    # What Letterboxd already said about each film, by TMDB id.
+    letterboxd_by_tmdb_id = {
+        match["tmdb_id"]: {
+            "slug": match["slug"], "rating": match.get("rating"), "poster_url": match.get("poster_url"),
+            "director": match["director"].split(", ") if match.get("director") else [],
+            "starring": match.get("starring") or [], "synopsis": match.get("synopsis"),
+            "genre": match.get("genre") or [], "runtime_minutes": match.get("runtime_minutes"),
+        }
+        for match in previous.values() if match and match.get("slug") and match.get("tmdb_id")
+    }
+    fetched_from_letterboxd = False
+
+    def film_details(tmdb_id: int) -> dict | None:
+        nonlocal fetched_from_letterboxd
+        if tmdb_id in letterboxd_by_tmdb_id:
+            return letterboxd_by_tmdb_id[tmdb_id]
+        fetched_from_letterboxd = True
+        # A lookup that fails (rather than finding nothing) raises, so it
+        # lands below instead of being cached as "not a film".
+        return get_film_details_by_tmdb_id(tmdb_id, raise_on_error=True)
 
     # Busiest film first, so on the runs where the budget binds — the first
     # couple, when nothing is cached — it's spent on the films with thirty
@@ -246,10 +276,6 @@ def _resolved_cinema_matches(
     showtimes = sorted(showtimes, key=lambda s: -showings_per_key[showing_match_key(s)])
 
     for showing in showtimes:
-        # Already on the watchlist: that match is better than anything this
-        # could find, and it's recomputed at build time anyway.
-        if match_watchlist_film(showing["title"], showing["year"], films):
-            continue
         key = showing_match_key(showing)
         if key in resolved:
             continue
@@ -257,7 +283,9 @@ def _resolved_cinema_matches(
         cached = previous.get(key, "missing")
         if cached != "missing":
             stale = False
-            if cached is None or not cached.get("slug"):
+            if cached and cached.get("slug"):
+                stale = cached.get("matcher_version", 1) != MATCHER_VERSION
+            else:
                 # Retried either because the rules that failed it have since
                 # changed, or because enough time has passed that TMDB may
                 # have indexed a title it hadn't on announcement.
@@ -272,6 +300,11 @@ def _resolved_cinema_matches(
             if not stale:
                 resolved[key] = cached
                 continue
+        # Until it's re-checked, an old match stands — losing it to a busy
+        # run or a network failure would be worse than keeping it a day.
+        keep = cached if cached != "missing" and cached and cached.get("slug") else None
+        if keep:
+            resolved[key] = keep
 
         if consecutive_failures >= CINEMA_RESOLVE_FAILURES_BEFORE_STOP:
             continue
@@ -279,13 +312,13 @@ def _resolved_cinema_matches(
             if budget <= 0:
                 continue
             budget -= 1
+        fetched_from_letterboxd = False
         try:
             match = resolve_listing_to_letterboxd(
                 showing["title"], showing["year"], tmdb_id=showing.get("tmdb_id"),
-                search_movie=_tmdb_search_movie,
-                # A lookup that fails (rather than finding nothing) raises,
-                # so it lands below instead of being cached as "not a film".
-                film_details_by_tmdb_id=lambda tmdb_id: get_film_details_by_tmdb_id(tmdb_id, raise_on_error=True),
+                director=showing.get("director"), duration_minutes=showing.get("duration_minutes"),
+                search_movies=_tmdb_search_movies, movie_facts=_tmdb_movie_facts,
+                film_details_by_tmdb_id=film_details, today=today,
             )
         except Exception as exc:
             # Not cached: a failure here is about the network, not about the
@@ -300,7 +333,8 @@ def _resolved_cinema_matches(
         resolved[key] = {**match, "resolved_at": today.isoformat()} if match else {
             "slug": None, "resolved_at": today.isoformat(), "matcher_version": MATCHER_VERSION,
         }
-        time.sleep(0.2)
+        if fetched_from_letterboxd:
+            time.sleep(0.2)
 
     return resolved
 
@@ -654,9 +688,19 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     # this, a venue that keeps failing would carry the same stale listing
     # forward every day indefinitely rather than letting it run out.
     cinema_showtimes = drop_past_showings(cinema_showtimes)
+    # Clusterflick's own TMDB match for each screening at the venues scraped
+    # here — a second opinion the resolver trusts over a title search. One
+    # small download a venue; a failure just leaves that venue to the search.
+    clusterflick_screenings = {}
+    for cinema_name in CLUSTERFLICK_REFERENCE:
+        try:
+            clusterflick_screenings[cinema_name] = fetch_clusterflick_screenings(cinema_name)
+        except Exception as exc:
+            _warn(f"Clusterflick matching unavailable for {cinema_name!r} this run ({exc})")
+    attach_clusterflick_ids(cinema_showtimes, clusterflick_screenings)
     current_state.cinema_showtimes = cinema_showtimes
     current_state.cinema_matches = _resolved_cinema_matches(
-        cinema_showtimes, current_state.films, previous_state.cinema_matches, warn=_warn,
+        cinema_showtimes, previous_state.cinema_matches, warn=_warn,
         budget=cinema_resolve_budget)
 
     # The For you tab (see for_you.py): the taste engine against today's

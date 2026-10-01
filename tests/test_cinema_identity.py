@@ -244,3 +244,31 @@ def test_an_old_match_survives_a_failed_recheck(monkeypatch):
     monkeypatch.setattr(main, "_tmdb_search_movies", down)
     out = main._resolved_cinema_matches(showings, {key: old}, warn=lambda m: None, budget=None)
     assert out[key] is old
+
+
+# --- the same director, written differently ------------------------------------
+
+@pytest.mark.parametrize("listing,tmdb", [
+    ("Andrzej Zulawski", "Andrzej Żuławski"),      # ł isn't an accent, so folding alone missed it
+    ("Chan-wook Park", "Park Chan-wook"),          # family name first, or last
+    ("Siu-pong Wong", "Wong Siu-pong"),
+    ("Amma Assante", "Amma Asante"),               # the venue's typo
+])
+def test_one_director_written_two_ways_still_agrees(listing, tmdb):
+    from watchlist_justwatch.cinemas import _director_names, _directors_agree
+    assert _directors_agree(_director_names(listing), _director_names([tmdb]))
+
+
+def test_two_directors_sharing_a_first_name_do_not_agree():
+    from watchlist_justwatch.cinemas import _director_names, _directors_agree
+    assert not _directors_agree(_director_names("David Lynch"), _director_names(["David Fincher"]))
+
+
+def test_an_upstream_id_survives_a_differently_written_director():
+    facts = {**FACTS, 21484: {"id": 21484, "title": "Possession", "year": 1981, "release_date": "1981-05-27",
+                              "runtime": 124, "directors": ["Andrzej Żuławski"], "titles": ["Possession"]}}
+    match = resolve_listing_to_letterboxd(
+        "Possession", 1981, tmdb_id=21484, director="Andrzej Zulawski", duration_minutes=124,
+        search_movies=lambda t, y: pytest.fail("searched"), movie_facts=facts.get,
+        film_details_by_tmdb_id=_letterboxd, today=TODAY)
+    assert match["tmdb_id"] == 21484

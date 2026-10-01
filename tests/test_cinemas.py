@@ -406,4 +406,6 @@ def test_parse_riverside_extracts_duration_director_and_unescapes_synopsis():
 
 def test_parse_riverside_converts_timestamp_to_iso():
     s = _parse_riverside(_RIVERSIDE_DATA)[0]
-    assert s["showtime"] == datetime.fromtimestamp(1789150200).isoformat()
+    # 18:10 UTC is 19:10 in London in September — not whatever the runner's
+    # own clock says (UTC on Actions, which put every showing an hour early).
+    assert s["showtime"] == "2026-09-11T19:10:00"

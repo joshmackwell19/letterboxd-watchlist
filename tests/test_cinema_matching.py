@@ -118,7 +118,8 @@ def test_a_listing_matching_nothing_tracked_stays_unmatched():
 # --- resolving everything else ------------------------------------------
 
 def _search(result):
-    return lambda title, year: result
+    """A TMDB search answering one film (or nothing) whatever it's asked."""
+    return lambda title, year: [result] if result else []
 
 
 def _details(result):
@@ -136,7 +137,7 @@ LA_LA_LAND_LETTERBOXD = {
 def test_a_listing_resolves_to_its_letterboxd_film():
     match = resolve_listing_to_letterboxd(
         "La La Land (10th Anniversary)", 2026,
-        search_movie=_search(LA_LA_LAND_TMDB), film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
+        search_movies=_search(LA_LA_LAND_TMDB), film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
 
     assert match["slug"] == "la-la-land"
     assert match["tmdb_id"] == 313369
@@ -151,7 +152,7 @@ def test_a_listing_already_matched_to_tmdb_skips_the_search():
     # agree with ("25th Anniversary: ...") still resolves, by the id.
     match = resolve_listing_to_letterboxd(
         "IMAX exclusive previews: La La Land", 2016, tmdb_id=313369,
-        search_movie=lambda *_: pytest.fail("searched"),
+        search_movies=lambda *_: pytest.fail("searched"),
         film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
 
     assert match["slug"] == "la-la-land"
@@ -172,10 +173,10 @@ def test_a_year_qualified_miss_is_retried_without_the_year():
 
     def search(title, year):
         calls.append(year)
-        return LA_LA_LAND_TMDB if year is None else None
+        return [LA_LA_LAND_TMDB] if year is None else []
 
     match = resolve_listing_to_letterboxd(
-        "La La Land", 2026, search_movie=search, film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
+        "La La Land", 2026, search_movies=search, film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
 
     assert calls == [2026, None]
     assert match["slug"] == "la-la-land"
@@ -187,7 +188,7 @@ def test_event_cinema_does_not_get_matched_to_whatever_tmdb_returns():
     # rating and link on the card — worse than leaving it plain.
     match = resolve_listing_to_letterboxd(
         "André Rieu's 2026 Summer Concert: Viva Maastricht!", 2026,
-        search_movie=_search({"id": 1, "title": "Summer Concert", "release_date": "1999-01-01"}),
+        search_movies=_search({"id": 1, "title": "Summer Concert", "release_date": "1999-01-01"}),
         film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD))
 
     assert match is None
@@ -198,7 +199,7 @@ def test_accents_do_not_block_a_match():
     # that stops a concert film matching a real one rejects this too.
     match = resolve_listing_to_letterboxd(
         "Amelie - 25th Anniversary", None,
-        search_movie=_search({"id": 194, "title": "Amélie", "release_date": "2001-04-25"}),
+        search_movies=_search({"id": 194, "title": "Amélie", "release_date": "2001-04-25"}),
         film_details_by_tmdb_id=_details({**LA_LA_LAND_LETTERBOXD, "slug": "amelie"}))
 
     assert match["slug"] == "amelie"
@@ -209,7 +210,7 @@ def test_the_original_title_counts_as_agreement():
     # original name still matches.
     match = resolve_listing_to_letterboxd(
         "La Haine", None,
-        search_movie=_search({"id": 406, "title": "Hate", "original_title": "La Haine",
+        search_movies=_search({"id": 406, "title": "Hate", "original_title": "La Haine",
                               "release_date": "1995-05-31"}),
         film_details_by_tmdb_id=_details({**LA_LA_LAND_LETTERBOXD, "slug": "la-haine"}))
 
@@ -219,11 +220,11 @@ def test_the_original_title_counts_as_agreement():
 def test_no_tmdb_match_and_no_letterboxd_page_both_mean_unresolved():
     assert resolve_listing_to_letterboxd(
         "Bing & Friends: Birthday Celebration", 2024,
-        search_movie=_search(None), film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD)) is None
+        search_movies=_search(None), film_details_by_tmdb_id=_details(LA_LA_LAND_LETTERBOXD)) is None
 
     assert resolve_listing_to_letterboxd(
         "La La Land", None,
-        search_movie=_search(LA_LA_LAND_TMDB), film_details_by_tmdb_id=_details(None)) is None
+        search_movies=_search(LA_LA_LAND_TMDB), film_details_by_tmdb_id=_details(None)) is None
 
 
 # --- the cache key ------------------------------------------------------
@@ -244,11 +245,12 @@ def test_two_different_films_sharing_a_title_do_not_share_a_key():
 def test_the_daily_cap_binds_unless_lifted(monkeypatch):
     from watchlist_justwatch import main
     showings = [{"title": f"Film {i}", "year": None, "cinema": "PCC"} for i in range(5)]
-    monkeypatch.setattr(main, "_tmdb_search_movie", lambda title, year: None)
+    monkeypatch.setattr(main, "_tmdb_search_movies", lambda title, year: [])
+    monkeypatch.setattr(main, "_tmdb_movie_facts", lambda tmdb_id: None)
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
-    assert len(main._resolved_cinema_matches(showings, {}, {}, warn=print, budget=2)) == 2
-    assert len(main._resolved_cinema_matches(showings, {}, {}, warn=print, budget=None)) == 5
+    assert len(main._resolved_cinema_matches(showings, {}, warn=print, budget=2)) == 2
+    assert len(main._resolved_cinema_matches(showings, {}, warn=print, budget=None)) == 5
 
 
 def test_a_failed_lookup_is_not_remembered_as_not_a_film(monkeypatch):
@@ -262,13 +264,14 @@ def test_a_failed_lookup_is_not_remembered_as_not_a_film(monkeypatch):
         assert raise_on_error
         raise LetterboxdFetchError("HTTP 403", status_code=403)
 
-    monkeypatch.setattr(main, "_tmdb_search_movie", lambda title, year: LA_LA_LAND_TMDB)
+    monkeypatch.setattr(main, "_tmdb_search_movies", lambda title, year: [LA_LA_LAND_TMDB])
+    monkeypatch.setattr(main, "_tmdb_movie_facts", lambda tmdb_id: None)
     monkeypatch.setattr(main, "get_film_details_by_tmdb_id", refused)
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
     warnings: list[str] = []
     showings = [{"title": f"La La Land {'!' * i}", "year": None, "cinema": "PCC"} for i in range(8)]
 
-    out = main._resolved_cinema_matches(showings, {}, {}, warn=warnings.append, budget=None)
+    out = main._resolved_cinema_matches(showings, {}, warn=warnings.append, budget=None)
 
     assert out == {}
     # Not eight lots of retries: past a handful in a row it's a block.
@@ -279,7 +282,7 @@ def test_a_failed_lookup_is_not_remembered_as_not_a_film(monkeypatch):
 def test_and_and_ampersand_agree():
     match = resolve_listing_to_letterboxd(
         "The Hunger Games: The Ballad of Songbirds and Snakes", None,
-        search_movie=_search({"id": 695721, "title": "The Hunger Games: The Ballad of Songbirds & Snakes",
+        search_movies=_search({"id": 695721, "title": "The Hunger Games: The Ballad of Songbirds & Snakes",
                               "release_date": "2023-11-15"}),
         film_details_by_tmdb_id=_details({**LA_LA_LAND_LETTERBOXD, "slug": "the-hunger-games-the-ballad"}))
     assert match is not None
@@ -301,31 +304,32 @@ def test_a_cleaner_change_invalidates_the_listings_it_failed():
 
     def search(title, year):
         asked.append(title)
-        return {"id": 194, "title": "Amélie", "release_date": "2001-04-25"}
+        return [{"id": 194, "title": "Amélie", "release_date": "2001-04-25"}]
 
-    original_search = main._tmdb_search_movie
+    original_search, original_facts = main._tmdb_search_movies, main._tmdb_movie_facts
     original_details = main.get_film_details_by_tmdb_id
-    main._tmdb_search_movie = search
+    main._tmdb_search_movies = search
+    main._tmdb_movie_facts = lambda tmdb_id: None
     main.get_film_details_by_tmdb_id = lambda tmdb_id, **_: {
         "slug": "amelie", "rating": 4.2, "poster_url": "p", "director": ["Jean-Pierre Jeunet"],
         "starring": [], "synopsis": "s", "genre": [], "runtime_minutes": 122,
     }
     try:
         stale = {key: {"slug": None, "resolved_at": "2099-01-01", "matcher_version": MATCHER_VERSION - 1}}
-        out = main._resolved_cinema_matches(showings, {}, stale, warn=lambda m: None)
+        out = main._resolved_cinema_matches(showings, stale, warn=lambda m: None)
         assert asked, "a negative from older rules should be retried"
         assert out[key]["slug"] == "amelie"
 
         asked.clear()
         current = {key: {"slug": None, "resolved_at": "2099-01-01", "matcher_version": MATCHER_VERSION}}
-        main._resolved_cinema_matches(showings, {}, current, warn=lambda m: None)
+        main._resolved_cinema_matches(showings, current, warn=lambda m: None)
         assert not asked, "a negative from the current rules should stand"
 
         asked.clear()
-        main._resolved_cinema_matches(showings, {}, {key: out[key]}, warn=lambda m: None)
+        main._resolved_cinema_matches(showings, {key: out[key]}, warn=lambda m: None)
         assert not asked, "a film already resolved should never be re-asked"
     finally:
-        main._tmdb_search_movie = original_search
+        main._tmdb_search_movies, main._tmdb_movie_facts = original_search, original_facts
         main.get_film_details_by_tmdb_id = original_details
 
 

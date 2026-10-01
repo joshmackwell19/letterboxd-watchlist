@@ -3,6 +3,7 @@ import re
 import unicodedata
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -631,7 +632,9 @@ def _parse_riverside(data: list[dict]) -> list[dict]:
                 if not timestamp:
                     continue
                 try:
-                    showtime = datetime.fromtimestamp(int(timestamp))
+                    # In London time, not the runner's: Actions runs in UTC,
+                    # which put every showing an hour early all summer.
+                    showtime = datetime.fromtimestamp(int(timestamp), LONDON).replace(tzinfo=None)
                 except (ValueError, OSError, OverflowError):
                     continue
                 showings.append({
@@ -662,10 +665,10 @@ _YEAR_IN_PARENS_RE = re.compile(r"^(19|20)\d{2}$")
 _FORMAT_SUFFIX_RE = re.compile(
     r"\s*[-–—:]\s*(?:in\s+)?"
     r"(?:imax(?:\s+70mm)?|70mm|35mm|4k(?:\s+restoration)?|remastered|"
-    r"the\s+final\s+cut|director'?s\s+cut|extended\s+cut|sing[- ]?along|"
+    r"(?:the\s+)?final\s+cut|director['’]?s\s+cut|extended\s+cut|sing[- ]?along|the\s+imax\s+experience|"
     r"live\s+score|q\s*&\s*a|double\s+bill|re[- ]?release|"
     r"(?:\d+(?:st|nd|rd|th)\s+)?anniversary(?:\s+(?:screening|edition|re[- ]?release))?|"
-    r"subtitled|restored|uncut|the\s+musical\s+experience)\s*$",
+    r"subtitled|restored(?:\s+(?:and|&)\s+uncut)?|uncut|the\s+musical\s+experience)\s*$",
     re.IGNORECASE,
 )
 # What a venue bolts onto a screening that isn't part of the film: a strand
@@ -733,24 +736,160 @@ def clean_listing_title(title: str) -> tuple[str, int | None]:
     return cleaned, year
 
 
-def _normalize_title(title: str) -> str:
+@lru_cache(maxsize=20000)
+def _fold(text: str) -> str:
     # Accents folded, because a venue types "Amelie" where TMDB holds
     # "Amélie" — and the title-agreement check that keeps a concert film
     # from matching a real one would otherwise reject the right answer too.
-    decomposed = unicodedata.normalize("NFKD", title)
+    decomposed = unicodedata.normalize("NFKD", text)
     folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     # "Songbirds and Snakes" at the cinema, "Songbirds & Snakes" on TMDB.
     folded = folded.replace("&", " and ")
-    normalized = _PUNCTUATION_RE.sub("", folded.lower())
-    normalized = _LEADING_ARTICLE_RE.sub("", normalized)
-    return re.sub(r"\s+", " ", normalized).strip()
+    # "Sixty-Year Mission" and "Sixty Year Mission" are the same title.
+    folded = _DASH_RE.sub(" ", folded)
+    return re.sub(r"\s+", " ", _PUNCTUATION_RE.sub("", folded.lower())).strip()
 
 
-# Bumped whenever the cleaning rules above change. A listing that resolved
-# to nothing under older rules is cached as "not a film" for a month, so
-# without this a fix to the cleaner wouldn't reach the listings it was
-# written for until that month was up — which is exactly backwards.
-MATCHER_VERSION = 3
+_DASH_RE = re.compile(r"[-‐‑‒–—]")
+
+
+@lru_cache(maxsize=20000)
+def _normalize_title(title: str) -> str:
+    return _LEADING_ARTICLE_RE.sub("", _fold(title)).strip()
+
+
+# ---------- Telling films apart ----------
+# A title alone isn't an identity. "Sense and Sensibility" is Ang Lee's
+# 1995 film and a 2026 one; "Halloween" is four films. So a listing is
+# matched on everything it says about itself — its title and the forms that
+# title takes under the venue's decoration, plus whichever of year, director
+# and runtime its source gives — against everything TMDB says about each
+# candidate.
+
+# Loosening a title, for when the strict clean finds no film. Venues decorate
+# far more inventively than clean_listing_title can safely undo ("MUBI FEST:
+# MINOTAUR", "Funeral Parade presents ...", "Ken Russell's The Devils",
+# "SWEET BABY CHARLIE aka THE SADIST", "Thunder Road (1958) on 35mm"), and
+# each of these can also eat part of a real title — "Dune: Part Three",
+# "Schindler's List" — which is why only the strict form is accepted on title
+# alone, and every looser one needs something else to agree (_corroborate).
+_LOOSE_SUFFIX_RES = (
+    re.compile(r"\s+(?:presented|introduced|hosted)\s+(?:by|in)\s+.+$", re.IGNORECASE),
+    re.compile(r"\s+on\s+(?:8|16|35|70)\s*mm$", re.IGNORECASE),
+    re.compile(r"\s+(?:plus|with)\s+.+$", re.IGNORECASE),
+    re.compile(r"\s*[-–—]\s*[^-–—]*\b(?:premiere|festival|liff|the\s+play|screening)\b[^-–—]*$",
+               re.IGNORECASE),
+    re.compile(r"\s*\([^)]*$"),     # an unclosed bracket: "Casino Royale (20th Anniversary"
+    re.compile(r"\s+(?:film\s+)?screening$|\s+book\s+launch$", re.IGNORECASE),
+)
+_PRESENTS_PREFIX_RE = re.compile(r"^.+?\s+presents?\s*(?::|\.{2,}|…|-|–)?\s+", re.IGNORECASE)
+_LEADING_BRACKET_RE = re.compile(r"^\s*[(\[][^)\]]*[)\]]\s*")     # "(4DX Rewind) Shrek"
+# "Ken Russell's The Devils", "Alain Gomis' DAO" — up to three capitalised
+# words, then a possessive.
+_POSSESSIVE_RE = re.compile(r"^(?:[A-Z][\w.\-]*\s+){0,2}[A-Z][\w.\-]*['’]s?\s+")
+_SEPARATOR_RE = re.compile(r"\s*:\s*(?=\S)|\s+[-–—]\s+")
+_AKA_RE = re.compile(r"\s+a\.?k\.?a\.?\s+", re.IGNORECASE)
+MAX_TITLE_VARIANTS = 8
+
+
+@lru_cache(maxsize=5000)
+def listing_title_variants(title: str) -> tuple[tuple[str, ...], int | None]:
+    """The titles a listing might be showing, strictest first: the
+    clean_listing_title form, then ever looser ones with a strand name,
+    host, format or alternative title taken off. Plus any year found on
+    the way ("Thunder Road (1958) on 35mm" only gives up its year once the
+    "on 35mm" is gone)."""
+    base, year = clean_listing_title(title)
+    variants = [base]
+    queue = [base]
+
+    def consider(text: str) -> None:
+        nonlocal year
+        cleaned, found_year = clean_listing_title(text)
+        cleaned = cleaned.strip(" \"'“”‘’.,")
+        year = year or found_year
+        if (cleaned and _normalize_title(cleaned) and cleaned not in variants
+                and len(variants) < MAX_TITLE_VARIANTS):
+            variants.append(cleaned)
+            queue.append(cleaned)
+
+    while queue and len(variants) < MAX_TITLE_VARIANTS:
+        form = queue.pop(0)
+        for suffix in _LOOSE_SUFFIX_RES:
+            consider(suffix.sub("", form))
+        consider(_LEADING_BRACKET_RE.sub("", form))
+        consider(_PRESENTS_PREFIX_RE.sub("", form))
+        for part in _AKA_RE.split(form):
+            consider(part)
+        for separator in _SEPARATOR_RE.finditer(form):
+            consider(form[separator.end():])
+        consider(_POSSESSIVE_RE.sub("", form, count=1))
+    return tuple(variants), year
+
+
+def _director_surnames(directors) -> frozenset[str]:
+    """"Alejandro G. Iñárritu, Someone Else" or a list of names -> the
+    folded surnames, the part of a name venues and TMDB agree on."""
+    if not directors:
+        return frozenset()
+    names = directors if isinstance(directors, (list, tuple)) else re.split(r",|/|\s&\s|\sand\s", directors)
+    return frozenset(_fold(name).split()[-1] for name in names if _fold(name))
+
+
+# How far ahead a listing with no year of its own still reads as a new
+# release — the films a multiplex shows without saying when they're from.
+RECENT_RELEASE_DAYS = 400
+
+
+def _corroborate(*, listing_year: int | None, listing_directors: frozenset[str],
+                 listing_runtime: int | None, film_year: int | None, film_directors: frozenset[str],
+                 film_runtime: int | None, film_release: str | None = None,
+                 today: date | None = None) -> tuple[bool, float]:
+    """Whether a candidate film can be what the listing is showing, and how
+    much the listing's own facts back it up. A contradiction rules it out:
+    a different director, a film newer than the listing's year, a film
+    longer than the slot (or a short in a feature's slot). Agreement adds
+    support. A film older than the listing's year is neither — that year is
+    often the re-release's, not the film's."""
+    support = 0.0
+    if listing_directors and film_directors:
+        if not listing_directors & film_directors:
+            return False, 0.0
+        support += 2
+    if listing_year and film_year:
+        if film_year > listing_year + 1:
+            return False, 0.0
+        if abs(film_year - listing_year) <= 1:
+            support += 1.5
+    if listing_runtime and film_runtime:
+        if listing_runtime < film_runtime - 20 or listing_runtime > film_runtime + 60:
+            return False, 0.0
+        if abs(listing_runtime - film_runtime) <= 5:
+            support += 1
+    if listing_year is None and film_release and today is not None:
+        try:
+            released = date.fromisoformat(film_release[:10])
+        except ValueError:
+            released = None
+        if released and -120 <= (today - released).days <= RECENT_RELEASE_DAYS:
+            support += 1
+    return True, support
+
+
+def _titles_agree(variant: str, titles) -> bool:
+    target = _normalize_title(variant)
+    return any(t and _normalize_title(t) == target for t in titles)
+
+
+def _release_year(movie: dict) -> int | None:
+    stamp = str(movie.get("release_date") or "")[:4]
+    return int(stamp) if stamp.isdigit() else None
+
+
+# Bumped whenever the matching rules above change: every cached match —
+# positive or "not a film" — made under older rules is re-checked, since a
+# fix to them would otherwise never reach the listings it was written for.
+MATCHER_VERSION = 4
 
 
 def listing_match_key(title: str, year: int | None) -> str:
@@ -761,16 +900,56 @@ def listing_match_key(title: str, year: int | None) -> str:
 
 
 def showing_match_key(showing: dict) -> str:
-    """listing_match_key for a stored showing — except that one its source
-    already matched to TMDB (Clusterflick's) is keyed by that id, which is
-    a firmer identity than any title, and resolves without a search."""
+    """listing_match_key for a stored showing — except that one already
+    matched to TMDB (Clusterflick's matching, see attach_clusterflick_ids)
+    is keyed by that id, which is a firmer identity than any title, and
+    resolves without a search."""
     if showing.get("tmdb_id"):
         return f"tmdb:{showing['tmdb_id']}"
     return listing_match_key(showing["title"], showing["year"])
 
 
+def _best_candidate(variant: str, *, strict: bool, year: int | None, directors: frozenset[str],
+                    runtime: int | None, search_movies, facts, today: date) -> dict | None:
+    results = search_movies(variant, year) or []
+    agreeing = [m for m in results if _titles_agree(variant, (m.get("title"), m.get("original_title")))]
+    # A repertory listing's year is often the screening's, not the film's, so
+    # a year-qualified miss is retried without it rather than given up on.
+    if not agreeing and year is not None:
+        results = search_movies(variant, None) or []
+        agreeing = [m for m in results if _titles_agree(variant, (m.get("title"), m.get("original_title")))]
+    # The title the venue uses may be one TMDB only lists as an alternative:
+    # "Mulholland Dr." for Mulholland Drive, "Seven" for Se7en.
+    if not agreeing and strict:
+        for movie in results[:3]:
+            known = facts(movie["id"])
+            if known and _titles_agree(variant, known["titles"]):
+                agreeing.append(movie)
+
+    best: tuple[float, dict] | None = None
+    for rank, movie in enumerate(agreeing[:4]):
+        known = facts(movie["id"]) or {}
+        film_year = known.get("year") or _release_year(movie)
+        consistent, support = _corroborate(
+            listing_year=year, listing_directors=directors, listing_runtime=runtime,
+            film_year=film_year, film_directors=_director_surnames(known.get("directors")),
+            film_runtime=known.get("runtime"),
+            film_release=known.get("release_date") or movie.get("release_date"), today=today)
+        if not consistent or (not strict and support < 1):
+            continue
+        # TMDB's own order is the tie-break: its first answer is usually the
+        # better-known film.
+        score = support - 0.1 * rank
+        if best is None or score > best[0]:
+            best = (score, {"id": movie["id"], "title": known.get("title") or movie.get("title") or variant,
+                            "year": film_year})
+    return best[1] if best else None
+
+
 def resolve_listing_to_letterboxd(
-    title: str, year: int | None, *, search_movie, film_details_by_tmdb_id, tmdb_id: int | None = None,
+    title: str, year: int | None, *, search_movies, film_details_by_tmdb_id, movie_facts=None,
+    tmdb_id: int | None = None, director: str | None = None, duration_minutes: int | None = None,
+    today: date | None = None,
 ) -> dict | None:
     """The Letterboxd film a cinema listing is showing, or None.
 
@@ -780,47 +959,60 @@ def resolve_listing_to_letterboxd(
     resolves any listing the same way discovery does: TMDB for the id,
     then Letterboxd's /tmdb/<id>/ redirect for the slug and details.
 
-    The two network calls are injected so the matching logic around them —
-    which is where this can go wrong — is testable without either service.
+    TMDB is asked about each of listing_title_variants in turn, and every
+    candidate whose title (or original or alternative title) agrees is
+    weighed against the listing's year, director and runtime
+    (_corroborate) — so a 2026 Sense and Sensibility doesn't land on 1995's
+    just because TMDB lists that first. A listing that arrives with its TMDB
+    id (see showing_match_key) skips the search, unless its director says
+    the id is wrong.
+
+    The network calls are injected so the matching logic around them —
+    which is where this can go wrong — is testable without any service.
     Returns None for the listings that genuinely aren't films: an André Rieu
     concert or a Bing birthday screening has no Letterboxd entry, and
     guessing one would be worse than leaving the listing plain.
-
-    A listing that arrives with its TMDB id (see showing_match_key) skips
-    the search, and the title check that guards it, altogether.
     """
-    cleaned, title_year = clean_listing_title(title)
+    today = today or london_now().date()
+    variants, title_year = listing_title_variants(title)
+    # A year in the title ("The Hunger Games (2012)") beats the listing's own.
     year = title_year or year
+    directors = _director_surnames(director)
+    known_facts: dict[int, dict | None] = {}
+
+    def facts(movie_id: int) -> dict | None:
+        if movie_facts is None:
+            return None
+        if movie_id not in known_facts:
+            known_facts[movie_id] = movie_facts(movie_id)
+        return known_facts[movie_id]
+
+    chosen = None
     if tmdb_id is not None:
-        movie = {"id": tmdb_id, "title": cleaned or title, "release_date": str(year or "")}
-    else:
-        if not cleaned:
-            return None
-        movie = search_movie(cleaned, year)
-        # A repertory listing's year is often the screening's, not the film's, so
-        # a year-qualified miss is retried without it rather than given up on.
-        if movie is None and year is not None:
-            movie = search_movie(cleaned, None)
-        if movie is None:
-            return None
+        known = facts(tmdb_id) or {}
+        film_directors = _director_surnames(known.get("directors"))
+        if not (directors and film_directors and not directors & film_directors):
+            chosen = {"id": tmdb_id, "title": known.get("title") or variants[0],
+                      "year": known.get("year") or year}
+    if chosen is None:
+        for index, variant in enumerate(variants):
+            chosen = _best_candidate(variant, strict=index == 0, year=year, directors=directors,
+                                     runtime=duration_minutes, search_movies=search_movies,
+                                     facts=facts, today=today)
+            if chosen:
+                break
+    if chosen is None:
+        return None
 
-        # TMDB matches loosely — it will answer *something* for a concert film's
-        # title. Requiring the titles to agree once normalized is what keeps
-        # "André Rieu's 2026 Summer Concert" from resolving to a real film.
-        if _normalize_title(movie.get("title") or "") != _normalize_title(cleaned):
-            alt = _normalize_title(movie.get("original_title") or "")
-            if alt != _normalize_title(cleaned):
-                return None
-
-    details = film_details_by_tmdb_id(movie["id"])
+    details = film_details_by_tmdb_id(chosen["id"])
     if details is None or not details.get("slug"):
         return None
 
     return {
         "slug": details["slug"],
-        "tmdb_id": movie["id"],
-        "title": movie.get("title") or cleaned,
-        "year": int(str(movie.get("release_date") or "")[:4] or 0) or None,
+        "tmdb_id": chosen["id"],
+        "title": chosen["title"],
+        "year": chosen["year"],
         "rating": details.get("rating"),
         "poster_url": details.get("poster_url"),
         "director": ", ".join(details["director"]) if details.get("director") else None,
@@ -828,31 +1020,98 @@ def resolve_listing_to_letterboxd(
         "synopsis": details.get("synopsis"),
         "genre": details.get("genre") or [],
         "runtime_minutes": details.get("runtime_minutes"),
+        "matcher_version": MATCHER_VERSION,
     }
 
 
-def match_watchlist_film(title: str, year: int | None, films: dict[str, FilmState]) -> str | None:
-    """Matches a cinema listing's title (+ optional year) against the
-    watchlist by normalized title — cinema sites vary in punctuation/
-    article-stripping and rarely give a reliable year at all, so this
-    can't be the exact-slug lookup Letterboxd matching gets to use.
-    Year-tolerant (±1) when both sides have one, same spirit as
-    Letterboxd's own year-tolerant confidence tier."""
-    cleaned, title_year = clean_listing_title(title)
-    # A year in the title ("The Hunger Games (2012)") beats the listing's own,
-    # which for a re-release is the year of the screening, not the film.
+def match_watchlist_film(title: str, year: int | None, films: dict[str, FilmState], *,
+                         director: str | None = None, duration_minutes: int | None = None) -> str | None:
+    """Matches a cinema listing against the watchlist by normalized title —
+    cinema sites vary in punctuation/article-stripping and rarely give a
+    reliable year at all, so this can't be the exact-slug lookup Letterboxd
+    matching gets to use. Held to the same evidence as
+    resolve_listing_to_letterboxd: a watchlist film the listing's year,
+    director or runtime contradicts isn't a match (a 2026 remake isn't the
+    1995 film on the list), and a looser form of the title only counts with
+    one of them agreeing."""
+    variants, title_year = listing_title_variants(title)
     year = title_year or year
-    target = _normalize_title(cleaned)
-    if not target:
-        return None
+    directors = _director_surnames(director)
+    by_title: dict[str, list[tuple[str, FilmState]]] = {}
+    for slug, film in films.items():
+        by_title.setdefault(_normalize_title(film.title), []).append((slug, film))
 
-    candidates = [(slug, film) for slug, film in films.items() if _normalize_title(film.title) == target]
-    if not candidates:
-        return None
-    if year is None or len(candidates) == 1:
-        return candidates[0][0]
+    for index, variant in enumerate(variants):
+        best: tuple[float, str] | None = None
+        for slug, film in by_title.get(_normalize_title(variant), []):
+            consistent, support = _corroborate(
+                listing_year=year, listing_directors=directors, listing_runtime=duration_minutes,
+                film_year=film.year, film_directors=_director_surnames(film.director),
+                film_runtime=film.runtime_minutes)
+            if not consistent or (index > 0 and support < 1):
+                continue
+            if best is None or support > best[0]:
+                best = (support, slug)
+        if best:
+            return best[1]
+    return None
 
-    for slug, film in candidates:
-        if film.year is not None and abs(film.year - year) <= 1:
-            return slug
-    return candidates[0][0]
+
+# ---------- Clusterflick's matching, for the venues scraped here ----------
+# Clusterflick (see the BFI section) matches every screening at 400+ London
+# venues to its TMDB film — its own pipeline, with its own title cleaning —
+# including the venues this module scrapes itself. Its answer for the same
+# screening (same venue, same minute) is an independent second opinion, and
+# where it has one, it's what the listing is keyed and resolved by. Its
+# matching is part of what its licence covers, so the Cinemas tab's credit
+# line names it for every venue.
+CLUSTERFLICK_REFERENCE = {
+    CINEMA_PRINCE_CHARLES: "princecharlescinema.com",
+    CINEMA_BARBICAN: "barbican.org.uk",
+    CINEMA_RIVERSIDE: "riversidestudios.co.uk",
+    CINEMA_VUE_FULHAM: "myvue.com-fulham-broadway",
+    CINEMA_VUE_SHEPHERDS_BUSH: "myvue.com-westfield",
+    CINEMA_VUE_WEST_END: "myvue.com-leicester-square",
+    CINEMA_VUE_PICCADILLY: "myvue.com-piccadilly",
+}
+
+
+def fetch_clusterflick_screenings(cinema: str) -> dict[str, list[tuple[str, int | None]]]:
+    """Start minute ("2026-10-03T17:40") -> [(title, TMDB id)] of every
+    screening Clusterflick has for one venue."""
+    venue_id = CLUSTERFLICK_VENUES.get(cinema) or CLUSTERFLICK_REFERENCE[cinema]
+    return _clusterflick_screenings(_get_json(CLUSTERFLICK_URL.format(venue_id=venue_id)))
+
+
+def _clusterflick_screenings(data: list[dict]) -> dict[str, list[tuple[str, int | None]]]:
+    screenings: dict[str, list[tuple[str, int | None]]] = {}
+    for event in data:
+        tmdb_id = (event.get("themoviedb") or {}).get("id")
+        for performance in event.get("performances") or []:
+            timestamp = performance.get("time")
+            if not isinstance(timestamp, (int, float)):
+                continue
+            minute = datetime.fromtimestamp(timestamp / 1000, LONDON).strftime("%Y-%m-%dT%H:%M")
+            screenings.setdefault(minute, []).append((event.get("title") or "", tmdb_id))
+    return screenings
+
+
+def attach_clusterflick_ids(showings: list[dict],
+                            screenings_by_cinema: dict[str, dict[str, list[tuple[str, int | None]]]]) -> int:
+    """Gives each showing without a TMDB id the one Clusterflick matched the
+    same screening to. Same venue and minute isn't quite enough at a
+    multiplex, where three films can start at 18:00 — so the titles have to
+    agree too (any form of either, see listing_title_variants). Returns how
+    many showings it identified."""
+    attached = 0
+    for showing in showings:
+        if showing.get("tmdb_id"):
+            continue
+        at_minute = screenings_by_cinema.get(showing["cinema"], {}).get(showing["showtime"][:16]) or []
+        ours = {_normalize_title(v) for v in listing_title_variants(showing["title"])[0]}
+        same = {tmdb_id for title, tmdb_id in at_minute
+                if tmdb_id and ours & {_normalize_title(v) for v in listing_title_variants(title)[0]}}
+        if len(same) == 1:
+            showing["tmdb_id"] = same.pop()
+            attached += 1
+    return attached

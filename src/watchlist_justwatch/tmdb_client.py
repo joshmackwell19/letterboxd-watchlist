@@ -70,6 +70,34 @@ def search_movie(title: str, year: int | None = None) -> dict | None:
     return results[0]
 
 
+def search_movies(title: str, year: int | None = None, *, limit: int = 10) -> list[dict]:
+    """Every result TMDB has for a title (+ year), best first — for a caller
+    that needs to choose between them (a cinema's "Sense and Sensibility"
+    could be 1995's or 2026's) rather than take the first."""
+    params = {"query": title}
+    if year is not None:
+        params["year"] = year
+    return _get("/search/movie", **params).get("results", [])[:limit]
+
+
+def movie_facts(tmdb_id: int) -> dict:
+    """What tells two same-titled films apart — year, runtime, directors —
+    plus every title TMDB knows the film by, in one request."""
+    data = _get(f"/movie/{tmdb_id}", append_to_response="credits,alternative_titles")
+    titles = [data.get("title"), data.get("original_title")]
+    titles += [alt.get("title") for alt in (data.get("alternative_titles") or {}).get("titles", [])]
+    return {
+        "id": tmdb_id,
+        "title": data.get("title"),
+        "year": release_year(data),
+        "release_date": data.get("release_date") or None,
+        "runtime": data.get("runtime") or None,
+        "directors": [c["name"] for c in (data.get("credits") or {}).get("crew", [])
+                      if c.get("job") == "Director" and c.get("name")],
+        "titles": [t for t in titles if t],
+    }
+
+
 def similar_and_recommended(tmdb_id: int, *, limit: int = 15) -> list[dict]:
     similar = _get(f"/movie/{tmdb_id}/similar").get("results", [])
     recommended = _get(f"/movie/{tmdb_id}/recommendations").get("results", [])

@@ -178,7 +178,9 @@ stored raw package name, so a change here reaches the page on the next
 
 **The daily run**: plain `python -m watchlist_justwatch.main` (needs
 `--username`/`LETTERBOXD_USERNAME`, `--database-url`/`DATABASE_URL`;
-`--sarah-username`/`SARAH_LETTERBOXD_USERNAME` optional).
+`--sarah-username`/`SARAH_LETTERBOXD_USERNAME` optional), plus
+`--resolve-all-cinema-listings` to lift the daily cap on resolving cinema
+listings (`daily.yml`'s manual-run checkbox of the same name).
 
 **What the dashboard itself calls** (all network-free): `--dashboard`,
 `--set-watch-together-status SLUG STATUS`, `--set-watch-together-statuses-batch JSON`.
@@ -256,7 +258,9 @@ being logged — and those ratings are what everything is measured against.
   because each costs a TMDB search plus a Letterboxd page. A first run
   after a programme changes wholesale therefore leaves a tail unmatched
   until the next day or two; the cache means steady state is only the
-  handful of newly announced titles.
+  handful of newly announced titles. To skip the wait, run `daily.yml`
+  from the Actions tab with "Resolve every cinema listing" ticked
+  (`--resolve-all-cinema-listings`: the same run, uncapped).
 - **Vue blocks datacenter IPs.** myvue.com (page and API alike) answers
   every GitHub Actions request with a Cloudflare "Just a moment..." 403,
   whatever browser curl_cffi impersonates. `fetch_vue` still tries Vue

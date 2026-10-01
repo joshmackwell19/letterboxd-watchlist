@@ -214,6 +214,7 @@ CINEMA_NEGATIVE_RETRY_DAYS = 30
 
 def _resolved_cinema_matches(
     showtimes: list[dict], films: dict, previous: dict[str, dict | None], *, warn,
+    budget: int | None = CINEMA_RESOLVE_PER_RUN,
 ) -> dict[str, dict | None]:
     """Letterboxd films for the cinema listings the watchlist can't identify.
 
@@ -222,10 +223,13 @@ def _resolved_cinema_matches(
     nowhere to click through to. This resolves the rest through TMDB and
     Letterboxd and caches the answer, since unlike the watchlist match it's
     far too expensive to redo at dashboard-build time.
+
+    `budget` caps how many listings are resolved this run; None resolves
+    every one still missing (--resolve-all-cinema-listings), for when a
+    programme has changed wholesale and a few days of tail won't do.
     """
     today = datetime.now(timezone.utc).date()
     resolved: dict[str, dict | None] = {}
-    budget = CINEMA_RESOLVE_PER_RUN
 
     # Busiest film first, so on the runs where the budget binds — the first
     # couple, when nothing is cached — it's spent on the films with thirty
@@ -264,9 +268,10 @@ def _resolved_cinema_matches(
                 resolved[key] = cached
                 continue
 
-        if budget <= 0:
-            continue
-        budget -= 1
+        if budget is not None:
+            if budget <= 0:
+                continue
+            budget -= 1
         try:
             match = resolve_listing_to_letterboxd(
                 showing["title"], showing["year"], tmdb_id=showing.get("tmdb_id"),
@@ -336,7 +341,7 @@ def _custom_list_inputs(database_url: str, custom_lists, state: StateDoc) -> dic
 
 
 def run(username: str, config_path: Path, database_url: str, *, sarah_username: str | None = None,
-        progress: bool = True) -> int:
+        progress: bool = True, cinema_resolve_budget: int | None = CINEMA_RESOLVE_PER_RUN) -> int:
     # Collects the same messages already printed to stderr on a partial
     # failure (a discovery section, a per-film check, Sarah's watchlist
     # fetch) — those are all caught and carried-forward-on-failure by
@@ -637,7 +642,8 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     cinema_showtimes = drop_past_showings(cinema_showtimes)
     current_state.cinema_showtimes = cinema_showtimes
     current_state.cinema_matches = _resolved_cinema_matches(
-        cinema_showtimes, current_state.films, previous_state.cinema_matches, warn=_warn)
+        cinema_showtimes, current_state.films, previous_state.cinema_matches, warn=_warn,
+        budget=cinema_resolve_budget)
 
     # The For you tab (see for_you.py): the taste engine against today's
     # watchlist and diary. A nice-to-have on top of the core refresh, like a
@@ -909,6 +915,11 @@ def main() -> None:
                          help="Fetch every Letterboxd list config/custom_lists.yaml sources from that's "
                               "missing or over a week old (no per-run cap) into the database, then exit — "
                               "for a newly added source to show up before the next daily run")
+    parser.add_argument("--resolve-all-cinema-listings", action="store_true",
+                         help="The daily run, but with no cap (normally CINEMA_RESOLVE_PER_RUN a day) on how "
+                              "many cinema listings are resolved to Letterboxd films — for when venues or a "
+                              "programme have changed wholesale. A TMDB search plus a Letterboxd page each, "
+                              "so it can take a while")
     parser.add_argument("--check-for-new-log", action="store_true",
                          help="Check the Letterboxd RSS feed for a log entry newer than the last check "
                               "(one cheap request, no watchlist/JustWatch calls). Prints 'new_log=true' "
@@ -1314,7 +1325,8 @@ def main() -> None:
         parser.error("--username is required (or set LETTERBOXD_USERNAME in .env)")
 
     try:
-        exit_code = run(args.username, args.config, args.database_url, sarah_username=args.sarah_username)
+        exit_code = run(args.username, args.config, args.database_url, sarah_username=args.sarah_username,
+                        cinema_resolve_budget=None if args.resolve_all_cinema_listings else CINEMA_RESOLVE_PER_RUN)
     except LetterboxdFetchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         exit_code = 1

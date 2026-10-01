@@ -27,7 +27,11 @@ DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?$")
 
 
 class LetterboxdFetchError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        # The last HTTP status seen, when there was one — what tells "there's
+        # no such page" (404) apart from "Letterboxd wouldn't say" (403, 5xx).
+        self.status_code = status_code
 
 
 class LetterboxdBlockedError(LetterboxdFetchError):
@@ -44,6 +48,7 @@ def _unescape(text: str) -> str:
 def _fetch_url(session, url: str, *, max_retries: int, backoff_base_seconds: float,
                 request_timeout_seconds: float, impersonate: str):
     last_error: str | None = None
+    last_status: int | None = None
 
     for attempt in range(max_retries + 1):
         try:
@@ -51,8 +56,13 @@ def _fetch_url(session, url: str, *, max_retries: int, backoff_base_seconds: flo
             if response.status_code == 200:
                 return response
             last_error = f"HTTP {response.status_code}"
+            last_status = response.status_code
+            if last_status == 404:
+                # Not there, and asking again won't change that.
+                break
         except Exception as exc:  # curl_cffi raises its own exception types
             last_error = str(exc)
+            last_status = None
 
         if attempt < max_retries:
             time.sleep(backoff_base_seconds * (2 ** attempt))
@@ -60,7 +70,8 @@ def _fetch_url(session, url: str, *, max_retries: int, backoff_base_seconds: flo
     raise LetterboxdFetchError(
         f"Letterboxd fetch failed for {url} ({last_error}). If this started suddenly, "
         f"Letterboxd's bot detection may have changed — try updating the curl_cffi "
-        f"`impersonate` profile (e.g. to a newer chrome/safari version)."
+        f"`impersonate` profile (e.g. to a newer chrome/safari version).",
+        status_code=last_status,
     )
 
 
@@ -194,6 +205,7 @@ def get_film_details_by_tmdb_id(
     max_retries: int = 3,
     backoff_base_seconds: float = 2.0,
     request_timeout_seconds: float = 15.0,
+    raise_on_error: bool = False,
 ) -> dict | None:
     """Same rating/poster/director/starring/synopsis as get_film_details_by_slug,
     plus the resolved slug — for films discovered via TMDB correlation that
@@ -201,13 +213,19 @@ def get_film_details_by_tmdb_id(
     Letterboxd redirects /tmdb/{id}/ straight to the matching /film/{slug}/,
     so one request resolves both. Returns None if there's no Letterboxd
     match (rare) or the fetch fails, so callers can just skip that candidate.
+
+    raise_on_error is for a caller that remembers a None: it still gets None
+    for a 404 (no Letterboxd film), but any other failure raises, so a 403
+    isn't recorded as "this isn't a film".
     """
     session = session or curl_requests.Session()
     try:
         response = _fetch_url(session, f"https://letterboxd.com/tmdb/{tmdb_id}/", max_retries=max_retries,
                                backoff_base_seconds=backoff_base_seconds,
                                request_timeout_seconds=request_timeout_seconds, impersonate=impersonate)
-    except LetterboxdFetchError:
+    except LetterboxdFetchError as exc:
+        if raise_on_error and exc.status_code != 404:
+            raise
         return None
 
     slug_match = re.search(r"/film/([^/]+)/", response.url)

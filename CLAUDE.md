@@ -260,7 +260,13 @@ being logged — and those ratings are what everything is measured against.
   until the next day or two; the cache means steady state is only the
   handful of newly announced titles. To skip the wait, run `daily.yml`
   from the Actions tab with "Resolve every cinema listing" ticked
-  (`--resolve-all-cinema-listings`: the same run, uncapped).
+  (`--resolve-all-cinema-listings`: the same run, uncapped). Only a
+  definite answer is cached: a Letterboxd 404 means "no film", but a 403
+  or network failure raises (`get_film_details_by_tmdb_id(...,
+  raise_on_error=True)`) and is retried next run — and after
+  `CINEMA_RESOLVE_FAILURES_BEFORE_STOP` failures in a row a run stops
+  trying, since that's a block. Bump `MATCHER_VERSION` whenever the
+  matching rules change, so every cached "not a film" is re-checked.
 - **Vue blocks datacenter IPs.** myvue.com (page and API alike) answers
   every GitHub Actions request with a Cloudflare "Just a moment..." 403,
   whatever browser curl_cffi impersonates. `fetch_vue` still tries Vue

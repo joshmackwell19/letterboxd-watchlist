@@ -39,6 +39,8 @@ def _film(slug: str, title: str, year: int | None) -> FilmState:
     ("The Cabinet of Dr. Caligari (Live Score)", "The Cabinet of Dr. Caligari", None),
     ("Blade Runner - The Final Cut", "Blade Runner", None),
     ("Aliens - 70mm", "Aliens", None),
+    # Vue's re-release label, with no separator to go on.
+    ("Avengers: Endgame Encore", "Avengers: Endgame", None),
     ("Dune: Part Two - IMAX", "Dune: Part Two", None),
     # Stacked annotations unwind together.
     ("Alien (Theatrical Cut) (1979)", "Alien", 1979),
@@ -249,6 +251,40 @@ def test_the_daily_cap_binds_unless_lifted(monkeypatch):
     assert len(main._resolved_cinema_matches(showings, {}, {}, warn=print, budget=None)) == 5
 
 
+def test_a_failed_lookup_is_not_remembered_as_not_a_film(monkeypatch):
+    # Letterboxd 403ing the lookup says nothing about the listing — caching
+    # that as "no film" hid real films (Harry Potter, Mulholland Dr.) for a
+    # month. It's left out, to be asked again next run.
+    from watchlist_justwatch import main
+    from watchlist_justwatch.letterboxd import LetterboxdFetchError
+
+    def refused(tmdb_id, raise_on_error=False):
+        assert raise_on_error
+        raise LetterboxdFetchError("HTTP 403", status_code=403)
+
+    monkeypatch.setattr(main, "_tmdb_search_movie", lambda title, year: LA_LA_LAND_TMDB)
+    monkeypatch.setattr(main, "get_film_details_by_tmdb_id", refused)
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    warnings: list[str] = []
+    showings = [{"title": f"La La Land {'!' * i}", "year": None, "cinema": "PCC"} for i in range(8)]
+
+    out = main._resolved_cinema_matches(showings, {}, {}, warn=warnings.append, budget=None)
+
+    assert out == {}
+    # Not eight lots of retries: past a handful in a row it's a block.
+    assert len(warnings) == main.CINEMA_RESOLVE_FAILURES_BEFORE_STOP + 1
+    assert "leaving the rest" in warnings[-1]
+
+
+def test_and_and_ampersand_agree():
+    match = resolve_listing_to_letterboxd(
+        "The Hunger Games: The Ballad of Songbirds and Snakes", None,
+        search_movie=_search({"id": 695721, "title": "The Hunger Games: The Ballad of Songbirds & Snakes",
+                              "release_date": "2023-11-15"}),
+        film_details_by_tmdb_id=_details({**LA_LA_LAND_LETTERBOXD, "slug": "the-hunger-games-the-ballad"}))
+    assert match is not None
+
+
 # --- the negative cache must not outlive the rules that produced it ------
 
 def test_a_cleaner_change_invalidates_the_listings_it_failed():
@@ -270,7 +306,7 @@ def test_a_cleaner_change_invalidates_the_listings_it_failed():
     original_search = main._tmdb_search_movie
     original_details = main.get_film_details_by_tmdb_id
     main._tmdb_search_movie = search
-    main.get_film_details_by_tmdb_id = lambda tmdb_id: {
+    main.get_film_details_by_tmdb_id = lambda tmdb_id, **_: {
         "slug": "amelie", "rating": 4.2, "poster_url": "p", "director": ["Jean-Pierre Jeunet"],
         "starring": [], "synopsis": "s", "genre": [], "runtime_minutes": 122,
     }
@@ -291,3 +327,33 @@ def test_a_cleaner_change_invalidates_the_listings_it_failed():
     finally:
         main._tmdb_search_movie = original_search
         main.get_film_details_by_tmdb_id = original_details
+
+
+# --- a 404 is an answer; anything else is a failure ---------------------
+
+class _Response:
+    def __init__(self, status_code, url="https://letterboxd.com/tmdb/1/"):
+        self.status_code, self.url, self.text = status_code, url, ""
+
+
+class _Session:
+    def __init__(self, status_code):
+        self.status_code, self.calls = status_code, 0
+
+    def get(self, url, **_):
+        self.calls += 1
+        return _Response(self.status_code)
+
+
+def test_no_letterboxd_film_is_none_but_a_refusal_raises():
+    from watchlist_justwatch.letterboxd import LetterboxdFetchError, get_film_details_by_tmdb_id
+
+    missing = _Session(404)
+    assert get_film_details_by_tmdb_id(1, session=missing, raise_on_error=True, backoff_base_seconds=0) is None
+    assert missing.calls == 1, "a 404 isn't retried"
+
+    with pytest.raises(LetterboxdFetchError) as exc:
+        get_film_details_by_tmdb_id(1, session=_Session(403), raise_on_error=True, backoff_base_seconds=0)
+    assert exc.value.status_code == 403
+    # Callers that don't remember a None keep the old behaviour.
+    assert get_film_details_by_tmdb_id(1, session=_Session(403), backoff_base_seconds=0) is None

@@ -4,7 +4,16 @@ on:
   schedule:
     # ~08:00 UK time (no DST awareness in GH Actions cron; drifts an hour in BST)
     - cron: "0 7 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      # Run from the Actions tab when venues or a programme have changed
+      # wholesale: resolves every cinema listing to its Letterboxd film this
+      # run, rather than the usual capped number a day. The dashboard's
+      # Refresh button and check-for-new-log.yml dispatch without it.
+      resolve_all_cinema_listings:
+        description: "Resolve every cinema listing to a Letterboxd film (no daily cap; slower)"
+        type: boolean
+        default: false
 
 # The dashboard's "Refresh data" button and check-for-new-log.yml can both
 # trigger this on top of the daily cron — without this, two overlapping runs
@@ -47,7 +56,7 @@ jobs:
           # Signs the push notification for a film that's started streaming
           # (see notify.py); without it the run falls back to email.
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
-        run: python -m watchlist_justwatch.main
+        run: python -m watchlist_justwatch.main ${{ inputs.resolve_all_cinema_listings && '--resolve-all-cinema-listings' || '' }}
 
       # dashboard.html is no longer committed to git — Pages deploys straight
       # from this workflow's own artifact upload below, which never touched

@@ -237,6 +237,18 @@ def test_two_different_films_sharing_a_title_do_not_share_a_key():
     assert listing_match_key("Godzilla (1954)", None) != listing_match_key("Godzilla (2014)", None)
 
 
+# --- how many listings a run resolves -------------------------------------
+
+def test_the_daily_cap_binds_unless_lifted(monkeypatch):
+    from watchlist_justwatch import main
+    showings = [{"title": f"Film {i}", "year": None, "cinema": "PCC"} for i in range(5)]
+    monkeypatch.setattr(main, "_tmdb_search_movie", lambda title, year: None)
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+
+    assert len(main._resolved_cinema_matches(showings, {}, {}, warn=print, budget=2)) == 2
+    assert len(main._resolved_cinema_matches(showings, {}, {}, warn=print, budget=None)) == 5
+
+
 # --- the negative cache must not outlive the rules that produced it ------
 
 def test_a_cleaner_change_invalidates_the_listings_it_failed():

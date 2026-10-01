@@ -3,6 +3,7 @@ import re
 import unicodedata
 import time
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from functools import lru_cache
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -741,7 +742,7 @@ def _fold(text: str) -> str:
     # Accents folded, because a venue types "Amelie" where TMDB holds
     # "Amélie" — and the title-agreement check that keeps a concert film
     # from matching a real one would otherwise reject the right answer too.
-    decomposed = unicodedata.normalize("NFKD", text)
+    decomposed = unicodedata.normalize("NFKD", text.translate(_LETTERS))
     folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     # "Songbirds and Snakes" at the cinema, "Songbirds & Snakes" on TMDB.
     folded = folded.replace("&", " and ")
@@ -751,6 +752,10 @@ def _fold(text: str) -> str:
 
 
 _DASH_RE = re.compile(r"[-‐‑‒–—]")
+# Letters that aren't a base letter plus an accent, so folding accents leaves
+# them be: without these, "Żuławski" never meets the "Zulawski" a venue types.
+_LETTERS = str.maketrans({"ł": "l", "Ł": "L", "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ð": "d",
+                          "þ": "th", "ß": "ss", "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe", "ı": "i"})
 
 
 @lru_cache(maxsize=20000)
@@ -827,13 +832,30 @@ def listing_title_variants(title: str) -> tuple[tuple[str, ...], int | None]:
     return tuple(variants), year
 
 
-def _director_surnames(directors) -> frozenset[str]:
-    """"Alejandro G. Iñárritu, Someone Else" or a list of names -> the
-    folded surnames, the part of a name venues and TMDB agree on."""
+def _director_names(directors) -> tuple[tuple[str, ...], ...]:
+    """"Alejandro G. Iñárritu, Someone Else" or a list of names -> each
+    name's folded words."""
     if not directors:
-        return frozenset()
+        return ()
     names = directors if isinstance(directors, (list, tuple)) else re.split(r",|/|\s&\s|\sand\s", directors)
-    return frozenset(_fold(name).split()[-1] for name in names if _fold(name))
+    return tuple(tuple(_fold(name).split()) for name in names if _fold(name))
+
+
+def _same_person(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
+    """Whether two renderings of a name are the same person. Venues and
+    TMDB disagree on order ("Chan-wook Park", "Park Chan-wook") and now and
+    then on spelling ("Amma Assante", "Amma Asante"), so one name's surname
+    only has to turn up — near enough — somewhere in the other."""
+    for name, other in ((a, b), (b, a)):
+        surname = name[-1]
+        if any(word == surname or (len(surname) >= 5 and SequenceMatcher(None, word, surname).ratio() >= 0.85)
+               for word in other):
+            return True
+    return False
+
+
+def _directors_agree(a, b) -> bool:
+    return any(_same_person(x, y) for x in a for y in b)
 
 
 # How far ahead a listing with no year of its own still reads as a new
@@ -841,8 +863,8 @@ def _director_surnames(directors) -> frozenset[str]:
 RECENT_RELEASE_DAYS = 400
 
 
-def _corroborate(*, listing_year: int | None, listing_directors: frozenset[str],
-                 listing_runtime: int | None, film_year: int | None, film_directors: frozenset[str],
+def _corroborate(*, listing_year: int | None, listing_directors: tuple,
+                 listing_runtime: int | None, film_year: int | None, film_directors: tuple,
                  film_runtime: int | None, film_release: str | None = None,
                  today: date | None = None) -> tuple[bool, float]:
     """Whether a candidate film can be what the listing is showing, and how
@@ -853,7 +875,7 @@ def _corroborate(*, listing_year: int | None, listing_directors: frozenset[str],
     often the re-release's, not the film's."""
     support = 0.0
     if listing_directors and film_directors:
-        if not listing_directors & film_directors:
+        if not _directors_agree(listing_directors, film_directors):
             return False, 0.0
         support += 2
     if listing_year and film_year:
@@ -889,7 +911,7 @@ def _release_year(movie: dict) -> int | None:
 # Bumped whenever the matching rules above change: every cached match —
 # positive or "not a film" — made under older rules is re-checked, since a
 # fix to them would otherwise never reach the listings it was written for.
-MATCHER_VERSION = 4
+MATCHER_VERSION = 5
 
 
 def listing_match_key(title: str, year: int | None) -> str:
@@ -909,7 +931,7 @@ def showing_match_key(showing: dict) -> str:
     return listing_match_key(showing["title"], showing["year"])
 
 
-def _best_candidate(variant: str, *, strict: bool, year: int | None, directors: frozenset[str],
+def _best_candidate(variant: str, *, strict: bool, year: int | None, directors: tuple,
                     runtime: int | None, search_movies, facts, today: date) -> dict | None:
     results = search_movies(variant, year) or []
     agreeing = [m for m in results if _titles_agree(variant, (m.get("title"), m.get("original_title")))]
@@ -932,7 +954,7 @@ def _best_candidate(variant: str, *, strict: bool, year: int | None, directors: 
         film_year = known.get("year") or _release_year(movie)
         consistent, support = _corroborate(
             listing_year=year, listing_directors=directors, listing_runtime=runtime,
-            film_year=film_year, film_directors=_director_surnames(known.get("directors")),
+            film_year=film_year, film_directors=_director_names(known.get("directors")),
             film_runtime=known.get("runtime"),
             film_release=known.get("release_date") or movie.get("release_date"), today=today)
         if not consistent or (not strict and support < 1):
@@ -977,7 +999,7 @@ def resolve_listing_to_letterboxd(
     variants, title_year = listing_title_variants(title)
     # A year in the title ("The Hunger Games (2012)") beats the listing's own.
     year = title_year or year
-    directors = _director_surnames(director)
+    directors = _director_names(director)
     known_facts: dict[int, dict | None] = {}
 
     def facts(movie_id: int) -> dict | None:
@@ -990,8 +1012,8 @@ def resolve_listing_to_letterboxd(
     chosen = None
     if tmdb_id is not None:
         known = facts(tmdb_id) or {}
-        film_directors = _director_surnames(known.get("directors"))
-        if not (directors and film_directors and not directors & film_directors):
+        film_directors = _director_names(known.get("directors"))
+        if not (directors and film_directors and not _directors_agree(directors, film_directors)):
             chosen = {"id": tmdb_id, "title": known.get("title") or variants[0],
                       "year": known.get("year") or year}
     if chosen is None:
@@ -1036,7 +1058,7 @@ def match_watchlist_film(title: str, year: int | None, films: dict[str, FilmStat
     one of them agreeing."""
     variants, title_year = listing_title_variants(title)
     year = title_year or year
-    directors = _director_surnames(director)
+    directors = _director_names(director)
     by_title: dict[str, list[tuple[str, FilmState]]] = {}
     for slug, film in films.items():
         by_title.setdefault(_normalize_title(film.title), []).append((slug, film))
@@ -1046,7 +1068,7 @@ def match_watchlist_film(title: str, year: int | None, films: dict[str, FilmStat
         for slug, film in by_title.get(_normalize_title(variant), []):
             consistent, support = _corroborate(
                 listing_year=year, listing_directors=directors, listing_runtime=duration_minutes,
-                film_year=film.year, film_directors=_director_surnames(film.director),
+                film_year=film.year, film_directors=_director_names(film.director),
                 film_runtime=film.runtime_minutes)
             if not consistent or (index > 0 and support < 1):
                 continue

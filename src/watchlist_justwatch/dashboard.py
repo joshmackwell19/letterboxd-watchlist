@@ -1346,7 +1346,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .quick-country:hover, .sarah-pill:hover, .pill-toggle:hover { border-color: var(--accent); color: var(--accent); }
   .quick-country.active, .sarah-pill.active, .pill-toggle.active { background: var(--accent); border-color: var(--accent); color: #06201d; }
   .quick-country .count { opacity: 0.65; margin-left: 4px; }
-  #cinemaVenueToggles, #cinemaDateFilter {
+  #cinemaVenueToggles, #cinemaDateFilter, #cinemaTimeFilter {
     display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center;
   }
   .cinema-day-heading {
@@ -2313,6 +2313,7 @@ _TEMPLATE = """<!DOCTYPE html>
       </div>
       <span id="cinemaVenueToggles"></span>
       <span id="cinemaDateFilter"></span>
+      <span id="cinemaTimeFilter"></span>
     </div>
     <div class="controls" data-view="sarah" id="controls-sarah">
       <div class="search-wrap">
@@ -6121,11 +6122,58 @@ function cinemaSearchHaystack(row) {
   return [row.title, row.director, ...cinemas].filter(Boolean).join(' ').toLowerCase();
 }
 
+// Time of day, by start time. Several can be on at once ("Afternoon" and
+// "Evening"); none on means any time. Showtimes are London wall-clock
+// strings, so the hour is read straight off them.
+const CINEMA_TIME_BLOCKS = [
+  { value: 'morning', label: 'Morning', from: 0, to: 12 },
+  { value: 'afternoon', label: 'Afternoon', from: 12, to: 17 },
+  { value: 'evening', label: 'Evening', from: 17, to: 21 },
+  { value: 'late', label: 'Late', from: 21, to: 24 },
+];
+const cinemaTimeBlocks = new Set();
+
+function cinemaInTimeBlocks(showtime) {
+  if (!cinemaTimeBlocks.size) return true;
+  const hour = Number(showtime.slice(11, 13));
+  return CINEMA_TIME_BLOCKS.some(b => cinemaTimeBlocks.has(b.value) && hour >= b.from && hour < b.to);
+}
+
+function cinemaTimeFilterLabel() {
+  return CINEMA_TIME_BLOCKS.filter(b => cinemaTimeBlocks.has(b.value)).map(b => b.label).join(' + ');
+}
+
+function setCinemaTimeBlocks(values) {
+  cinemaTimeBlocks.clear();
+  values.forEach(v => cinemaTimeBlocks.add(v));
+  renderCinemaTimeFilter();
+  renderCinemas();
+}
+
+function renderCinemaTimeFilter() {
+  const container = document.getElementById('cinemaTimeFilter');
+  container.innerHTML = '';
+  CINEMA_TIME_BLOCKS.forEach(block => {
+    const pill = document.createElement('span');
+    pill.className = 'pill-toggle' + (cinemaTimeBlocks.has(block.value) ? ' active' : '');
+    pill.textContent = block.label;
+    pill.title = String(block.from).padStart(2, '0') + ':00–' +
+      (block.to === 24 ? 'close' : String(block.to).padStart(2, '0') + ':00');
+    pill.addEventListener('click', () => {
+      if (cinemaTimeBlocks.has(block.value)) cinemaTimeBlocks.delete(block.value);
+      else cinemaTimeBlocks.add(block.value);
+      renderCinemaTimeFilter();
+      renderCinemas();
+    });
+    container.appendChild(pill);
+  });
+}
+
 function renderActiveCinemaFilters() {
   const container = document.getElementById('activeCinemaFilters');
   container.innerHTML = '';
   const q = document.getElementById('cinemaSearch').value.trim();
-  if (!q && cinemaDateMode === 'all' && !cinemaVenueFilter) return;
+  if (!q && cinemaDateMode === 'all' && !cinemaVenueFilter && !cinemaTimeBlocks.size) return;
 
   if (q) {
     const chip = document.createElement('span');
@@ -6145,6 +6193,13 @@ function renderActiveCinemaFilters() {
     chip.addEventListener('click', () => setCinemaDateMode('all'));
     container.appendChild(chip);
   }
+  if (cinemaTimeBlocks.size) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = cinemaTimeFilterLabel() + ' ✕';
+    chip.addEventListener('click', () => setCinemaTimeBlocks([]));
+    container.appendChild(chip);
+  }
   if (cinemaVenueFilter) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
@@ -6160,6 +6215,8 @@ function renderActiveCinemaFilters() {
     document.getElementById('cinemaSearchClear').classList.add('hidden');
     cinemaVenueFilter = '';
     renderCinemaVenueFilter();
+    cinemaTimeBlocks.clear();
+    renderCinemaTimeFilter();
     setCinemaDateMode('all');
   });
   container.appendChild(clearAll);
@@ -6191,6 +6248,7 @@ function renderCinemas() {
       const day = s.showtime.slice(0, 10);
       return day >= range[0] && day <= range[1];
     });
+    if (cinemaTimeBlocks.size) showtimes = showtimes.filter(s => cinemaInTimeBlocks(s.showtime));
     if (showtimes.length) visible.push({ ...row, showtimes });
   });
   visible.sort((a, b) => a.showtimes[0].showtime < b.showtimes[0].showtime ? -1
@@ -6236,6 +6294,7 @@ wireSearchClear('cinemaSearch', 'cinemaSearchClear', renderCinemas);
 
 renderCinemaVenueFilter();
 renderCinemaDateFilter();
+renderCinemaTimeFilter();
 renderCinemas();
 
 // ---------- Services cards ----------

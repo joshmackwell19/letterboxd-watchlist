@@ -2421,7 +2421,7 @@ _TEMPLATE = """<!DOCTYPE html>
        upcoming showings and cleaning titles counts as changing it. Its
        film matching (cinemas.attach_clusterflick_ids) is used for every
        venue, so the credit covers them all. -->
-  <p class="cinema-credit">BFI Southbank, BFI IMAX and The Gate screening data, and film
+  <p class="cinema-credit">BFI Southbank, BFI IMAX, The Gate and Curzon Soho screening data, and film
     matching for every cinema, from
     <a href="https://clusterflick.com" target="_blank" rel="noopener">Clusterflick</a>
     (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>),

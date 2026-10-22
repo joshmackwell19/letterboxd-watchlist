@@ -1647,9 +1647,14 @@ _TEMPLATE = """<!DOCTYPE html>
     border-radius: 999px; padding: 6px 14px; font-size: 12px; cursor: pointer;
   }
   .film-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  /* min-width: 0 and overflow-wrap: a card's narrowest layout must never
+     exceed the screen. One listing whose text had a glued-together URL in
+     it set the whole single-column grid to 683px on a 390px iPhone, and
+     Safari zoomed every page out to fit. */
   .film-card {
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px; padding: 14px;
     box-shadow: var(--shadow); display: flex; gap: 12px; align-items: flex-start;
+    min-width: 0; overflow-wrap: anywhere;
   }
   .film-card-end { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .dismiss-btn {

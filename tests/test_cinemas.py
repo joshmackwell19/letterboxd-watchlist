@@ -409,3 +409,22 @@ def test_parse_riverside_converts_timestamp_to_iso():
     # 18:10 UTC is 19:10 in London in September — not whatever the runner's
     # own clock says (UTC on Actions, which put every showing an hour early).
     assert s["showtime"] == "2026-09-11T19:10:00"
+
+
+@pytest.mark.parametrize("search_text,expected", [
+    ("blurb...Director:Anthony MarasCast:Andrew Scott", "Anthony Maras"),
+    ("Director: Greta GerwigCompany: A24", "Greta Gerwig"),
+    ("Director:Joel Coen, Ethan Coen", "Joel Coen, Ethan Coen"),
+    # Names with a capital mid-word aren't two fields glued together.
+    ("Director:Martin McDonagh", "Martin McDonagh"),
+    ("Director:Cecil B. DeMille", "Cecil B. DeMille"),
+    ("Director:Ava DuVernay. The film follows", "Ava DuVernay"),
+    # An event with no "Cast:" after it: the name, not the whole blurb.
+    ("Director:Mark Craig (attending)\xa0The Overlander & Romanian Memories:The Overlander and "
+     "Romanian Memories come together... Roehampton.https://www.imdb.com/name/nm3147562/", "Mark Craig"),
+    ("Director:" + "a very long run of text with no end " * 5, None),
+    ("no director here", None),
+])
+def test_riverside_director_is_only_the_name(search_text, expected):
+    from watchlist_justwatch.cinemas import _riverside_director
+    assert _riverside_director(search_text) == expected

@@ -600,6 +600,26 @@ RIVERSIDE_FILTER_TOKEN = "ZWhHVEdwSDNuekJLUWI1OXVDQ0Fvdz09"
 RIVERSIDE_URL = f"https://riversidestudios.co.uk/ajax/filter_stream/{RIVERSIDE_FILTER_TOKEN}/"
 _RIVERSIDE_DURATION_RE = re.compile(r"(\d+)")
 _RIVERSIDE_DIRECTOR_RE = re.compile(r"Director:(.*?)(?:Cast:|Company:|$)")
+# Riverside's search text runs its fields together ("Director:Anthony
+# MarasCast:..."), and an event with no "Cast:" after it ran the
+# "director" on through the whole blurb. A name ends at the next field, a
+# non-breaking space, a bracket ("Mark Craig (attending)") or the end of a
+# sentence; anything still too long to be a list of names isn't. (Not at a
+# lowercase letter before a capital: that's McDonagh and DeMille too.)
+_RIVERSIDE_DIRECTOR_END_RE = re.compile(r"\xa0|\s\(|\s{2,}|[a-z]\.\s")
+MAX_DIRECTOR_CHARS = 80
+
+
+def _riverside_director(search_text: str) -> str | None:
+    match = _RIVERSIDE_DIRECTOR_RE.search(search_text)
+    if not match:
+        return None
+    director = match.group(1)
+    end = _RIVERSIDE_DIRECTOR_END_RE.search(director)
+    if end:
+        director = director[:end.start() + (1 if director[end.start()].isalpha() else 0)]
+    director = director.strip(" ,;:")
+    return director if director and len(director) <= MAX_DIRECTOR_CHARS else None
 
 
 def fetch_riverside() -> list[dict]:
@@ -620,10 +640,7 @@ def _parse_riverside(data: list[dict]) -> list[dict]:
         if duration_match:
             duration_minutes = int(duration_match.group(1))
 
-        director = None
-        director_match = _RIVERSIDE_DIRECTOR_RE.search(item.get("search_text") or "")
-        if director_match:
-            director = director_match.group(1).strip() or None
+        director = _riverside_director(item.get("search_text") or "")
 
         synopsis = html.unescape(item["text"]) if item.get("text") else None
         poster_url = item.get("image_url")
@@ -839,7 +856,7 @@ def _director_names(directors) -> tuple[tuple[str, ...], ...]:
     name's folded words."""
     if not directors:
         return ()
-    names = directors if isinstance(directors, (list, tuple)) else re.split(r",|/|\s&\s|\sand\s", directors)
+    names = directors if isinstance(directors, (list, tuple)) else re.split(r",|/|\||\s&\s|\sand\s", directors)
     return tuple(tuple(_fold(name).split()) for name in names if _fold(name))
 
 

@@ -20,6 +20,9 @@ CINEMA_BFI_SOUTHBANK = "BFI Southbank"
 CINEMA_BFI_IMAX = "BFI IMAX"
 CINEMA_GATE = "The Gate Notting Hill"
 CINEMA_CURZON_SOHO = "Curzon Soho"
+CINEMA_CURZON_MAYFAIR = "Curzon Mayfair"
+CINEMA_CURZON_BLOOMSBURY = "Curzon Bloomsbury"
+CINEMA_CURZON_VICTORIA = "Curzon Victoria"
 CINEMA_VUE_FULHAM = "Vue Fulham Broadway"
 CINEMA_VUE_SHEPHERDS_BUSH = "Vue Shepherd's Bush"
 CINEMA_VUE_WEST_END = "Vue West End"
@@ -28,7 +31,8 @@ CINEMA_RIVERSIDE = "Riverside Studios"
 # Every venue, in the order the dashboard's venue filter lists them.
 CINEMA_VENUES = (
     CINEMA_PRINCE_CHARLES, CINEMA_BARBICAN, CINEMA_BFI_SOUTHBANK, CINEMA_BFI_IMAX, CINEMA_GATE,
-    CINEMA_CURZON_SOHO, CINEMA_VUE_FULHAM, CINEMA_VUE_SHEPHERDS_BUSH, CINEMA_VUE_WEST_END, CINEMA_VUE_PICCADILLY,
+    CINEMA_CURZON_SOHO, CINEMA_CURZON_MAYFAIR, CINEMA_CURZON_BLOOMSBURY, CINEMA_CURZON_VICTORIA,
+    CINEMA_VUE_FULHAM, CINEMA_VUE_SHEPHERDS_BUSH, CINEMA_VUE_WEST_END, CINEMA_VUE_PICCADILLY,
     CINEMA_RIVERSIDE,
 )
 
@@ -521,7 +525,7 @@ def _utc_iso_to_london(value: str | None) -> str | None:
     return parsed.astimezone(LONDON).replace(tzinfo=None).isoformat()
 
 
-# ---------- BFI Southbank, BFI IMAX, The Gate, Curzon Soho (via Clusterflick) ----------
+# ---------- BFI Southbank, BFI IMAX, The Gate, Curzons (via Clusterflick) ----------
 # whatson.bfi.org.uk, where both venues' programmes live, answers every
 # datacenter IP with the same Cloudflare challenge as Vue, and CinemaGuide
 # doesn't carry the IMAX at all. Clusterflick (clusterflick.com), an
@@ -543,6 +547,9 @@ CLUSTERFLICK_VENUES = {
     CINEMA_BFI_IMAX: "bfi.org.uk-imax",
     CINEMA_GATE: "picturehouses.com-the-gate",
     CINEMA_CURZON_SOHO: "curzon.com-soho",
+    CINEMA_CURZON_MAYFAIR: "curzon.com-mayfair",
+    CINEMA_CURZON_BLOOMSBURY: "curzon.com-bloomsbury",
+    CINEMA_CURZON_VICTORIA: "curzon.com-victoria",
 }
 # Talks, workshops and quizzes share the programme but aren't screenings.
 _CLUSTERFLICK_SKIPPED_CATEGORIES = {"talk", "workshop", "quiz"}

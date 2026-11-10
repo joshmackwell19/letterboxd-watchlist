@@ -2,6 +2,7 @@ import dataclasses
 import json
 from collections import defaultdict
 from datetime import date, datetime
+from pathlib import Path
 
 from .brands import (
     JUNK_BRANDS,
@@ -10,12 +11,13 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import CINEMA_VENUES, drop_past_showings, match_watchlist_film, showing_match_key
+from .cinemas import CINEMA_VENUES, LONDON, drop_past_showings, match_watchlist_film, showing_match_key
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
 from .languages import LANGUAGE_NAMES, is_subtitled, language_name
 from .notify import VAPID_PUBLIC_KEY
+from .ranking import ranking_year
 from .state import StateDoc
 
 FREE_MONETIZATION_TYPES = {"ADS", "FREE"}
@@ -1098,12 +1100,32 @@ def build_dashboard_data(
         "cinema_venues": list(CINEMA_VENUES),
         "settings": _settings_data(config, global_subscriptions),
         "search_taxonomy": _search_taxonomy(state, config, global_subscriptions, revisitable),
+        # The Rank tab only needs to know which year it's ranking — the
+        # roster and the order come live from the Worker (see rank_view.js),
+        # since they change between builds.
+        "ranking": {"year": ranking_year(datetime.now(LONDON).date())},
     }
 
 
+# The Rank tab's code lives in files of its own beside this one — the game's
+# logic (rank_engine.js) is tested under node, which it couldn't be from
+# inside the template string — and is inlined here, so the page is still one
+# self-contained file.
+_INLINED_FILES = {
+    "__RANK_CSS__": "rank_view.css",
+    "__RANK_ENGINE__": "rank_engine.js",
+    "__RANK_VIEW__": "rank_view.js",
+}
+
+
 def render_dashboard_html(data: dict) -> str:
+    html = _TEMPLATE
+    for placeholder, filename in _INLINED_FILES.items():
+        html = html.replace(placeholder, (Path(__file__).parent / filename).read_text(encoding="utf-8"))
+    # The data goes in last: it's the one part that could itself contain a
+    # placeholder's text.
     payload = json.dumps(data, ensure_ascii=False)
-    return _TEMPLATE.replace("__DATA__", payload)
+    return html.replace("__DATA__", payload)
 
 
 _TEMPLATE = """<!DOCTYPE html>
@@ -1883,6 +1905,7 @@ _TEMPLATE = """<!DOCTYPE html>
     .bottom-nav-btn.active { color: var(--accent); }
     .bottom-nav-btn svg { width: 21px; height: 21px; stroke: currentColor; }
   }
+__RANK_CSS__
   /* ---------- For you: the taste engine's tab ---------- */
   .fy-layout { display: block; }
   .fy-main, .fy-side { min-width: 0; }
@@ -2162,6 +2185,12 @@ _TEMPLATE = """<!DOCTYPE html>
         </svg>
         Cinemas
       </button>
+      <button class="tab-btn" id="tab-rank">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 20V10M12 20V4M19 20v-7"></path>
+        </svg>
+        Rank
+      </button>
       <button class="tab-btn" id="tab-review">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 11l3 3L22 4"></path>
@@ -2333,6 +2362,7 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="surprise-bar mobile-only-bar">
     <button class="surprise-btn" id="surpriseMeBtnMobile">🎲 Surprise me</button>
     <button class="surprise-btn lists-btn" id="listsBtnMobile">Your lists →</button>
+    <button class="surprise-btn lists-btn" id="rankBtnMobile">Rank your year →</button>
   </div>
   <div id="homeSections">
     <div class="film-cards">
@@ -2435,6 +2465,10 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <section class="view" id="view-review">
   <div id="reviewScreen"></div>
+</section>
+
+<section class="view" id="view-rank">
+  <div id="rankScreen"></div>
 </section>
 
 <section class="view" id="view-sarah">
@@ -2716,6 +2750,8 @@ document.getElementById('tab-settings').addEventListener('click', () => { render
 document.getElementById('nav-home').addEventListener('click', () => showView('home'));
 document.getElementById('nav-foryou').addEventListener('click', () => showView('foryou'));
 document.getElementById('listsBtnMobile').addEventListener('click', () => showView('lists'));
+document.getElementById('tab-rank').addEventListener('click', () => showView('rank'));
+document.getElementById('rankBtnMobile').addEventListener('click', () => showView('rank'));
 document.getElementById('nav-services').addEventListener('click', () => showView('services'));
 document.getElementById('nav-films').addEventListener('click', () => showView('films'));
 document.getElementById('nav-cinemas').addEventListener('click', () => showView('cinemas'));
@@ -2957,8 +2993,11 @@ document.getElementById('notificationToggle').addEventListener('click', togglePu
 // the URL it opens with (handled after the last view is restored, below);
 // with it already open, the service worker hands the URL over instead.
 function openFilmFromUrl(href) {
-  const slug = new URL(href, location.href).searchParams.get('film');
+  const params = new URL(href, location.href).searchParams;
+  const slug = params.get('film');
   if (slug) openFilmDetail(slug);
+  // A "place it" notification (a new log, or a rewatch) links to ?view=rank.
+  else if (params.get('view') === 'rank') showView('rank');
 }
 if (pushSupported) {
   navigator.serviceWorker.addEventListener('message', event => {
@@ -3203,6 +3242,9 @@ function showView(name, options) {
                    viewScrollPositions['view-' + name]);
   document.getElementById('tab-settings').classList.toggle('active', owner === 'settings');
   document.getElementById('tab-review').classList.toggle('active', owner === 'review');
+  document.getElementById('tab-rank').classList.toggle('active', owner === 'rank');
+  // Rank loads its list from the Worker when it's opened, not at startup.
+  if (name === 'rank') rankOpen();
   document.getElementById('tab-sarah').classList.toggle('active', owner === 'sarah');
 
   // The fixed bar's second row holds each tab's own search/sort/filter
@@ -6997,6 +7039,8 @@ function updateNewSinceLastViewed() {
 
 updateNewSinceLastViewed();
 
+__RANK_ENGINE__
+__RANK_VIEW__
 // ---------- Come back where you left off ----------
 //
 // The browser's own scroll restoration measures the page before this script
@@ -7023,7 +7067,7 @@ if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
 // Opened from a notification: the film's page, over whatever was restored.
 // The parameter is dropped straight away so a later reload doesn't reopen it.
-if (new URLSearchParams(location.search).has('film')) {
+if (new URLSearchParams(location.search).has('film') || new URLSearchParams(location.search).has('view')) {
   openFilmFromUrl(location.href);
   history.replaceState(history.state, '', location.pathname + location.hash);
 }

@@ -540,6 +540,22 @@ function validPushKey(value, maxLength) {
   return typeof value === "string" && value.length > 0 && value.length <= maxLength && BASE64URL_RE.test(value);
 }
 
+// ---------- The Rank tab ----------
+const RANK_STATES_KEPT = 40;
+const RANK_MAX_FILMS = 2000;
+const RANK_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,149}$/;
+
+function validRankYear(year) {
+  return Number.isInteger(year) && year >= 2000 && year <= 2100 ? year : null;
+}
+
+// An array of distinct Letterboxd film slugs, and nothing else.
+function validPlacedOrder(placed) {
+  if (!Array.isArray(placed) || placed.length > RANK_MAX_FILMS) return false;
+  if (!placed.every((slug) => typeof slug === "string" && RANK_SLUG_RE.test(slug))) return false;
+  return new Set(placed).size === placed.length;
+}
+
 async function neonQuery(env, query, params) {
   const host = new URL(env.DATABASE_URL).hostname;
   const response = await fetch(`https://${host}/sql`, {
@@ -1134,6 +1150,70 @@ export default {
         return jsonResponse({ ok: false, error: `couldn't remove: ${err.message}` }, 502, cors);
       }
       return jsonResponse({ ok: true }, 200, cors);
+    }
+
+    // ---------- The Rank tab (the year's ranked list) ----------
+    //
+    // Read and written here directly, like the push subscriptions: the game
+    // saves every few taps, and a workflow run per save would take a minute
+    // each and print the list into a public log. The tables are db.py's
+    // (ranking_roster, filled by the daily run; ranking_state, one row per
+    // save with the newest id winning).
+    if (url.pathname === "/rank-state") {
+      const payload = await request.json().catch(() => null);
+      const year = validRankYear(payload && payload.year);
+      if (!year) return jsonResponse({ ok: false, error: "missing year" }, 400, cors);
+      try {
+        const [roster, state] = await Promise.all([
+          neonQuery(env,
+            "SELECT slug, title, film_year, poster_url, stars, watched_date, is_rewatch, queue_first " +
+            "FROM ranking_roster WHERE year = $1::int ORDER BY slug", [year]),
+          neonQuery(env,
+            "SELECT id, placed FROM ranking_state WHERE year = $1::int ORDER BY id DESC LIMIT 1", [year]),
+        ]);
+        const latest = (state.rows || [])[0];
+        return jsonResponse({
+          ok: true,
+          year,
+          roster: roster.rows || [],
+          // id 0 is "nothing saved yet" — what a first save names as its base.
+          state_id: latest ? Number(latest.id) : 0,
+          placed: latest && Array.isArray(latest.placed) ? latest.placed : [],
+        }, 200, cors);
+      } catch (err) {
+        return jsonResponse({ ok: false, error: `couldn't load the ranking: ${err.message}` }, 502, cors);
+      }
+    }
+
+    if (url.pathname === "/rank-save") {
+      // {year, base_id, placed}: the whole placed order, best first, and the
+      // id of the state the page started from. The insert only happens if
+      // that's still the newest — a save from a second device, or the daily
+      // run reopening a rewatched film, lands in between otherwise, and the
+      // page reloads rather than writing over it.
+      const payload = await request.json().catch(() => null);
+      const year = validRankYear(payload && payload.year);
+      const baseId = payload && Number.isInteger(payload.base_id) && payload.base_id >= 0 ? payload.base_id : null;
+      if (!year || baseId === null || !validPlacedOrder(payload.placed)) {
+        return jsonResponse({ ok: false, error: "not a ranking" }, 400, cors);
+      }
+      try {
+        const saved = await neonQuery(env,
+          "INSERT INTO ranking_state (year, placed) SELECT $1::int, $2::jsonb " +
+          "WHERE COALESCE((SELECT max(id) FROM ranking_state WHERE year = $1::int), 0) = $3::bigint " +
+          "RETURNING id",
+          [year, JSON.stringify(payload.placed), baseId]);
+        const row = (saved.rows || [])[0];
+        if (!row) return jsonResponse({ ok: false, conflict: true, error: "the ranking changed elsewhere" }, 409, cors);
+        // Old saves are only an undo history; keep the last RANK_STATES_KEPT.
+        await neonQuery(env,
+          "DELETE FROM ranking_state WHERE year = $1::int AND id < (SELECT id FROM ranking_state " +
+          "WHERE year = $1::int ORDER BY id DESC OFFSET $2::int LIMIT 1)",
+          [year, RANK_STATES_KEPT - 1]).catch(() => null);
+        return jsonResponse({ ok: true, state_id: Number(row.id) }, 200, cors);
+      } catch (err) {
+        return jsonResponse({ ok: false, error: `couldn't save: ${err.message}` }, 502, cors);
+      }
     }
 
     // Anything else is a mistake, and must not fall through to the daily

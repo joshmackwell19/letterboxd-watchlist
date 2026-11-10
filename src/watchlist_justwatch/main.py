@@ -7,6 +7,7 @@ import traceback
 from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -45,6 +46,7 @@ from .config import (
 from .custom_lists import all_source_paths, load_custom_lists, total_groups
 from .dashboard import build_dashboard_data, compute_offer_snapshot, render_dashboard_html
 from .db import (
+    apply_ranking_sync, load_ranking_placed, load_ranking_roster, mark_ranking_notified, ranking_films_to_notify,
     connect, custom_list_source_fetch_times, custom_list_source_totals, delete_push_subscriptions, get_meta_value,
     load_custom_list_memberships, load_notification_log, load_push_subscriptions, log_notifications, load_state, load_taste_inputs, load_watch_together, save_custom_list_source,
     save_state, seed_pending_watch_together, set_watch_together_status, set_watch_together_statuses_batch,
@@ -80,6 +82,7 @@ from .letterboxd import (
 )
 from .models import FilmState, OfferRecord, WatchlistFilm
 from .notify import push_is_configured, send_if_configured, send_push
+from .ranking import place_it_notifications, plan_roster_sync, ranking_csv, ranking_year
 from .report import render_report
 from .similar import (
     discover_because_watched,
@@ -167,6 +170,9 @@ def _fetch_original_language(title: str, year: int | None) -> str | None:
     nowhere to put an id."""
     return _fetch_tmdb_facts(title, year)[1]
 
+
+# The ranking's year turns over on London's calendar, not the runner's UTC.
+_LONDON = ZoneInfo("Europe/London")
 
 def _diary_entry_needs_details(entry: dict | None) -> bool:
     """Whether a diary entry is still missing its film-page details.
@@ -785,6 +791,11 @@ def run(username: str, config_path: Path, database_url: str, *, sarah_username: 
     if newly_streaming_films:
         _notify_newly_streaming(database_url, newly_streaming_films, run_warnings, _warn)
 
+    # The year's ranked list (the Rank tab): today's diary may hold a new
+    # watch or a rewatch, which joins the roster and gets a "place it" push.
+    ranking_year_now = _sync_ranking_roster(database_url, current_state.diary, _warn)
+    _notify_films_to_place(database_url, ranking_year_now, _warn)
+
     watch_together = load_watch_together(database_url)
     custom_lists = load_custom_lists(DEFAULT_CUSTOM_LISTS_PATH)
     _refresh_custom_list_sources(database_url, custom_lists, _warn, limit=CUSTOM_LIST_SOURCES_PER_RUN)
@@ -830,6 +841,53 @@ def _notify_newly_streaming(database_url: str, films: list[tuple], run_warnings:
         {"slug": film.slug, **_log_fields(film_notification(film, offers)), "channel": channel}
         for film, offers in films
     ])
+
+
+def _sync_ranking_roster(database_url: str, diary: dict[str, dict], warn=None) -> int:
+    """Brings the year's ranking roster up to date with the diary (see
+    ranking.py) and returns the year. Database only — no network — so the
+    dashboard-only regen runs it too. Never raises: the Rank tab being a day
+    behind isn't worth failing a run that has everything else right."""
+    year = ranking_year(datetime.now(_LONDON).date())
+    try:
+        plan = plan_roster_sync(diary, load_ranking_roster(database_url, year), year)
+        apply_ranking_sync(database_url, year, plan)
+        if plan:
+            print(f"Ranking {year}: {len(plan.inserts)} added, {len(plan.reopened)} reopened by a rewatch.",
+                  file=sys.stderr)
+    except Exception as exc:
+        message = f"ranking roster sync failed ({type(exc).__name__}: {exc})"
+        if warn:
+            warn(message)
+        else:
+            print(f"warning: {message}", file=sys.stderr)
+    return year
+
+
+def _notify_films_to_place(database_url: str, year: int, warn) -> None:
+    """A push for each film that's joined the ranking since the last one
+    went out — a new log or a rewatch — opening the Rank tab. Push only: a
+    film to place isn't worth an email. A film stays un-notified (and is
+    tried again next run) until a push for it actually reaches a device."""
+    try:
+        films = ranking_films_to_notify(database_url, year)
+        if not films or not push_is_configured():
+            return
+        subscriptions = load_push_subscriptions(database_url)
+        if not subscriptions:
+            return
+        sent, gone, errors = send_push(subscriptions, place_it_notifications(films, year, DASHBOARD_URL))
+        delete_push_subscriptions(database_url, gone)
+        for error in errors[:5]:
+            warn(f"push notification failed ({error})")
+        if sent:
+            mark_ranking_notified(database_url, year, [film["slug"] for film in films])
+            log_notifications(database_url, [
+                {"slug": None, **_log_fields(note), "channel": "push"}
+                for note in place_it_notifications(films, year, DASHBOARD_URL, limit=len(films))
+            ])
+    except Exception as exc:
+        warn(f"ranking notification failed ({type(exc).__name__}: {exc})")
 
 
 def _log_fields(notification: dict) -> dict:
@@ -919,6 +977,9 @@ def main() -> None:
                          help="Send the weekly roundup email (films added to/leaving your streaming "
                               "services this week, main services grouped with posters, everything else "
                               "condensed), using already-fetched state (no network calls), then exit")
+    parser.add_argument("--export-ranking", nargs="?", type=int, const=0, default=None, metavar="YEAR",
+                        help="Print the year's ranked list as a CSV for Letterboxd's list importer "
+                             "(default: the year being ranked now). Database only.")
     parser.add_argument("--test-push", action="store_true",
                          help="Send a test push notification to every device that turned them on "
                               "(needs VAPID_PRIVATE_KEY), then exit")
@@ -1170,6 +1231,9 @@ def main() -> None:
         revisitable = load_revisitable_services(DEFAULT_REVISITABLE_PATH)
         dismissed = load_dismissed_recommendations(DEFAULT_DISMISSED_PATH)
         state = load_state(args.database_url)
+        # No push from here (this path has no VAPID key): a film it adds
+        # stays un-notified until the next daily run.
+        _sync_ranking_roster(args.database_url, state.diary)
         watch_together = load_watch_together(args.database_url)
         data = build_dashboard_data(state, favorites, config, global_subscriptions, revisitable, dismissed,
                                     watch_together=watch_together,
@@ -1205,6 +1269,15 @@ def main() -> None:
         sent = send_if_configured(f"Letterboxd Watchlist — {total_films} films not on a service you have, by country",
                                    text, html_body=html_body)
         print(text if sent else "Email not sent (RESEND_API_KEY/NOTIFY_EMAIL not configured):\n\n" + text)
+        sys.exit(0)
+
+    if args.export_ranking is not None:
+        year = args.export_ranking or ranking_year(datetime.now(_LONDON).date())
+        roster = load_ranking_roster(args.database_url, year)
+        if not roster:
+            print(f"No films on the {year} ranking yet.", file=sys.stderr)
+            sys.exit(1)
+        sys.stdout.write(ranking_csv(list(roster.values()), load_ranking_placed(args.database_url, year)))
         sys.exit(0)
 
     if args.test_push:

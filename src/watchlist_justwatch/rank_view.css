@@ -1,0 +1,69 @@
+  /* ---------- Rank: the year's ranked list, built by a tap game ----------
+     (inlined from rank_view.css; the logic is rank_engine.js + rank_view.js) */
+  .rank-wrap { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .rank-head { display: flex; flex-direction: column; gap: 8px; }
+  .rank-head h2 { margin: 0; font-size: 19px; font-weight: 700; }
+  .rank-progress { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  .rank-track { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+  .rank-track i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .rank-card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .rank-q { font-size: 16.5px; font-weight: 700; }
+  .rank-sub { font-size: 12.5px; color: var(--text-muted); margin-top: 3px; }
+  .rank-duel { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .rank-choice {
+    position: relative; display: flex; flex-direction: column; gap: 8px; padding: 0; min-width: 0;
+    background: none; border: none; color: var(--text); text-align: left; cursor: pointer; font: inherit;
+  }
+  .rank-choice .rank-poster {
+    width: 100%; aspect-ratio: 2 / 3; border-radius: 10px; overflow: hidden; background: var(--surface-2);
+    border: 2px solid var(--hairline-strong); display: flex; align-items: flex-end;
+  }
+  .rank-choice .rank-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .rank-choice .rank-poster span { padding: 10px; font-size: 14px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+  .rank-choice:hover .rank-poster, .rank-choice:focus-visible .rank-poster { border-color: var(--accent); }
+  .rank-choice:focus-visible { outline: none; }
+  .rank-choice.picked .rank-poster { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .rank-choice .rank-title { font-size: 13.5px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+  .rank-choice .rank-meta { font-size: 11.5px; color: var(--text-muted); }
+  .rank-choice .rank-stars, .rank-row .rank-stars { color: #f2c14e; white-space: nowrap; }
+  .rank-badge {
+    position: absolute; top: 8px; left: 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; background: var(--accent); color: var(--bg); padding: 2px 8px; border-radius: 999px;
+  }
+  .rank-badge.at { background: rgba(14, 16, 19, 0.82); color: var(--text); letter-spacing: 0; font-variant-numeric: tabular-nums; }
+  .rank-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .rank-btn {
+    background: none; border: 1px solid var(--hairline-strong); color: var(--text-muted); padding: 7px 14px;
+    border-radius: 999px; cursor: pointer; font-size: 12.5px; font-weight: 600; font-family: inherit;
+  }
+  .rank-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  .rank-btn:disabled { opacity: 0.4; cursor: default; }
+  .rank-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  .rank-note { font-size: 12.5px; color: var(--text-muted); }
+  .rank-note.just { color: var(--accent); }
+  .rank-note.warn { color: #f0a35e; }
+  .rank-save { margin-left: auto; font-size: 11.5px; color: var(--text-faint); }
+  .rank-list-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .rank-list-head h3 { margin: 0; font-size: 15px; font-weight: 700; }
+  .rank-list { display: flex; flex-direction: column; }
+  .rank-row {
+    display: grid; grid-template-columns: 34px 30px minmax(0, 1fr) auto; gap: 10px; align-items: center;
+    padding: 7px 4px; border-bottom: 1px solid var(--hairline); cursor: pointer; font-size: 13.5px;
+  }
+  .rank-row .rank-pos { text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .rank-row.waiting .rank-pos { color: var(--text-faint); font-weight: 400; }
+  .rank-row.waiting .rank-name { color: var(--text-muted); }
+  .rank-row img, .rank-row .rank-thumb { width: 30px; height: 45px; border-radius: 4px; object-fit: cover; background: var(--surface-2); display: block; }
+  .rank-row .rank-name { min-width: 0; overflow-wrap: anywhere; }
+  .rank-row .rank-name small { color: var(--text-faint); font-size: 12px; }
+  .rank-row .rank-name em { font-style: normal; font-size: 11px; color: var(--text-faint); margin-left: 6px; }
+  .rank-row .rank-stars { font-size: 12px; }
+  .rank-row-actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 4px 12px 48px; border-bottom: 1px solid var(--hairline); }
+  .rank-row-actions a { text-decoration: none; }
+  /* On a wide screen two full-width posters would fill the window. */
+  @media (min-width: 701px) { .rank-duel { max-width: 440px; } }
+  @media (max-width: 700px) {
+    .surprise-bar.mobile-only-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+    .mobile-only-bar .lists-btn { margin-left: 0; }
+    .rank-card { padding: 14px; }
+  }

@@ -207,6 +207,36 @@ CREATE TABLE IF NOT EXISTS taste_meta (
     key TEXT PRIMARY KEY,
     value JSONB NOT NULL
 );
+-- The Rank tab (see ranking.py). The roster is which films belong to a
+-- year's ranked list, frozen there because `diary` only keeps each film's
+-- latest watch; the state is the order they've been placed in so far. Both
+-- are written incrementally, never by save_state's full replace: the roster
+-- by apply_ranking_sync, the state by the Worker's /rank-save (and by
+-- apply_ranking_sync when a rewatch takes a film back out to be re-placed).
+CREATE TABLE IF NOT EXISTS ranking_roster (
+    year INTEGER NOT NULL,
+    slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    film_year INTEGER,
+    poster_url TEXT,
+    stars DOUBLE PRECISION,
+    watched_date TEXT,
+    is_rewatch BOOLEAN NOT NULL DEFAULT FALSE,
+    queue_first BOOLEAN NOT NULL DEFAULT FALSE,
+    notified BOOLEAN NOT NULL DEFAULT TRUE,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (year, slug)
+);
+-- One row per save, newest id wins; the Worker keeps the last few dozen per
+-- year, so a bad save (the page is public — see TODO.md) can be put back by
+-- deleting the rows after the last good one.
+CREATE TABLE IF NOT EXISTS ranking_state (
+    id BIGSERIAL PRIMARY KEY,
+    year INTEGER NOT NULL,
+    placed JSONB NOT NULL,
+    saved_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ranking_state_year_id ON ranking_state (year, id DESC);
 """
 
 
@@ -511,6 +541,81 @@ def load_notification_log(database_url: str, limit: int = 50) -> list[dict]:
         ).fetchall()
     return [{"sent_at": sent_at.isoformat(), "slug": slug, "title": title, "body": body, "channel": channel}
             for sent_at, slug, title, body, channel in rows]
+
+
+_ROSTER_COLUMNS = ("slug", "title", "film_year", "poster_url", "stars", "watched_date", "is_rewatch",
+                   "queue_first", "notified")
+_ROSTER_UPDATABLE = {"title", "film_year", "poster_url", "stars", "watched_date", "is_rewatch", "queue_first",
+                     "notified"}
+
+
+def load_ranking_roster(database_url: str, year: int) -> dict[str, dict]:
+    """slug -> row, for one year's ranked list (see ranking.py)."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"SELECT {', '.join(_ROSTER_COLUMNS)} FROM ranking_roster WHERE year = %s", (year,)).fetchall()
+    return {row[0]: dict(zip(_ROSTER_COLUMNS, row)) for row in rows}
+
+
+def load_ranking_placed(database_url: str, year: int) -> list[str]:
+    """The placed order as last saved (best first); [] before the first save."""
+    with psycopg.connect(database_url) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT placed FROM ranking_state WHERE year = %s ORDER BY id DESC LIMIT 1", (year,)).fetchone()
+    return list(row[0]) if row else []
+
+
+def apply_ranking_sync(database_url: str, year: int, plan) -> None:
+    """Writes a ranking.RosterPlan in one transaction. A reopened film is
+    taken out of the placed order by saving a new state row without it — the
+    page then sees a newer state than the one it started from and reloads
+    rather than saving over it (see the Worker's /rank-save)."""
+    if not plan:
+        return
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            if plan.inserts:
+                cur.executemany(
+                    f"INSERT INTO ranking_roster (year, {', '.join(_ROSTER_COLUMNS)}) "
+                    f"VALUES (%s, {', '.join(['%s'] * len(_ROSTER_COLUMNS))}) ON CONFLICT (year, slug) DO NOTHING",
+                    [(year, *(row[c] for c in _ROSTER_COLUMNS)) for row in plan.inserts],
+                )
+            for update in plan.updates:
+                columns = [c for c in update if c in _ROSTER_UPDATABLE]
+                if not columns:
+                    continue
+                cur.execute(
+                    f"UPDATE ranking_roster SET {', '.join(c + ' = %s' for c in columns)} "
+                    "WHERE year = %s AND slug = %s",
+                    (*(update[c] for c in columns), year, update["slug"]),
+                )
+            if plan.reopened:
+                row = cur.execute(
+                    "SELECT placed FROM ranking_state WHERE year = %s ORDER BY id DESC LIMIT 1 FOR UPDATE",
+                    (year,)).fetchone()
+                reopened = set(plan.reopened)
+                if row and reopened & set(row[0]):
+                    cur.execute("INSERT INTO ranking_state (year, placed) VALUES (%s, %s)",
+                                (year, Jsonb([slug for slug in row[0] if slug not in reopened])))
+
+
+def ranking_films_to_notify(database_url: str, year: int) -> list[dict]:
+    """Films added to (or reopened on) the roster that no notification has
+    gone out for yet, oldest watch first."""
+    with psycopg.connect(database_url) as conn:
+        rows = conn.execute(
+            "SELECT slug, title, is_rewatch FROM ranking_roster WHERE year = %s AND NOT notified "
+            "ORDER BY watched_date, slug", (year,)).fetchall()
+    return [{"slug": slug, "title": title, "is_rewatch": is_rewatch} for slug, title, is_rewatch in rows]
+
+
+def mark_ranking_notified(database_url: str, year: int, slugs: list[str]) -> None:
+    if not slugs:
+        return
+    with psycopg.connect(database_url) as conn:
+        conn.execute("UPDATE ranking_roster SET notified = TRUE WHERE year = %s AND slug = ANY(%s)", (year, slugs))
 
 
 def seed_pending_watch_together(database_url: str, slugs: set[str], added_at: str) -> None:

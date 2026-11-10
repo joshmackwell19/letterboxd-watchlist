@@ -72,6 +72,8 @@ stores none of it.
 | `notify.py` | Web Push (`send_push`, via `pywebpush`; `VAPID_PUBLIC_KEY` is committed, the private half is `VAPID_PRIVATE_KEY` in `.env`/GitHub secrets) and the Resend API wrapper. `run()` pushes to every subscribed device and falls back to email only while none is subscribed or every push failed. `sw.js` at the repo root is the page's service worker — push and notification-click only, no fetch handler, so nothing is cached |
 | `analysis.py` | `--rank-services`/`--recommend-favorites` standalone analyses |
 | `custom_lists.py` | User-defined watchlist subsets from `config/custom_lists.yaml` (rules on director/starring/year, Letterboxd lists as sources, manual include/exclude) — each becomes a section on the Lists tab, recomputed against the current watchlist at build time |
+| `ranking.py` | The Rank tab's server side, all pure: `ranking_year` (January still ranks the year before), `plan_roster_sync` (which films the year's list holds — a new log is added and flagged `queue_first`, a rewatch later in the same year is *reopened*, nothing is ever removed), `full_order`/`ranking_csv` (the export), and the "place it" push payloads |
+| `rank_engine.js` / `rank_view.js` / `rank_view.css` | The Rank tab's page side, in files of their own so node can test the engine; `render_dashboard_html` inlines all three (`_INLINED_FILES`). The engine builds the ranked list by **binary insertion**: `placed` is the order so far, and each waiting film is placed by "which ranks higher?" answers that halve its range (~6 taps a film, ~1,900 for a 311-film year). Stars only pick where a film's search *starts* (`starWindow`); a film that comes out best or worst of its stars is asked against the film just outside, so it can cross tiers by winning. `queue` offers new/rewatched films first, then highest-rated first, so the top of the list is exact early. `fullOrder` slots every waiting film at the bottom of its stars, so the export is always the whole year. The view keeps only unsaved work in `localStorage` (the order while a save is pending, the half-finished search) |
 | `languages.py` | ISO 639-1 code → name, and the subtitled-film heuristic |
 | `brands.py`, `countries.py`, `availability.py` | Small lookup/normalization helpers |
 
@@ -93,6 +95,8 @@ stores none of it.
 | `rater_screen_hits` | **Incrementally** — `--scrape-raters` as it screens, `--record-screen-hits` for pages screened before that | Which members each screening page recruited — what lets `--taste-eval` test a screened film without them. `source`: `screening`, `first-found` (exact, from discovery timestamps: each page's new members share one), `refetch` (seen again on a later fetch of page 1), `inferred` (a rater whose recorded pages fall short of their `screen_hits` is assumed to have been on every page they rated at its score — erring toward leaving them out) |
 | `push_subscriptions` | **Incrementally** — the Worker's `/push-subscribe`/`/push-unsubscribe`, directly over Neon's HTTP endpoint; `run()` deletes ones the push service says are gone | One row per device that tapped Settings → Notifications → Turn on. The only table the Worker writes itself: a subscription passed as a workflow input would be printed in the (public) run log. Capped at 20 rows |
 | `notification_log` | **Incrementally** — appended by `run()`'s `_notify_newly_streaming` (and `--test-push`) | One row per film notified: title/body as its own notification reads (even on a day several went out as one summary), and `channel` — `push`, `email` or `not sent`. The dashboard ships the newest 50 as `notification_log`, listed under Settings → Notifications → History; a row with a slug opens that film. `run()` notifies before building the dashboard so the day's own appear in it |
+| `ranking_roster` | **Incrementally** — `_sync_ranking_roster` (in `run()` and in `--dashboard`), via `ranking.plan_roster_sync` | Which films a year's ranked list holds, with the stars/poster/date the game shows. Exists because `diary` keeps one row per film with only its latest watch: a January rewatch would move a film out of last year. Seeded on the first sync from every diary entry dated in the year; `queue_first`/`notified` mark later additions and rewatches |
+| `ranking_state` | **Incrementally** — the Worker's `/rank-save` (and `apply_ranking_sync`, when a rewatch takes a film back out) | The placed order, one row per save (`placed`: slugs, best first); the newest id is the truth and a save must name the id it started from, so two devices can't overwrite each other. The Worker keeps the last 40 per year — delete the rows after a good one to roll back |
 | `cinema_film_matches` | `run()`, full replace | The Letterboxd film each listing is showing — every listing, watchlist films included, since the dashboard trusts this over its own title match (`_watchlist_slug_for_showing`): it's what knows a 2026 remake isn't the 1995 film on the list, and that "25th Anniversary: Donnie Darko" is. Each match records its `matcher_version`; one made under older rules is re-checked, reusing the stored Letterboxd details whenever TMDB lands on the same film, so a rules change costs TMDB requests only. Keyed by `cinemas.showing_match_key` (`tmdb:<id>` where the source supplied one, else cleaned title + year), so the same film at three venues resolves once. Unlike the watchlist match this costs a TMDB search plus a Letterboxd page, so it's cached rather than recomputed at build time; a NULL slug is a listing with no Letterboxd film, remembered so it isn't retried daily |
 
 ## GitHub Actions workflows (`.github/workflows/`)
@@ -131,6 +135,8 @@ Cloudflare's side and aren't in `wrangler.toml`.
 | `POST /film-lookup` | Quick search, step 2: for the picked film, Letterboxd details via `/tmdb/<id>/` and JustWatch offers for every country the page sends. Also what the film detail page calls when an untracked TMDB poster is tapped |
 | `POST /film-relations` | The film detail page's live layer: TMDB's similar + recommendations for one film, plus the filmographies of up to 2 credited directors and 3 billed cast. Eight subrequests worst case (1 credits, then the rest in parallel), against Cloudflare's limit of 50 |
 | `POST /push-subscribe` / `POST /push-unsubscribe` | Store or remove a device's push subscription in `push_subscriptions`, over Neon's HTTP `/sql` endpoint (one parameterised statement, no driver). Endpoints must be a known push service (`PUSH_SERVICE_HOSTS`, mirrored in `notify.py`) |
+| `POST /rank-state` | The Rank tab's load: the year's `ranking_roster` plus the newest `ranking_state` (two statements over Neon's HTTP endpoint) |
+| `POST /rank-save` | Stores `{year, base_id, placed}` as a new `ranking_state` row, only if `base_id` is still the newest (else 409 and the page reloads); then trims old rows. `placed` must be distinct film slugs |
 | `POST /person` | The person page: one director/actor's details and whole filmography, split into directing and acting credits. Takes `person_id` where the page has one (the relations payload carries them) or `name` where it doesn't. One subrequest by id — `append_to_response=movie_credits` folds the credits into the details call — two by name |
 
 Anything else 404s. The base route used to be a catch-all, so a typo or a
@@ -226,6 +232,10 @@ being logged — and those ratings are what everything is measured against.
 `--rank-services`, `--recommend-favorites`, `--similar-to TITLE`,
 `--email-audit`, `--email-audit-by-country`, `--weekly-digest`.
 
+`--export-ranking [YEAR]` prints the year's ranked list as a CSV for
+Letterboxd's list importer (`Title,Year,LetterboxdURI`, file order = list
+order) — the same file the Rank tab's Export button builds.
+
 `--test-push` sends a test notification to every subscribed device (needs `VAPID_PRIVATE_KEY`).
 
 **Automation-only**: `--check-for-new-log` (the hourly workflow),
@@ -250,6 +260,13 @@ being logged — and those ratings are what everything is measured against.
   (both fixed by reading less per run, not by removing the underlying
   pattern) — current usage is small (~14MB DB, batched writes since the
   Review tab's debounce), but worth watching if usage patterns change.
+- **The ranking is as public as the page.** Anyone who reads the page
+  source has the Worker's shared secret and can read or overwrite the
+  ranked list. Accepted for now (see `TODO.md`); the saved-state history
+  is what makes a bad write recoverable.
+- **A new watch reaches the Rank tab within about an hour**, not
+  instantly: the hourly RSS check starts the daily run, which adds it to
+  the roster and sends the "place it" push.
 - **GitHub Actions cron has no DST awareness** — `daily.yml`/
   `weekly-digest.yml`'s schedules drift an hour during UK summer time,
   accepted and documented in those files rather than worked around.
@@ -329,6 +346,11 @@ logic most likely to silently regress.
 The taste engine's SQL has its own tests (`tests/test_taste_db.py`),
 skipped unless `TASTE_TEST_DATABASE_URL` points at a **local** throwaway
 Postgres — they empty the taste tables, so they refuse any other host.
+
+The Rank tab's engine has `worker/test/rank-engine.test.mjs` (it plays whole
+years out against a hidden true order and checks the result is exact), its
+endpoints `worker/test/rank.test.mjs`, and the roster rules
+`tests/test_ranking.py`.
 
 On the Worker side, `/film-relations` and `/person` are covered against a
 stubbed TMDB — including their subrequest counts, which are the thing that

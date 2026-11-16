@@ -11,7 +11,7 @@ from .brands import (
     group_offers_by_brand_and_country,
     is_major_brand,
 )
-from .cinemas import CINEMA_VENUES, LONDON, drop_past_showings, match_watchlist_film, showing_match_key
+from .cinemas import CINEMA_FAVOURITES, CINEMA_VENUES, LONDON, drop_past_showings, match_watchlist_film, showing_match_key
 from .config import CountryConfig, is_have_anywhere, service_matches
 from .countries import ALL_JUSTWATCH_COUNTRIES, country_name
 from .custom_lists import CustomList, matches as custom_list_matches
@@ -1098,6 +1098,7 @@ def build_dashboard_data(
                                  dismissed_recommendations, set(state.diary)),
         "cinemas": _cinema_listings(state),
         "cinema_venues": list(CINEMA_VENUES),
+        "cinema_favourites": list(CINEMA_FAVOURITES),
         "settings": _settings_data(config, global_subscriptions),
         "search_taxonomy": _search_taxonomy(state, config, global_subscriptions, revisitable),
         # The Rank tab only needs to know which year it's ranking — the
@@ -2456,7 +2457,7 @@ __RANK_CSS__
        upcoming showings and cleaning titles counts as changing it. Its
        film matching (cinemas.attach_clusterflick_ids) is used for every
        venue, so the credit covers them all. -->
-  <p class="cinema-credit">BFI, The Gate and Curzon screening data, and film
+  <p class="cinema-credit">BFI, The Gate, Curzon and Ciné Lumière screening data, and film
     matching for every cinema, from
     <a href="https://clusterflick.com" target="_blank" rel="noopener">Clusterflick</a>
     (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>),
@@ -6000,24 +6001,56 @@ document.getElementById('filmsGrid').addEventListener('click', onBadgeDelegateCl
 // ---------- Cinemas ----------
 
 const CINEMA_VENUES = DATA.cinema_venues;
+const CINEMA_FAVOURITES = new Set(DATA.cinema_favourites || []);
 // Single-select, same as Services/Country's quick-jump chips — one click
 // on a venue shows only that venue (not "toggle this one off"), '' means
-// no filter.
+// no filter, and CINEMA_FAVOURITES_FILTER the favourite venues together.
+// Favourites is a toggle (a second click turns it off) and the one choice
+// remembered on this device, so the tab opens on it once it's switched on.
+const CINEMA_FAVOURITES_FILTER = '__favourites__';
+const CINEMA_FAVOURITES_KEY = 'cinemaFavouritesOn';
 let cinemaVenueFilter = '';
+try {
+  if (CINEMA_FAVOURITES.size && localStorage.getItem(CINEMA_FAVOURITES_KEY) === '1') cinemaVenueFilter = CINEMA_FAVOURITES_FILTER;
+} catch (e) {}
+
+function setCinemaVenueFilter(value) {
+  cinemaVenueFilter = value;
+  try {
+    // Only an explicit Favourites toggle (or All) changes what's remembered:
+    // picking one venue for a moment shouldn't forget the preference.
+    if (value === CINEMA_FAVOURITES_FILTER) localStorage.setItem(CINEMA_FAVOURITES_KEY, '1');
+    else if (value === '') localStorage.removeItem(CINEMA_FAVOURITES_KEY);
+  } catch (e) {}
+  renderCinemaVenueFilter();
+  renderCinemas();
+}
+
+function cinemaVenueMatches(venue) {
+  if (!cinemaVenueFilter) return true;
+  if (cinemaVenueFilter === CINEMA_FAVOURITES_FILTER) return CINEMA_FAVOURITES.has(venue);
+  return venue === cinemaVenueFilter;
+}
+
+function cinemaVenueFilterLabel() {
+  return cinemaVenueFilter === CINEMA_FAVOURITES_FILTER ? '★ Favourites' : cinemaVenueFilter;
+}
 // 'all', one of CINEMA_DATE_OPTIONS' ranges, or 'day' for the one date
 // picked from the day menu (cinemaDay).
 let cinemaDateMode = 'all';
 let cinemaDay = '';
 
 function renderCinemaVenueFilter() {
+  const filmCount = matches => DATA.cinemas.filter(r => r.showtimes.some(s => matches(s.cinema))).length;
   const entries = CINEMA_VENUES.map(venue => ({
-    value: venue, label: venue,
-    count: DATA.cinemas.filter(r => r.showtimes.some(s => s.cinema === venue)).length,
+    value: venue, label: (CINEMA_FAVOURITES.has(venue) ? '★ ' : '') + venue,
+    count: filmCount(v => v === venue),
   }));
+  if (CINEMA_FAVOURITES.size) entries.unshift({
+    value: CINEMA_FAVOURITES_FILTER, label: '★ Favourites', count: filmCount(v => CINEMA_FAVOURITES.has(v)),
+  });
   renderQuickJumpChips('cinemaVenueToggles', entries, cinemaVenueFilter, value => {
-    cinemaVenueFilter = value;
-    renderCinemaVenueFilter();
-    renderCinemas();
+    setCinemaVenueFilter(value === CINEMA_FAVOURITES_FILTER && cinemaVenueFilter === value ? '' : value);
   });
 }
 
@@ -6250,8 +6283,8 @@ function renderActiveCinemaFilters() {
   if (cinemaVenueFilter) {
     const chip = document.createElement('span');
     chip.className = 'filter-chip';
-    chip.textContent = cinemaVenueFilter + ' ✕';
-    chip.addEventListener('click', () => { cinemaVenueFilter = ''; renderCinemaVenueFilter(); renderCinemas(); });
+    chip.textContent = cinemaVenueFilterLabel() + ' ✕';
+    chip.addEventListener('click', () => setCinemaVenueFilter(''));
     container.appendChild(chip);
   }
   const clearAll = document.createElement('span');
@@ -6261,6 +6294,7 @@ function renderActiveCinemaFilters() {
     document.getElementById('cinemaSearch').value = '';
     document.getElementById('cinemaSearchClear').classList.add('hidden');
     cinemaVenueFilter = '';
+    try { localStorage.removeItem(CINEMA_FAVOURITES_KEY); } catch (e) {}
     renderCinemaVenueFilter();
     cinemaTimeBlocks.clear();
     renderCinemaTimeFilter();
@@ -6290,7 +6324,7 @@ function renderCinemas() {
   DATA.cinemas.forEach(row => {
     if (q && !cinemaSearchHaystack(row).includes(q)) return;
     let showtimes = row.showtimes;
-    if (cinemaVenueFilter) showtimes = showtimes.filter(s => s.cinema === cinemaVenueFilter);
+    if (cinemaVenueFilter) showtimes = showtimes.filter(s => cinemaVenueMatches(s.cinema));
     if (range) showtimes = showtimes.filter(s => {
       const day = s.showtime.slice(0, 10);
       return day >= range[0] && day <= range[1];

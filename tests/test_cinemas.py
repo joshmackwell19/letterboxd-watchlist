@@ -428,3 +428,15 @@ def test_parse_riverside_converts_timestamp_to_iso():
 def test_riverside_director_is_only_the_name(search_text, expected):
     from watchlist_justwatch.cinemas import _riverside_director
     assert _riverside_director(search_text) == expected
+
+
+def test_favourite_cinemas_are_listed_venues():
+    from watchlist_justwatch.cinemas import CINEMA_FAVOURITES, CINEMA_VENUES
+    assert CINEMA_FAVOURITES
+    assert set(CINEMA_FAVOURITES) <= set(CINEMA_VENUES)
+
+
+def test_every_clusterflick_venue_is_listed():
+    from watchlist_justwatch.cinemas import CINEMA_CINE_LUMIERE, CINEMA_VENUES, CLUSTERFLICK_VENUES
+    assert CINEMA_CINE_LUMIERE in CLUSTERFLICK_VENUES
+    assert set(CLUSTERFLICK_VENUES) <= set(CINEMA_VENUES)
